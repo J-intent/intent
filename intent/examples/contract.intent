@@ -1,0 +1,13 @@
+def add(x: Int, y: Int) -> Int
+    requires x > 0
+    ensures result > x
+{
+    return x + y;
+}
+
+def main() {
+    let result = add(5, 3);
+    print("Result:");
+    print(result);
+    return 0;
+}
