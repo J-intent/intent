@@ -1,0 +1,4 @@
+// 示例: hello.intent文件
+def main() {
+    print("Hello, Intent!");
+    return 0;}
