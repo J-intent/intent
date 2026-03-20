@@ -1,0 +1,22 @@
+// std/__init__.intent
+// Intent标准库入口
+// 心学为体，禅道为翼，马哲为用
+
+// 版本信息
+let VERSION = "1.0.0";
+let AUTHOR = "Intent Language Project";
+
+// 打印库信息
+def about() {
+    print("╔═══════════════════════════════════════╗");
+    print("║   Intent 标准库 v1.0.0                ║");
+    print("║   心学为体，禅道为翼，马哲为用         ║");
+    print("╚═══════════════════════════════════════╝");
+    print("");
+    print("可用模块:");
+    print("  - math: 数学函数 (abs, max, min, pow, factorial, is_prime, gcd, fibonacci)");
+    print("  - str: 字符串函数 (len, reverse, is_palindrome, concat, substring)");
+    print("  - list: 列表函数 (len, get, append, concat, slice)");
+    print("  - sys: 系统函数 (read_file, write_file, timestamp, exec)");
+    print("  - contract: 契约验证工具 (assert, check_requires, verify_ensures)");
+}

@@ -1,0 +1,10 @@
+// 测试 export 导入功能
+import test_export;
+
+def main() {
+    print("=== Export导入测试 ===");
+    let result = test_export.multiply(4, 7);
+    print("4 * 7 = ");
+    print(result);
+    return 0;
+}

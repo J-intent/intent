@@ -1,0 +1,14 @@
+// test_import.intent
+// 测试模块导入 - 简化版本
+import math;
+
+def main() {
+    print("=== 模块系统测试 ===");
+    let x = 5;
+    let y = 3;
+    
+    // 使用 math.add 调用
+    let result = math.add(x, y);
+    print(x, " + ", y, " = ", result);
+    return 0;
+}

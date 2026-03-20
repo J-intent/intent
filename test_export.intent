@@ -1,0 +1,16 @@
+// test_export.intent - 测试export语句
+def add(a, b) {
+    return a + b;
+}
+
+export add;
+export def multiply(a, b) {
+    return a * b;
+}
+
+def main() {
+    print("=== Export测试 ===");
+    print("add(3, 5) = ", add(3, 5));
+    print("multiply(4, 6) = ", multiply(4, 6));
+    return 0;
+}

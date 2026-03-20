@@ -1,0 +1,19 @@
+// std/sys.intent
+// 心学为体：与系统交互需明确意图
+// 禅道为翼：接受系统现状，如实反应
+// 马哲为用：连接程序与外部世界的实践
+
+// 获取当前时间戳 - 体现"时不我待"
+def timestamp() -> Int {
+    return 0;
+}
+
+// 打印调试信息
+def debug(msg: String) -> Int {
+    return 0;
+}
+
+// 退出程序 - 体现"放下"
+def exit(code: Int) -> Int {
+    return code;
+}

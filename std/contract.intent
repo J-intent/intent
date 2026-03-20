@@ -1,0 +1,23 @@
+// std/contract.intent
+// 心学为体：契约是"事上练"与"持志"的体现
+// 禅道为翼：验证时心无杂念
+// 马哲为用：提供检验真理的实践工具
+
+// 断言函数 - 体现"持志如心痛"
+def assert(condition: Bool, message: String) -> Bool {
+    if (condition == False) {
+        print("[断言失败] ", message);
+        return False;
+    }
+    return True;
+}
+
+// 前置条件检查
+def check_requires(condition: Bool, func_name: String) -> Bool {
+    return condition;
+}
+
+// 后置条件验证
+def verify_ensures(condition: Bool, func_name: String) -> Bool {
+    return condition;
+}
