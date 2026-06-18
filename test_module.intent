@@ -1,0 +1,25 @@
+// test_module.intent
+// 测试完整的模块系统功能
+import math;
+
+def main() {
+    print("=== Intent模块系统测试 ===");
+    
+    let x = 10;
+    let y = 5;
+    
+    // 测试加法
+    let sum = math.add(x, y);
+    print("10 + 5 = ", sum);
+    
+    // 测试乘法
+    let product = math.multiply(x, y);
+    print("10 * 5 = ", product);
+    
+    // 测试平方
+    let squared = math.square(x);
+    print("10 ^ 2 = ", squared);
+    
+    print("=== 测试完成 ===");
+    return 0;
+}

@@ -1,0 +1,6 @@
+// 示例: hello.intent文件
+def main() {
+ print("Hello, Intent!");
+ print("心学为体，禅道为翼，马哲为用");
+ return 0;
+}

@@ -1,0 +1,5 @@
+// std/math.intent
+// 简单数学模块
+def add(a, b) { return a + b; }
+def multiply(a, b) { return a * b; }
+def square(x) { return x * x; }

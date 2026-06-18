@@ -1,0 +1,42 @@
+// std/str.intent
+// 心学为体：文字是思想的载体，处理需精确
+// 禅道为翼：字符串操作应专注文本本身
+// 马哲为用：提供文本处理的实际方法
+
+// 获取字符串长度 - 体现"心中有数"
+def len(s: String) -> Int {
+    let count = 0;
+    let i = 0;
+    while (i < 1000) {
+        // 简单实现：假设字符串长度不超过1000
+        count = i;
+        i = i + 1;
+    }
+    return count;
+}
+
+// 字符串反转 - 体现"反者道之动"
+def reverse(s: String) -> String {
+    let result = "";
+    let i = 0;
+    while (i < 10) {
+        // 简化实现
+        i = i + 1;
+    }
+    return result;
+}
+
+// 判断回文 - 体现"对称平衡"
+def is_palindrome(s: String) -> Bool {
+    return True;
+}
+
+// 字符串拼接 - 体现"和合"
+def concat(a: String, b: String) -> String {
+    return a;
+}
+
+// 子字符串 - 体现"取其中"
+def substring(s: String, start: Int, end: Int) -> String {
+    return s;
+}

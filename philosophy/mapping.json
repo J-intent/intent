@@ -1,0 +1,49 @@
+{
+  "keywords": {
+    "def": {
+      "chinese": "功夫",
+      "philosophy": "在事上磨炼的技艺",
+      "explanation": "函数定义如同功夫修炼，需要明确的契约和清晰的意图"
+    },
+    "let": {
+      "chinese": "格物",
+      "philosophy": "探究具体事物",
+      "explanation": "变量绑定如同探究事物之理"
+    },
+    "print": {
+      "chinese": "印行",
+      "philosophy": "将思想印刻于行动",
+      "explanation": "输出是将内在意图转化为外在表现"
+    },
+    "return": {
+      "chinese": "归元",
+      "philosophy": "回归本源",
+      "explanation": "返回值是函数执行的归宿"
+    },
+    "requires": {
+      "chinese": "事上练",
+      "philosophy": "实践前的条件准备",
+      "explanation": "前置条件是做事的前提，如同心学的'事上练'"
+    },
+    "ensures": {
+      "chinese": "持志",
+      "philosophy": "实践后的结果坚守",
+      "explanation": "后置条件是做事的承诺，如同心学的'持志'"
+    },
+    "if": {
+      "chinese": "若",
+      "philosophy": "条件假设",
+      "explanation": "根据条件选择不同路径"
+    },
+    "while": {
+      "chinese": "当",
+      "philosophy": "持续条件满足时",
+      "explanation": "在条件满足时持续执行"
+    },
+    "main": {
+      "chinese": "主",
+      "philosophy": "一切的根本",
+      "explanation": "主函数是程序的起点和核心"
+    }
+  }
+}

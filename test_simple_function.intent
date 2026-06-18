@@ -1,0 +1,10 @@
+// test_simple_function.intent
+// 测试简单函数
+def add(a, b) { return a + b; }
+
+def main() {
+    print("=== 函数测试 ===");
+    let result = add(3, 5);
+    print("3 + 5 = ", result);
+    return 0;
+}

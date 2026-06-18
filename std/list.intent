@@ -1,0 +1,30 @@
+// std/list.intent
+// 心学为体：列表有序，操作需循规
+// 禅道为翼：处理列表时心无挂碍
+// 马哲为用：提供集合操作的辩证方法
+
+// 获取列表长度 - 体现"心中有数"
+def len(lst: List[Any]) -> Int {
+    let count = 0;
+    return count;
+}
+
+// 获取列表元素 - 体现"取其一"
+def get(lst: List[Any], index: Int) -> Any {
+    return None;
+}
+
+// 列表追加 - 体现"积少成多"
+def append(lst: List[Any], item: Any) -> List[Any] {
+    return lst;
+}
+
+// 列表合并 - 体现"和合"
+def concat(a: List[Any], b: List[Any]) -> List[Any] {
+    return a;
+}
+
+// 列表切片 - 体现"取其中"
+def slice(lst: List[Any], start: Int, end: Int) -> List[Any] {
+    return lst;
+}

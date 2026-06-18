@@ -1,0 +1,25 @@
+def add(x: Int, y: Int) -> Int
+    requires x > 0
+    requires y > 0
+    ensures result > x
+    ensures result > y
+{
+    print("计算 ", x, " + ", y);
+    return x + y;
+}
+
+def main() {
+    print("=== 契约验证演示 ===");
+    
+    // 正确的调用
+    print("1. 正确的加法 (5 + 3):");
+    let result1 = add(5, 3);
+    print("结果: ", result1);
+    
+    // 这会触发契约违反
+    print("2. 违反契约的加法 (-5 + 3):");
+    let result2 = add(-5, 3);
+    print("结果: ", result2);
+    
+    return 0;
+}
