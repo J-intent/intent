@@ -194,7 +194,7 @@ class Lexer:
         'def', 'func', 'let', 'var', 'const', 'return', 'if', 'else', 'elif',
         'for', 'while', 'break', 'continue', 'match', 'requires', 'ensures',
         'invariant', 'pure', 'effect', 'import', 'from', 'as', 
-        'None', 'True', 'False',
+        'None', 'True', 'False', 'true', 'false', 'null',
         'and', 'or', 'not', 'in', 'is'
     }
     
@@ -653,6 +653,11 @@ class Parser:
                 self.advance()
                 continue
             
+            # 跳过孤立的 } (可能是错误恢复后的残留，或裸块结束)
+            if self.match(TokenType.SYMBOL, '}'):
+                self.advance()
+                continue
+            
             try:
                 # 解析函数定义
                 if self.match(TokenType.KEYWORD, 'def'):
@@ -765,6 +770,12 @@ class Parser:
         
         # 检查是否遇到函数体结束符 - 关键修复
         if self.match(TokenType.SYMBOL, '}'):
+            return None
+        
+        # 裸块作用域（Intent 不支持独立 {} 块）
+        if self.match(TokenType.SYMBOL, '{'):
+            self.error(self.current_token, 'Intent 不支持裸块作用域 "{...}"，变量作用域由函数和 if/else 自然界定')
+            self.advance()  # 跳过 {
             return None
         
         # 空语句
@@ -1118,15 +1129,15 @@ class Parser:
             self.advance()
             return Literal(value=token.value, literal_type='string', line=token.line, column=token.column)
         
-        elif self.match(TokenType.KEYWORD, 'True'):
+        elif self.match(TokenType.KEYWORD, 'True') or self.match(TokenType.KEYWORD, 'true'):
             self.advance()
             return Literal(value=True, literal_type='bool', line=token.line, column=token.column)
         
-        elif self.match(TokenType.KEYWORD, 'False'):
+        elif self.match(TokenType.KEYWORD, 'False') or self.match(TokenType.KEYWORD, 'false'):
             self.advance()
             return Literal(value=False, literal_type='bool', line=token.line, column=token.column)
         
-        elif self.match(TokenType.KEYWORD, 'None'):
+        elif self.match(TokenType.KEYWORD, 'None') or self.match(TokenType.KEYWORD, 'null'):
             self.advance()
             return Literal(value=None, literal_type='none', line=token.line, column=token.column)
         
