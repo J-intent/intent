@@ -194,9 +194,12 @@ class Lexer:
         'def', 'func', 'let', 'var', 'const', 'return', 'if', 'else', 'elif',
         'for', 'while', 'break', 'continue', 'match', 'requires', 'ensures',
         'invariant', 'pure', 'effect', 'import', 'from', 'as', 
-        'Int', 'Float', 'String', 'Bool', 'List', 'Dict', 'None', 'True', 'False',
+        'None', 'True', 'False',
         'and', 'or', 'not', 'in', 'is'
     }
+    
+    # 内置类型名 — 不是关键字，只是预定义的类型标识符
+    BUILTIN_TYPES = {'Int', 'Float', 'String', 'Bool', 'List', 'Dict'}
     
     SYMBOLS = {
         '(', ')', '{', '}', '[', ']', ',', ':', ';', '=', '.', '->', '=>',
@@ -2524,6 +2527,15 @@ class Interpreter:
     
     def _binary_op(self, left: RuntimeValue, op: str, right: RuntimeValue) -> RuntimeValue:
         """执行二元运算"""
+        # 字符串拼接
+        if op == '+' and isinstance(left, StringValue) and isinstance(right, StringValue):
+            return StringValue(left.value + right.value)
+        # 字符串重复
+        if op == '*' and isinstance(left, StringValue) and isinstance(right, IntValue):
+            return StringValue(left.value * int(right.value))
+        if op == '*' and isinstance(left, IntValue) and isinstance(right, StringValue):
+            return StringValue(int(left.value) * right.value)
+        
         # 算术运算
         if op in ('+', '-', '*', '/', '//', '%', '**'):
             if isinstance(left, (IntValue, FloatValue)) and isinstance(right, (IntValue, FloatValue)):
@@ -2579,16 +2591,19 @@ class Interpreter:
                     result = left_val >= right_val
                 
                 return BoolValue(bool(result))
+            
+            # 字符串比较
+            if isinstance(left, StringValue) and isinstance(right, StringValue):
+                if op == '==':
+                    return BoolValue(left.value == right.value)
+                elif op == '!=':
+                    return BoolValue(left.value != right.value)
         
         # 逻辑运算
         elif op == 'and':
             return BoolValue(left.to_bool() and right.to_bool())
         elif op == 'or':
             return BoolValue(left.to_bool() or right.to_bool())
-        
-        # 字符串连接
-        elif op == '+' and isinstance(left, StringValue) and isinstance(right, StringValue):
-            return StringValue(left.value + right.value)
         
         raise TypeError(f"不支持的操作: {left.type} {op} {right.type}")
     
