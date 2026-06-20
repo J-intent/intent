@@ -178,6 +178,12 @@ class Resolver:
         for stmt in func.body:
             self._resolve_stmt(stmt)
         
+        # 解析契约表达式中的变量引用
+        for cond in func.requires:
+            self._resolve_expr(cond)
+        for cond in func.ensures:
+            self._resolve_expr(cond)
+        
         self._end_scope()
         self.current_function = enclosing_function
     

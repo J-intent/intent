@@ -690,6 +690,10 @@ class Parser:
         
         # 契约
         while True:
+            # 跳过换行
+            while self.match(TokenType.NEWLINE):
+                self.advance()
+            
             if self.match(TokenType.KEYWORD, 'requires'):
                 self.advance()
                 func.requires.append(self.parse_expression())
@@ -711,6 +715,10 @@ class Parser:
                 self.expect(TokenType.SYMBOL, ']')
             else:
                 break
+        
+        # 跳过契约与函数体之间的换行
+        while self.match(TokenType.NEWLINE):
+            self.advance()
         
         # 函数体
         self.expect(TokenType.SYMBOL, '{')
@@ -2336,10 +2344,20 @@ class Interpreter:
         
         print(f"📋 执行函数: {func_def.name}")
         
-        # 准备验证上下文
+        # 保存旧的变量状态，用闭包作用域作为父作用域
+        old_scope = self.current_scope
+        parent = closure_scope if closure_scope is not None else old_scope
+        self.current_scope = Scope(parent=parent)
+        
+        # 设置参数（在验证契约之前，使参数名可用于 requires/ensures）
+        for (param_name, param_type), arg_value in zip(func_def.params, args):
+            self.current_scope.declare(param_name, arg_value.copy(), False)
+        
+        # 准备验证上下文（包含参数绑定）
         context = {
             'args': args,
-            'variables': {name: val for name, val in self.current_scope.symbols.items()}
+            'variables': {name: val for name, val in self.current_scope.symbols.items()},
+            'params': {p[0]: v.copy() for p, v in zip(func_def.params, args)}
         }
         
         # 验证前置条件
@@ -2347,16 +2365,10 @@ class Interpreter:
             print("⚖️  验证前置条件...")
             if not self.contract_verifier.verify_requires(func_def.requires, context):
                 print("❌ 前置条件验证失败，停止执行")
+                self.current_scope = old_scope
                 return IntValue(1)
         
-        # 保存旧的变量状态，用闭包作用域作为父作用域
-        old_scope = self.current_scope
-        parent = closure_scope if closure_scope is not None else old_scope
-        self.current_scope = Scope(parent=parent)
-        
-        # 设置参数
-        for (param_name, param_type), arg_value in zip(func_def.params, args):
-            self.current_scope.declare(param_name, arg_value.copy(), False)
+        # 执行函数体
         
         # 执行函数体
         result = IntValue(0)
@@ -2369,11 +2381,11 @@ class Interpreter:
         # 验证后置条件
         if func_def.ensures:
             print("⚖️  验证后置条件...")
-            context['result'] = result
-            context['variables'] = {name: val for name, val in self.current_scope.symbols.items()}
-            
+            # 将 result 放入全局作用域，使 ensures 表达式的 result 可解析
+            self.global_scope.symbols['result'] = result
             if not self.contract_verifier.verify_ensures(func_def.ensures, result, context):
                 print("⚠️  后置条件验证失败")
+            del self.global_scope.symbols['result']
         
         # 恢复作用域
         self.current_scope = old_scope
