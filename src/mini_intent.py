@@ -1181,6 +1181,12 @@ class Parser:
                         result = self.parse_call_expr(result.name)
                     else:
                         break
+                elif self.match(TokenType.SYMBOL, '['):
+                    # 下标访问 arr[0] 或 dict["key"]
+                    self.advance()  # 消耗 [
+                    index_expr = self.parse_expression()
+                    self.expect(TokenType.SYMBOL, ']')
+                    result = SubscriptExpr(obj=result, index=index_expr, line=self.current_token.line, column=self.current_token.column)
                 else:
                     break
             
@@ -1189,6 +1195,10 @@ class Parser:
         # 列表
         elif self.match(TokenType.SYMBOL, '['):
             return self.parse_list_expr()
+        
+        # 字典
+        elif self.match(TokenType.SYMBOL, '{'):
+            return self.parse_dict_expr()
         
         # 括号表达式
         elif self.match(TokenType.SYMBOL, '('):
@@ -1233,11 +1243,44 @@ class Parser:
         
         self.expect(TokenType.SYMBOL, ']')
         return expr
+    
+    def parse_dict_expr(self) -> 'DictExpr':
+        """解析字典表达式 {key: value, ...}"""
+        start_token = self.expect(TokenType.SYMBOL, '{')
+        expr = DictExpr(line=start_token.line, column=start_token.column)
+        
+        if not self.match(TokenType.SYMBOL, '}'):
+            key = self.parse_expression()
+            self.expect(TokenType.SYMBOL, ':')
+            value = self.parse_expression()
+            expr.entries.append((key, value))
+            while self.match(TokenType.SYMBOL, ','):
+                self.advance()
+                key = self.parse_expression()
+                self.expect(TokenType.SYMBOL, ':')
+                value = self.parse_expression()
+                expr.entries.append((key, value))
+        
+        self.expect(TokenType.SYMBOL, '}')
+        return expr
 
 @dataclass
 class ListExpr(Expression):
     """列表表达式"""
     elements: List[Expression] = field(default_factory=list)
+
+@dataclass
+class DictExpr(Expression):
+    """字典表达式 {key: value, ...}"""
+    entries: List[Tuple[Expression, Expression]] = field(default_factory=list)  # (key_expr, value_expr)
+
+@dataclass
+class SubscriptExpr(Expression):
+    """下标访问表达式 obj[index]"""
+    obj: Expression = None
+    index: Expression = None
+    line: int = 0
+    column: int = 0
 
 # ==================== 类型系统 ====================
 class Type:
@@ -1298,6 +1341,29 @@ class ListType(Type):
     def can_assign_from(self, other: Type) -> bool:
         if isinstance(other, ListType):
             return self.element_type.can_assign_from(other.element_type)
+        return False
+
+class NoneType(Type):
+    """空类型 — 只有一个值 None/null"""
+    
+    def __init__(self):
+        super().__init__("None")
+    
+    def can_assign_from(self, other: Type) -> bool:
+        return isinstance(other, NoneType)
+
+class DictType(Type):
+    """字典类型 Dict[K, V]"""
+    
+    def __init__(self, key_type: Type, value_type: Type):
+        super().__init__(f"Dict[{key_type}, {value_type}]")
+        self.key_type = key_type
+        self.value_type = value_type
+    
+    def can_assign_from(self, other: Type) -> bool:
+        if isinstance(other, DictType):
+            return (self.key_type.can_assign_from(other.key_type) and
+                    self.value_type.can_assign_from(other.value_type))
         return False
 
 # ==================== 运行时值 ====================
@@ -1399,6 +1465,44 @@ class ListValue(RuntimeValue):
             self.value[index] = value
         else:
             raise IndexError(f"列表索引 {index} 越界")
+
+class NoneValue(RuntimeValue):
+    """空值 — Intent 中的 None/null"""
+    
+    def __init__(self):
+        super().__init__(NoneType(), None)
+    
+    def __str__(self):
+        return "空"
+    
+    def __repr__(self):
+        return "None"
+    
+    def to_bool(self) -> bool:
+        return False
+
+class DictValue(RuntimeValue):
+    """字典值 — 键值对集合"""
+    
+    def __init__(self, entries: Dict, key_type: Type, value_type: Type):
+        """entries: Python dict key (str/int/float) → RuntimeValue"""
+        super().__init__(DictType(key_type, value_type), entries)
+    
+    def __str__(self):
+        items = ", ".join(f"{k}: {v}" for k, v in self.value.items())
+        return f"{{{items}}}"
+    
+    def __repr__(self):
+        return str(self)
+    
+    def get(self, key) -> RuntimeValue:
+        return self.value.get(key)
+    
+    def set(self, key, value: RuntimeValue):
+        self.value[key] = value
+    
+    def to_bool(self) -> bool:
+        return len(self.value) > 0
 
 @dataclass
 class FunctionValue(RuntimeValue):
@@ -1844,7 +1948,7 @@ class Interpreter:
             raise TypeError(f"len() 期望1个参数，得到 {len(args)}个")
         
         value = args[0]
-        if isinstance(value, (ListValue, StringValue)):
+        if isinstance(value, (ListValue, StringValue, DictValue)):
             return IntValue(len(value.value))
         raise TypeError(f"len() 不支持类型 {value.type}")
     
@@ -2037,8 +2141,54 @@ class Interpreter:
     def execute_variable_decl(self, stmt: VariableDecl) -> RuntimeValue:
         """执行变量声明"""
         value = self.evaluate_expression(stmt.value) if stmt.value else self.get_default_value(stmt.var_type)
+        
+        # 运行时类型校验
+        if stmt.var_type and stmt.var_type != "Any":
+            self._check_type(value, stmt.var_type, f"变量 '{stmt.name}'")
+        
         self.current_scope.declare(stmt.name, value, stmt.is_const)
         return value
+    
+    def _type_from_name(self, type_name: str) -> Optional[Type]:
+        """类型名 → Type 实例"""
+        if type_name == "Int":
+            return IntType()
+        elif type_name == "Float":
+            return FloatType()
+        elif type_name == "String":
+            return StringType()
+        elif type_name == "Bool":
+            return BoolType()
+        elif type_name == "None":
+            return NoneType()
+        elif type_name == "Dict" or type_name.startswith("Dict["):
+            # Dict[K, V] — 宽松处理，默认 String→Int
+            if "[" in type_name:
+                inner = type_name[type_name.index("[")+1:type_name.index("]")]
+                parts = [p.strip() for p in inner.split(",")]
+                kt = self._type_from_name(parts[0]) if len(parts) >= 1 else StringType()
+                vt = self._type_from_name(parts[1]) if len(parts) >= 2 else IntType()
+                return DictType(kt, vt)
+            return DictType(StringType(), IntType())
+        elif type_name == "List" or type_name.startswith("List["):
+            # List[Int] / List[Float] 等
+            inner = "Int"
+            if "[" in type_name:
+                inner = type_name[type_name.index("[")+1:type_name.index("]")]
+            return ListType(self._type_from_name(inner))
+        return None
+    
+    def _check_type(self, value: RuntimeValue, type_name: str, context: str = "") -> None:
+        """运行时类型校验 — 不匹配时抛出 TypeError"""
+        if type_name == "Any":
+            return
+        expected = self._type_from_name(type_name)
+        if expected is None:
+            return  # 未知类型，宽容处理
+        if not expected.can_assign_from(value.get_type()):
+            actual = value.get_type().name
+            msg = f"类型不匹配{context}: 期望 {type_name}，但得到 {actual}"
+            raise TypeError(msg)
     
     def get_default_value(self, type_name: Optional[str]) -> RuntimeValue:
         """获取默认值"""
@@ -2361,7 +2511,10 @@ class Interpreter:
         self.current_scope = Scope(parent=parent)
         
         # 设置参数（在验证契约之前，使参数名可用于 requires/ensures）
+        # 同时进行运行时类型校验
         for (param_name, param_type), arg_value in zip(func_def.params, args):
+            if param_type and param_type != "Any":
+                self._check_type(arg_value, param_type, f"@ 参数 '{param_name}' (函数 {func_def.name})")
             self.current_scope.declare(param_name, arg_value.copy(), False)
         
         # 准备验证上下文（包含参数绑定）
@@ -2401,6 +2554,10 @@ class Interpreter:
         # 恢复作用域
         self.current_scope = old_scope
         
+        # 校验返回类型
+        if func_def.return_type and func_def.return_type != "Any":
+            self._check_type(result, func_def.return_type, f"@ 返回值 (函数 {func_def.name})")
+        
         return result
     
     def evaluate_expression(self, expr: Expression, context: Optional[Dict] = None) -> RuntimeValue:
@@ -2418,7 +2575,7 @@ class Interpreter:
             elif expr.literal_type == 'bool':
                 return BoolValue(expr.value)
             elif expr.literal_type == 'none':
-                return RuntimeValue(IntType(), 0)  # None的表示
+                return NoneValue()
             else:
                 return RuntimeValue(IntType(), expr.value)
         
@@ -2471,6 +2628,24 @@ class Interpreter:
                             return module.symbols[expr.member]
             
             raise NameError(f"无法访问成员 '{expr.member}'")
+        
+        elif isinstance(expr, SubscriptExpr):
+            obj = self.evaluate_expression(expr.obj, context)
+            index = self.evaluate_expression(expr.index, context)
+            if isinstance(obj, ListValue):
+                return obj.get(index.value)
+            elif isinstance(obj, DictValue):
+                val = obj.get(index.value)
+                if val is None:
+                    raise KeyError(f"字典中没有键 '{index.value}'")
+                return val
+            elif isinstance(obj, StringValue):
+                idx = index.value
+                if idx < 0 or idx >= len(obj.value):
+                    raise IndexError(f"字符串索引 {idx} 越界")
+                return StringValue(obj.value[idx])
+            else:
+                raise TypeError(f"不支持对 {obj.get_type()} 类型使用下标访问 []")
         
         elif isinstance(expr, BinaryOp):
             left = self.evaluate_expression(expr.left, context)
@@ -2544,6 +2719,23 @@ class Interpreter:
                     raise TypeError(f"列表元素类型不一致: {element_type} 和 {elem.type}")
             
             return ListValue(elements, element_type)
+        
+        elif isinstance(expr, DictExpr):
+            entries = {}
+            for key_expr, value_expr in expr.entries:
+                key_val = self.evaluate_expression(key_expr, context)
+                val_val = self.evaluate_expression(value_expr, context)
+                # 用字符串/数值作为键
+                key = key_val.value
+                entries[key] = val_val
+            # 字典字面量宽松类型：键=String，值=不限制
+            if not entries:
+                return DictValue({}, StringType(), IntType())
+            # 用首个条目的类型作为默认类型标注
+            first_key = next(iter(entries.keys()))
+            first_val = entries[first_key]
+            kt = StringType() if isinstance(first_key, str) else IntType()
+            return DictValue(entries, kt, first_val.get_type() if entries else IntType())
         
         else:
             raise RuntimeError(f"不支持的表达式类型: {type(expr).__name__}")
@@ -2621,6 +2813,18 @@ class Interpreter:
                     return BoolValue(left.value == right.value)
                 elif op == '!=':
                     return BoolValue(left.value != right.value)
+            
+            # None 比较
+            if isinstance(left, NoneValue) and isinstance(right, NoneValue):
+                if op == '==':
+                    return BoolValue(True)
+                elif op == '!=':
+                    return BoolValue(False)
+            elif isinstance(left, NoneValue) or isinstance(right, NoneValue):
+                if op == '==':
+                    return BoolValue(False)
+                elif op == '!=':
+                    return BoolValue(True)
         
         # 逻辑运算
         elif op == 'and':
