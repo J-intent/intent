@@ -205,7 +205,8 @@ class Lexer:
         '(', ')', '{', '}', '[', ']', ',', ':', ';', '=', '.', '->', '=>',
         '+', '-', '*', '/', '%', '**', '//', '==', '!=', '<', '>', '<=', '>=',
         '!', '&&', '||', '&', '|', '^', '~', '<<', '>>', ':=', '++', '--',
-        '+=', '-=', '*=', '/=', '%=', '**=', '//=', '&=', '|=', '^=', '<<=', '>>='
+        '+=', '-=', '*=', '/=', '%=', '**=', '//=', '&=', '|=', '^=', '<<=', '>>=',
+        '|>'  # 管道操作符
     }
     
     SINGLE_SYMBOLS = set('(){}[],:;.=+-*/%<>!&|^~')
@@ -688,8 +689,11 @@ class Parser:
         func.params = self.parse_parameter_list()
         self.expect(TokenType.SYMBOL, ')')
         
-        # 返回类型
-        if self.match(TokenType.OPERATOR, '->'):
+        # 返回类型 (支持 :Type 和 ->Type 两种语法)
+        if self.match(TokenType.SYMBOL, ':'):
+            self.advance()
+            func.return_type = self.expect(TokenType.IDENTIFIER).value
+        elif self.match(TokenType.OPERATOR, '->'):
             self.advance()
             func.return_type = self.expect(TokenType.IDENTIFIER).value
         
@@ -966,6 +970,38 @@ class Parser:
         
         return stmt
     
+    def parse_if_expr(self) -> IfExpr:
+        """解析 if 表达式 — else 是必须的，因为表达式必须总有值"""
+        start_token = self.current_token  # 'if' keyword
+        self.advance()  # 消耗 if
+        
+        condition = self.parse_expression()
+        
+        self.expect(TokenType.SYMBOL, '{')
+        then_body = []
+        while not self.match(TokenType.SYMBOL, '}'):
+            s = self.parse_statement()
+            if s:
+                then_body.append(s)
+        self.expect(TokenType.SYMBOL, '}')
+        
+        # if 表达式必须有 else
+        if not self.match(TokenType.KEYWORD, 'else'):
+            self.error(start_token, "if 表达式必须有 else 分支")
+            return IfExpr(line=start_token.line, column=start_token.column)
+        self.advance()
+        
+        self.expect(TokenType.SYMBOL, '{')
+        else_body = []
+        while not self.match(TokenType.SYMBOL, '}'):
+            s = self.parse_statement()
+            if s:
+                else_body.append(s)
+        self.expect(TokenType.SYMBOL, '}')
+        
+        return IfExpr(condition=condition, then_body=then_body, else_body=else_body,
+                      line=start_token.line, column=start_token.column)
+    
     def parse_while_stmt(self) -> WhileStmt:
         """解析while循环"""
         start_token = self.expect(TokenType.KEYWORD, 'while')
@@ -1030,12 +1066,23 @@ class Parser:
         return expr
     
     def parse_expression(self) -> Expression:
-        """解析表达式"""
-        # 跳过开头的换行符 - 关键修复
-        while self.match(TokenType.NEWLINE):
-            self.advance()
+        """解析表达式 — 管道具有最低优先级"""
+        return self.parse_pipe()
+    
+    def parse_pipe(self) -> Expression:
+        """解析管道表达式 left |> right
+        管道语义: right 必须是可调用表达式, left 作为参数传入
+        左结合: a |> f |> g => (a |> f) |> g => g(f(a))
+        """
+        expr = self.parse_logical_or()
         
-        return self.parse_logical_or()
+        while self.match(TokenType.OPERATOR) and self.current_token.value == '|>':
+            op_token = self.current_token
+            self.advance()
+            right = self.parse_logical_or()
+            expr = PipeExpr(left=expr, right=right, line=op_token.line, column=op_token.column)
+        
+        return expr
     
     def parse_logical_or(self) -> Expression:
         """解析逻辑或"""
@@ -1140,6 +1187,10 @@ class Parser:
         elif self.match(TokenType.KEYWORD, 'None') or self.match(TokenType.KEYWORD, 'null'):
             self.advance()
             return Literal(value=None, literal_type='none', line=token.line, column=token.column)
+        
+        # if 表达式: if cond { expr1 } else { expr2 }
+        elif self.match(TokenType.KEYWORD, 'if'):
+            return self.parse_if_expr()
         
         # 变量
         elif self.match(TokenType.IDENTIFIER):
@@ -1279,6 +1330,29 @@ class SubscriptExpr(Expression):
     """下标访问表达式 obj[index]"""
     obj: Expression = None
     index: Expression = None
+    line: int = 0
+    column: int = 0
+
+@dataclass
+class PipeExpr(Expression):
+    """管道表达式 left |> right
+    语义: 将 left 求值后作为参数传给 right 调用 → right(left)
+    例如: data |> filter 等价于 filter(data)
+          data |> filter |> map 等价于 map(filter(data))
+    """
+    left: Expression = None
+    right: Expression = None
+    line: int = 0
+    column: int = 0
+
+@dataclass
+class IfExpr(Expression):
+    """if 表达式: if cond { then } else { else }
+    区别于 IfStmt：else 是必须的，求值为所选分支的结果
+    """
+    condition: Expression = None
+    then_body: List[ASTNode] = field(default_factory=list)
+    else_body: List[ASTNode] = field(default_factory=list)
     line: int = 0
     column: int = 0
 
@@ -2646,6 +2720,48 @@ class Interpreter:
                 return StringValue(obj.value[idx])
             else:
                 raise TypeError(f"不支持对 {obj.get_type()} 类型使用下标访问 []")
+        
+        elif isinstance(expr, PipeExpr):
+            # 管道: left |> right → right(left)
+            left_val = self.evaluate_expression(expr.left, context)
+            
+            # 右侧如果是函数名，直接查找函数（不经过变量求值）
+            if isinstance(expr.right, Variable):
+                fname = expr.right.name
+                if fname in self.builtins:
+                    return self.builtins[fname]([left_val])
+                if fname in self.functions:
+                    return self.execute_function(self.functions[fname], [left_val])
+                raise NameError(f"管道右侧未定义的函数: {fname}")
+            
+            right_val = self.evaluate_expression(expr.right, context)
+            
+            if isinstance(right_val, FunctionValue):
+                return self.execute_function(right_val, [left_val])
+            
+            if isinstance(right_val.value, str):
+                fname = right_val.value
+                if fname in self.builtins:
+                    return self.builtins[fname]([left_val])
+                if fname in self.functions:
+                    return self.execute_function(self.functions[fname], [left_val])
+            
+            raise TypeError(f"管道右侧必须是可调用对象")
+        
+        elif isinstance(expr, IfExpr):
+            # if 表达式：求值条件，选择分支，返回结果
+            cond_val = self.evaluate_expression(expr.condition, context)
+            body = expr.then_body if cond_val.to_bool() else expr.else_body
+            
+            old_scope = self.current_scope
+            self.current_scope = self.current_scope.enter()
+            result = IntValue(0)
+            for stmt in body:
+                result = self.execute_statement(stmt)
+                if self.return_flag or self.break_flag or self.continue_flag:
+                    break
+            self.current_scope = old_scope
+            return result
         
         elif isinstance(expr, BinaryOp):
             left = self.evaluate_expression(expr.left, context)

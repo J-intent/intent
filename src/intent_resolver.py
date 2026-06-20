@@ -245,7 +245,7 @@ class Resolver:
         """分发表达式"""
         from mini_intent import (
             Literal, Variable, BinaryOp, UnaryOp, CallExpr,
-            MemberAccess, ListExpr, DictExpr, SubscriptExpr
+            MemberAccess, ListExpr, DictExpr, SubscriptExpr, PipeExpr, IfExpr
         )
         
         if isinstance(expr, Literal):
@@ -286,9 +286,14 @@ class Resolver:
                 self._resolve_expr(key_expr)
                 self._resolve_expr(val_expr)
         
-        elif isinstance(expr, SubscriptExpr):
-            self._resolve_expr(expr.obj)
-            self._resolve_expr(expr.index)
+        elif isinstance(expr, PipeExpr):
+            self._resolve_expr(expr.left)
+            self._resolve_expr(expr.right)
+        
+        elif isinstance(expr, IfExpr):
+            self._resolve_expr(expr.condition)
+            self._resolve_block(expr.then_body)
+            self._resolve_block(expr.else_body)
     
     def _resolve_variable_expr(self, expr) -> None:
         """解析变量引用"""
