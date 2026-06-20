@@ -390,6 +390,14 @@ class ASTNode:
     column: int = 0
     filename: str = ""
     
+    def __hash__(self):
+        """基于对象标识的哈希（等同于 Java 默认的 identity hash）"""
+        return id(self)
+    
+    def __eq__(self, other):
+        """基于对象标识的相等性"""
+        return self is other
+    
     def accept(self, visitor: 'ASTVisitor'):
         """访问者模式"""
         method_name = f'visit_{self.__class__.__name__.lower()}'
@@ -555,14 +563,53 @@ class Parser:
         self.tokens = tokens
         self.pos = 0
         self.current_token = self.tokens[0] if tokens else Token(TokenType.EOF, "", 0, 0)
+        self.previous = Token(TokenType.EOF, "", 0, 0)  # 上一个消费的 token
+        self.errors: List[str] = []  # 收集所有语法错误
+        self.panic_mode = False  # panic mode: 跳过 token 直到找到同步点
     
     def advance(self):
         """前进到下一个token"""
+        self.previous = self.current_token
         self.pos += 1
         if self.pos < len(self.tokens):
             self.current_token = self.tokens[self.pos]
         else:
             self.current_token = Token(TokenType.EOF, "", 0, 0)
+    
+    def error(self, token: Token, message: str):
+        """记录错误并抛出。panic_mode 下只抛出不记录（抑制级联报错）"""
+        if not self.panic_mode:
+            err = f"语法错误: {message}，行 {token.line}，列 {token.column}"
+            self.errors.append(err)
+        self.panic_mode = True
+        raise SyntaxError(f"语法错误: {message}，行 {token.line}，列 {token.column}")
+    
+    def synchronize(self):
+        """跳过 token 直到语句边界（; / 关键字 / } / EOF）"""
+        self.panic_mode = False
+        safety = 0
+        
+        while not self.match(TokenType.EOF) and safety < 5000:
+            safety += 1
+            # 刚跳过了一个分号 → 语句边界
+            if self.previous.type == TokenType.SYMBOL and self.previous.value == ';':
+                return
+            
+            # 下一 token 是语句起始关键字 → 可以重新开始
+            statement_starters = {
+                'let', 'var', 'const', 'def', 'if', 'while', 'for',
+                'return', 'break', 'continue', 'print', 'import', 'export'
+            }
+            if self.current_token.type == TokenType.KEYWORD and self.current_token.value in statement_starters:
+                return
+            if self.current_token.type == TokenType.IDENTIFIER and self.current_token.value in statement_starters:
+                return
+            
+            # 遇到 } 块结束 → 停止（让调用者处理）
+            if self.match(TokenType.SYMBOL, '}'):
+                return
+            
+            self.advance()
     
     def peek(self) -> Token:
         """查看下一个token"""
@@ -571,15 +618,15 @@ class Parser:
         return Token(TokenType.EOF, "", 0, 0)
     
     def expect(self, token_type: TokenType, value: Optional[str] = None) -> Token:
-        """期望当前token符合要求"""
+        """期望当前token符合要求。遇错调用 error() → 抛出 SyntaxError"""
         if self.current_token.type != token_type:
-            # 修复：提供更友好的错误信息
             expected = f"{token_type.value}" + (f" '{value}'" if value else "")
             got = f"{self.current_token.type.value} '{self.current_token.value}'"
-            raise SyntaxError(f"期望 {expected}，但得到 {got}，行 {self.current_token.line}")
+            self.error(self.current_token, f"期望 {expected}，但得到 {got}")
+            # error() 会 raise，此行不会执行
         
         if value is not None and self.current_token.value != value:
-            raise SyntaxError(f"期望 '{value}'，但得到 '{self.current_token.value}'，行 {self.current_token.line}")
+            self.error(self.current_token, f"期望 '{value}'，但得到 '{self.current_token.value}'")
         
         token = self.current_token
         self.advance()
@@ -594,7 +641,7 @@ class Parser:
         return True
     
     def parse(self) -> Program:
-        """解析整个程序"""
+        """解析整个程序 — 带 panic mode 错误恢复。始终返回 Program，调用者检查 self.errors"""
         program = Program()
         
         while not self.match(TokenType.EOF):
@@ -603,15 +650,20 @@ class Parser:
                 self.advance()
                 continue
             
-            # 解析函数定义
-            if self.match(TokenType.KEYWORD, 'def'):
-                func = self.parse_function_def()
-                program.add_function(func)
-            # 解析语句
-            else:
-                stmt = self.parse_statement()
-                if stmt:
-                    program.add_statement(stmt)
+            try:
+                # 解析函数定义
+                if self.match(TokenType.KEYWORD, 'def'):
+                    func = self.parse_function_def()
+                    if func is not None:
+                        program.add_function(func)
+                # 解析语句
+                else:
+                    stmt = self.parse_statement()
+                    if stmt:
+                        program.add_statement(stmt)
+            except SyntaxError:
+                # error() 已记录错误，跳至下一个同步点继续解析
+                self.synchronize()
         
         return program
     
@@ -1088,7 +1140,7 @@ class Parser:
                         self.advance()
                         result = MemberAccess(obj=result, member=member_name, line=member_token.line, column=member_token.column)
                     else:
-                        raise SyntaxError(f"期望属性名，但得到 {self.current_token}")
+                        self.error(self.current_token, f"期望属性名，但得到 {self.current_token}")
                 elif self.match(TokenType.SYMBOL, '('):
                     # 函数调用 - 需要处理MemberAccess作为函数的情况
                     if isinstance(result, MemberAccess):
@@ -1125,9 +1177,9 @@ class Parser:
         
         # 修改错误信息，提供更友好的提示
         if token.type == TokenType.NEWLINE:
-            raise SyntaxError(f"表达式不完整，在第{token.line}行第{token.column}列意外换行")
+            self.error(token, f"表达式不完整，在第{token.line}行第{token.column}列意外换行")
         else:
-            raise SyntaxError(f"无法解析表达式，意外的token: {token}，行 {token.line}")
+            self.error(token, f"无法解析表达式，意外的token: {token.value}，期望表达式")
     
     def parse_call_expr(self, func_name: str) -> CallExpr:
         """解析函数调用"""
@@ -1326,6 +1378,35 @@ class ListValue(RuntimeValue):
         else:
             raise IndexError(f"列表索引 {index} 越界")
 
+@dataclass
+class FunctionValue(RuntimeValue):
+    """函数值 — 闭包载体
+    
+    持有函数定义 AST + 捕获的定义时作用域（closure）。
+    这是实现闭包的关键：内部函数记住它被定义时的环境。
+    """
+    func_def: Any = None           # FunctionDef AST 节点
+    closure: Any = None            # 定义时的 Scope
+    
+    def __init__(self, func_def, closure):
+        super().__init__(StringType(), func_def.name)
+        self.func_def = func_def
+        self.closure = closure
+    
+    def __str__(self):
+        contract = ""
+        if self.func_def.requires:
+            contract += "⚖️"
+        if self.func_def.is_pure:
+            contract += "🧘"
+        return f"<功夫 {contract}{self.func_def.name}>"
+    
+    def __repr__(self):
+        return str(self)
+    
+    def copy(self):
+        return FunctionValue(self.func_def, self.closure)
+
 # ==================== 作用域 ====================
 class Scope:
     """作用域"""
@@ -1379,6 +1460,29 @@ class Scope:
     def exit(self) -> Optional['Scope']:
         """退出当前作用域"""
         return self.parent
+    
+    def ancestor(self, depth: int) -> 'Scope':
+        """向上走 depth 层（深度解析用）
+        
+        depth=0 返回自身，depth=1 返回 parent，以此类推
+        """
+        scope = self
+        for _ in range(depth):
+            if scope.parent is None:
+                raise RuntimeError(f"作用域深度不足: 请求 depth={depth}")
+            scope = scope.parent
+        return scope
+    
+    def get_at(self, depth: int, name: str) -> RuntimeValue:
+        """从第 depth 层祖先作用域获取变量（闭包支持）"""
+        return self.ancestor(depth).symbols[name]
+    
+    def assign_at(self, depth: int, name: str, value: RuntimeValue) -> None:
+        """向第 depth 层祖先作用域赋值变量"""
+        scope = self.ancestor(depth)
+        if name in scope.constants:
+            raise ValueError(f"无法修改常量 '{name}'")
+        scope.symbols[name] = value
 
 # ==================== 契约验证器 ====================
 class ContractVerifier:
@@ -1630,6 +1734,55 @@ class Interpreter:
         self.current_file_dir = ""  # 当前执行文件的目录
         # 初始化模块系统
         self.module_system = ModuleSystem(self)
+        # ── Resolver 集成：locals 字典 ──
+        # key: Expression AST 节点, value: 该变量引用的作用域深度
+        # 空字典表示未经过 resolver，走旧版链式查找
+        self.locals: Dict[Any, int] = {}
+    
+    def resolve(self, expr, depth: int) -> None:
+        """Resolver 回调：记录表达式的变量深度
+        
+        用 id(expr) 作为 key，绕过 dataclass 的 unhashable 问题。
+        """
+        self.locals[id(expr)] = depth
+    
+    def look_up_variable(self, name: str, expr) -> RuntimeValue:
+        """查找变量 — 优先用 Resolver 确定的深度
+        
+        如果 Resolver 已经确定了这个表达式的变量深度，
+        用 get_at(depth, name) 精确获取（闭包安全）。
+        否则回退到旧的链式查找。
+        """
+        expr_id = id(expr)
+        if expr_id in self.locals:
+            depth = self.locals[expr_id]
+            return self.current_scope.get_at(depth, name)
+        else:
+            # 全局变量或未解析的变量：链式查找
+            return self.global_scope.get(name)
+    
+    def _run_resolver(self, program) -> None:
+        """运行语义分析遍（Resolver）
+        
+        在执行之前静态遍历 AST，为每个变量引用标注作用域深度。
+        如果 Resolver 发现错误（如变量在自身初始化器中引用），
+        错误会累积但不会阻止执行（宽松模式）。
+        """
+        try:
+            from intent_resolver import Resolver
+            resolver = Resolver(self)
+            resolver.resolve_program(program)
+            if resolver.errors:
+                print(f"⚠️  [语义分析] 发现 {len(resolver.errors)} 个问题:")
+                for err in resolver.errors[:5]:  # 最多显示5个
+                    print(f"   • {err}")
+                if len(resolver.errors) > 5:
+                    print(f"   ... 还有 {len(resolver.errors) - 5} 个")
+        except ImportError:
+            # Resolver 模块不存在时静默跳过
+            pass
+        except Exception as e:
+            print(f"⚠️  [语义分析] 运行失败: {e}")
     
     def add_module_search_path(self, file_dir: str):
         """添加基于文件目录的搜索路径"""
@@ -1804,6 +1957,9 @@ class Interpreter:
         """执行整个程序
         module_mode=True 时只注册函数/变量，不执行main（用于模块加载）
         """
+        # ── 语义分析遍（Resolver）──
+        self._run_resolver(program)
+        
         # 注册所有函数
         for func in program.functions.values():
             self.functions[func.name] = func
@@ -2160,9 +2316,22 @@ class Interpreter:
         
         return None
     
-    def execute_function(self, func: FunctionDef, args: List[RuntimeValue]) -> RuntimeValue:
-        """执行函数"""
-        print(f"📋 执行函数: {func.name}")
+    def execute_function(self, func, args: List[RuntimeValue], 
+                          closure_scope: Optional[Scope] = None) -> RuntimeValue:
+        """执行函数 — 支持闭包
+        
+        如果 func 是 FunctionValue，自动提取其闭包作用域。
+        闭包作用域作为新作用域的 parent，而非当前的 current_scope。
+        """
+        # 提取 FunctionValue 的闭包
+        if isinstance(func, FunctionValue):
+            func_def = func.func_def
+            if closure_scope is None:
+                closure_scope = func.closure
+        else:
+            func_def = func
+        
+        print(f"📋 执行函数: {func_def.name}")
         
         # 准备验证上下文
         context = {
@@ -2171,35 +2340,36 @@ class Interpreter:
         }
         
         # 验证前置条件
-        if func.requires:
+        if func_def.requires:
             print("⚖️  验证前置条件...")
-            if not self.contract_verifier.verify_requires(func.requires, context):
+            if not self.contract_verifier.verify_requires(func_def.requires, context):
                 print("❌ 前置条件验证失败，停止执行")
                 return IntValue(1)
         
-        # 保存旧的变量状态
+        # 保存旧的变量状态，用闭包作用域作为父作用域
         old_scope = self.current_scope
-        self.current_scope = self.current_scope.enter()
+        parent = closure_scope if closure_scope is not None else old_scope
+        self.current_scope = Scope(parent=parent)
         
         # 设置参数
-        for (param_name, param_type), arg_value in zip(func.params, args):
+        for (param_name, param_type), arg_value in zip(func_def.params, args):
             self.current_scope.declare(param_name, arg_value.copy(), False)
         
         # 执行函数体
         result = IntValue(0)
-        for stmt in func.body:
+        for stmt in func_def.body:
             result = self.execute_statement(stmt)
             if self.return_flag:
                 self.return_flag = False
                 break
         
         # 验证后置条件
-        if func.ensures:
+        if func_def.ensures:
             print("⚖️  验证后置条件...")
             context['result'] = result
             context['variables'] = {name: val for name, val in self.current_scope.symbols.items()}
             
-            if not self.contract_verifier.verify_ensures(func.ensures, result, context):
+            if not self.contract_verifier.verify_ensures(func_def.ensures, result, context):
                 print("⚠️  后置条件验证失败")
         
         # 恢复作用域
@@ -2232,8 +2402,8 @@ class Interpreter:
                 # 返回一个特殊的函数值
                 return RuntimeValue(IntType(), expr.name)  # 简化处理
             
-            # 从作用域获取变量
-            return self.current_scope.get(expr.name)
+            # 从作用域获取变量 — 使用 Resolver 深度查找
+            return self.look_up_variable(expr.name, expr)
         
         elif isinstance(expr, MemberAccess):
             # 计算左侧对象的值
@@ -2586,6 +2756,12 @@ class IntentREPL:
             parser = Parser(tokens)
             ast = parser.parse()
             
+            # 如有解析错误，报告但不阻止执行（尽可能多的正确部分仍可执行）
+            if parser.errors:
+                print(f"⚠️  发现 {len(parser.errors)} 个语法错误:")
+                for err in parser.errors:
+                    print(f"    • {err}")
+            
             # 解释执行
             result = self.interpreter.execute_program(ast)
             
@@ -2868,9 +3044,19 @@ def run_code(code: str, interpreter: Interpreter, args):
         parser = Parser(tokens)
         ast = parser.parse()
         
+        # 如有解析错误，报告但不阻止执行（尽可能多的正确部分仍可执行）
+        if parser.errors:
+            print(f"⚠️  发现 {len(parser.errors)} 个语法错误（已跳过）:")
+            for err in parser.errors:
+                print(f"    • {err}")
+            print()
+        
         result = interpreter.execute_program(ast)
         
-        print(f"\n✅ 程序执行成功")
+        if parser.errors:
+            print(f"\n⚠️  程序部分执行成功（{len(parser.errors)} 个错误已跳过）")
+        else:
+            print(f"\n✅ 程序执行成功")
         if result is not None and not (isinstance(result.value, int) and result.value == 0):
             print(f"返回值: {result}")
         
