@@ -229,7 +229,9 @@ class Resolver:
             self._declare(stmt.var)
             self._define(stmt.var)
         self._resolve_expr(stmt.iterable)
-        self._resolve_block(stmt.body)
+        # 循环体不额外开作用域 — item 和循环体在同一作用域
+        for s in stmt.body:
+            self._resolve_stmt(s)
         self._end_scope()
     
     def _resolve_block(self, statements: List) -> None:

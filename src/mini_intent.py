@@ -2216,12 +2216,28 @@ class Interpreter:
         """执行变量声明"""
         value = self.evaluate_expression(stmt.value) if stmt.value else self.get_default_value(stmt.var_type)
         
+        # 类型推断：当未标注类型时，从初始值推断
+        if (stmt.var_type is None or stmt.var_type == "Any") and stmt.value:
+            stmt.var_type = self._infer_type_from_value(value)
+        
         # 运行时类型校验
         if stmt.var_type and stmt.var_type != "Any":
             self._check_type(value, stmt.var_type, f"变量 '{stmt.name}'")
         
         self.current_scope.declare(stmt.name, value, stmt.is_const)
         return value
+    
+    def _infer_type_from_value(self, value: RuntimeValue) -> str:
+        """从运行时值推断类型名"""
+        t = value.get_type()
+        mapping = {
+            IntType: "Int", FloatType: "Float", StringType: "String",
+            BoolType: "Bool", NoneType: "None", ListType: "List", DictType: "Dict"
+        }
+        for cls, name in mapping.items():
+            if isinstance(t, cls):
+                return name
+        return "Any"
     
     def _type_from_name(self, type_name: str) -> Optional[Type]:
         """类型名 → Type 实例"""
@@ -2654,13 +2670,26 @@ class Interpreter:
                 return RuntimeValue(IntType(), expr.value)
         
         elif isinstance(expr, Variable):
-            # 检查是否是内置函数
-            if expr.name in self.builtins:
-                # 返回一个特殊的函数值
-                return RuntimeValue(IntType(), expr.name)  # 简化处理
+            # 先从作用域查找（变量可遮蔽内置函数名）
+            expr_id = id(expr)
+            if expr_id in self.locals:
+                depth = self.locals[expr_id]
+                try:
+                    return self.current_scope.get_at(depth, expr.name)
+                except KeyError:
+                    pass  # 变量未找到，继续检查内置函数
+            else:
+                # 链式查找全局作用域
+                try:
+                    return self.global_scope.get(expr.name)
+                except NameError:
+                    pass  # 继续检查内置函数
             
-            # 从作用域获取变量 — 使用 Resolver 深度查找
-            return self.look_up_variable(expr.name, expr)
+            # 变量作用域中未找到，检查内置函数
+            if expr.name in self.builtins:
+                return RuntimeValue(IntType(), expr.name)
+            
+            raise NameError(f"未定义的变量 '{expr.name}'")
         
         elif isinstance(expr, MemberAccess):
             # 计算左侧对象的值
