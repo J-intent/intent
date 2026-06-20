@@ -247,7 +247,8 @@ class Resolver:
         """分发表达式"""
         from mini_intent import (
             Literal, Variable, BinaryOp, UnaryOp, CallExpr,
-            MemberAccess, ListExpr, DictExpr, SubscriptExpr, PipeExpr, IfExpr
+            MemberAccess, ListExpr, DictExpr, SubscriptExpr, PipeExpr, IfExpr,
+            MatchExpr, LiteralPattern, VariablePattern, WildcardPattern, OrPattern
         )
         
         if isinstance(expr, Literal):
@@ -296,6 +297,29 @@ class Resolver:
             self._resolve_expr(expr.condition)
             self._resolve_block(expr.then_body)
             self._resolve_block(expr.else_body)
+        
+        elif isinstance(expr, MatchExpr):
+            self._resolve_expr(expr.value)
+            for case in expr.cases:
+                self._resolve_pattern(case.pattern)
+                if case.guard:
+                    self._resolve_expr(case.guard)
+                if case.body:
+                    self._resolve_expr(case.body)
+                else:
+                    self._resolve_block(case.body_block)
+    
+    def _resolve_pattern(self, pattern) -> None:
+        """解析匹配模式"""
+        from mini_intent import LiteralPattern, VariablePattern, WildcardPattern, OrPattern
+        
+        if isinstance(pattern, LiteralPattern) or isinstance(pattern, WildcardPattern):
+            pass
+        elif isinstance(pattern, VariablePattern):
+            pass  # 运行时绑定
+        elif isinstance(pattern, OrPattern):
+            for sub in pattern.patterns:
+                self._resolve_pattern(sub)
     
     def _resolve_variable_expr(self, expr) -> None:
         """解析变量引用"""

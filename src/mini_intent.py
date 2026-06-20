@@ -1002,6 +1002,116 @@ class Parser:
         return IfExpr(condition=condition, then_body=then_body, else_body=else_body,
                       line=start_token.line, column=start_token.column)
     
+    def parse_match_expr(self) -> 'MatchExpr':
+        """解析 match 表达式: match value { pat [if guard] => body, ... }"""
+        start_token = self.current_token  # 'match'
+        self.advance()
+        
+        value = self.parse_expression()
+        
+        self.expect(TokenType.SYMBOL, '{')
+        cases = []
+        while not self.match(TokenType.SYMBOL, '}'):
+            case = self._parse_match_case()
+            if case:
+                cases.append(case)
+            # 逗号分隔分支
+            if self.match(TokenType.SYMBOL, ','):
+                self.advance()
+        self.expect(TokenType.SYMBOL, '}')
+        
+        return MatchExpr(value=value, cases=cases, line=start_token.line, column=start_token.column)
+    
+    def _parse_match_case(self) -> Optional['MatchCase']:
+        """解析单个 match 分支: pattern [if guard] => body"""
+        # 跳过换行
+        while self.match(TokenType.NEWLINE):
+            self.advance()
+        if self.match(TokenType.SYMBOL, '}'):
+            return None
+        
+        token = self.current_token
+        pattern = self._parse_pattern()
+        
+        # 可选的守卫
+        guard = None
+        if self.match(TokenType.KEYWORD, 'if'):
+            self.advance()
+            guard = self.parse_expression()
+        
+        # => 箭头 (tokenized as OPERATOR by lexer)
+        self.expect(TokenType.OPERATOR, '=>')
+        
+        # 体: 单表达式 或 块 { ... }
+        if self.match(TokenType.SYMBOL, '{'):
+            self.advance()
+            body_block = []
+            while not self.match(TokenType.SYMBOL, '}'):
+                s = self.parse_statement()
+                if s:
+                    body_block.append(s)
+            self.expect(TokenType.SYMBOL, '}')
+            return MatchCase(pattern=pattern, guard=guard, body_block=body_block,
+                            line=token.line, column=token.column)
+        else:
+            body = self.parse_expression()
+            return MatchCase(pattern=pattern, guard=guard, body=body,
+                            line=token.line, column=token.column)
+    
+    def _parse_pattern(self) -> MatchPattern:
+        """解析匹配模式: literal | variable | _ | or_pattern"""
+        # 通配符 _
+        if self.match(TokenType.IDENTIFIER, '_'):
+            token = self.current_token
+            self.advance()
+            # 如果 _ 后跟 | 则是或模式的开始
+            if self.match(TokenType.SYMBOL, '|'):
+                return self._parse_or_pattern(WildcardPattern())
+            return WildcardPattern()
+        
+        # null
+        if self.match(TokenType.KEYWORD, 'null') or self.match(TokenType.KEYWORD, 'None'):
+            self.advance()
+            return LiteralPattern(value=None)
+        
+        # true / false
+        if self.match(TokenType.KEYWORD, 'True') or self.match(TokenType.KEYWORD, 'true'):
+            self.advance()
+            return LiteralPattern(value=True)
+        if self.match(TokenType.KEYWORD, 'False') or self.match(TokenType.KEYWORD, 'false'):
+            self.advance()
+            return LiteralPattern(value=False)
+        
+        # 数字
+        if self.match(TokenType.NUMBER):
+            token = self.current_token
+            self.advance()
+            val = int(token.value) if '.' not in token.value else float(token.value)
+            return LiteralPattern(value=val)
+        
+        # 字符串
+        if self.match(TokenType.STRING):
+            token = self.current_token
+            self.advance()
+            return LiteralPattern(value=token.value)
+        
+        # 标识符 → 变量模式
+        if self.match(TokenType.IDENTIFIER):
+            token = self.current_token
+            self.advance()
+            return VariablePattern(name=token.value)
+        
+        self.error(self.current_token, f"不支持的匹配模式")
+        return WildcardPattern()
+    
+    def _parse_or_pattern(self, first: MatchPattern) -> OrPattern:
+        """解析或模式: pat1 | pat2 | pat3"""
+        patterns = [first]
+        while self.match(TokenType.SYMBOL, '|'):
+            self.advance()
+            patterns.append(self._parse_pattern())
+        return OrPattern(patterns=patterns)
+    
     def parse_while_stmt(self) -> WhileStmt:
         """解析while循环"""
         start_token = self.expect(TokenType.KEYWORD, 'while')
@@ -1192,6 +1302,10 @@ class Parser:
         elif self.match(TokenType.KEYWORD, 'if'):
             return self.parse_if_expr()
         
+        # match 表达式: match value { pattern => body, ... }
+        elif self.match(TokenType.KEYWORD, 'match'):
+            return self.parse_match_expr()
+        
         # 变量
         elif self.match(TokenType.IDENTIFIER):
             self.advance()
@@ -1332,6 +1446,57 @@ class SubscriptExpr(Expression):
     index: Expression = None
     line: int = 0
     column: int = 0
+
+# ── Match（模式匹配） ─────────────────────────────────
+
+@dataclass
+class MatchPattern(ASTNode):
+    """匹配模式基类"""
+    pass
+
+@dataclass
+class LiteralPattern(MatchPattern):
+    """字面量模式: 1, "hello", true, null"""
+    value: Any = None
+
+@dataclass
+class VariablePattern(MatchPattern):
+    """变量模式: n（绑定匹配值）"""
+    name: str = ""
+
+@dataclass
+class WildcardPattern(MatchPattern):
+    """通配符模式: _（匹配任意值）"""
+    pass
+
+@dataclass
+class OrPattern(MatchPattern):
+    """或模式: 1 | 2 | 3"""
+    patterns: List[MatchPattern] = field(default_factory=list)
+
+@dataclass
+class MatchCase(ASTNode):
+    """match 分支: pattern [if guard] => body"""
+    pattern: MatchPattern = None
+    guard: Optional[Expression] = None
+    body: Optional[Expression] = None  # 单表达式体
+    body_block: List[ASTNode] = field(default_factory=list)  # 块体
+
+@dataclass
+class MatchExpr(Expression):
+    """match 表达式: match value { pattern => body, ... }"""
+    value: Expression = None
+    cases: List[MatchCase] = field(default_factory=list)
+    line: int = 0
+    column: int = 0
+
+# ── 异常 ──────────────────────────────────────────────
+
+class MatchError(Exception):
+    """match 未覆盖所有情况"""
+    def __init__(self, message: str, line: int = 0):
+        self.line = line
+        super().__init__(message)
 
 @dataclass
 class PipeExpr(Expression):
@@ -2460,6 +2625,80 @@ class Interpreter:
         
         return result
     
+    def execute_match(self, expr: 'MatchExpr', context: dict = None) -> RuntimeValue:
+        """执行 match 表达式"""
+        match_value = self.evaluate_expression(expr.value, context)
+        
+        for case in expr.cases:
+            bindings = {}
+            if self._pattern_match(case.pattern, match_value, bindings):
+                if case.guard:
+                    # 守卫条件：在绑定变量的作用域中求值
+                    old_scope = self.current_scope
+                    self.current_scope = self.current_scope.enter()
+                    try:
+                        for name, val in bindings.items():
+                            self.current_scope.declare(name, val)
+                        guard_result = self.evaluate_expression(case.guard, context)
+                        if not guard_result.to_bool():
+                            self.current_scope = old_scope
+                            continue
+                    except Exception:
+                        self.current_scope = old_scope
+                        raise
+                    self.current_scope = old_scope
+                
+                # 执行体
+                old_scope = self.current_scope
+                self.current_scope = self.current_scope.enter()
+                result = IntValue(0)
+                try:
+                    for name, val in bindings.items():
+                        self.current_scope.declare(name, val)
+                    
+                    if case.body:
+                        result = self.evaluate_expression(case.body, context)
+                    else:
+                        for stmt in case.body_block:
+                            result = self.execute_statement(stmt)
+                            if self.return_flag or self.break_flag:
+                                break
+                finally:
+                    self.current_scope = old_scope
+                return result
+        
+        raise MatchError(f"match 表达式未覆盖所有情况: {match_value}", expr.line)
+    
+    def _pattern_match(self, pattern, value: RuntimeValue, bindings: dict) -> bool:
+        """尝试匹配一个模式，成功时将绑定写入 bindings dict"""
+        if isinstance(pattern, WildcardPattern):
+            return True
+        
+        if isinstance(pattern, LiteralPattern):
+            if isinstance(value, NoneValue):
+                return pattern.value is None
+            if isinstance(value, BoolValue) and isinstance(pattern.value, bool):
+                return value.value == pattern.value
+            if isinstance(value, IntValue) and isinstance(pattern.value, int):
+                return value.value == pattern.value
+            if isinstance(value, FloatValue) and isinstance(pattern.value, (int, float)):
+                return value.value == pattern.value
+            if isinstance(value, StringValue) and isinstance(pattern.value, str):
+                return value.value == pattern.value
+            return False
+        
+        if isinstance(pattern, VariablePattern):
+            bindings[pattern.name] = value
+            return True
+        
+        if isinstance(pattern, OrPattern):
+            for sub in pattern.patterns:
+                if self._pattern_match(sub, value, bindings):
+                    return True
+            return False
+        
+        raise MatchError(f"不支持的匹配模式: {type(pattern).__name__}")
+    
     def execute_break(self) -> RuntimeValue:
         """执行break语句"""
         self.break_flag = True
@@ -2679,9 +2918,9 @@ class Interpreter:
                 except KeyError:
                     pass  # 变量未找到，继续检查内置函数
             else:
-                # 链式查找全局作用域
+                # 链式查找当前作用域（含祖先链）
                 try:
-                    return self.global_scope.get(expr.name)
+                    return self.current_scope.get(expr.name)
                 except NameError:
                     pass  # 继续检查内置函数
             
@@ -2791,6 +3030,9 @@ class Interpreter:
                     break
             self.current_scope = old_scope
             return result
+        
+        elif isinstance(expr, MatchExpr):
+            return self.execute_match(expr, context)
         
         elif isinstance(expr, BinaryOp):
             left = self.evaluate_expression(expr.left, context)
