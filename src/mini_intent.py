@@ -2409,6 +2409,10 @@ class Interpreter:
         # key: Expression AST 节点, value: 该变量引用的作用域深度
         # 空字典表示未经过 resolver,走旧版链式查找
         self.locals: Dict[Any, int] = {}
+        # ── 错误上下文跟踪 ──
+        self.source_lines: List[str] = []
+        self.current_line: int = 0
+        self.current_col: int = 0
 
     def resolve(self, expr, depth: int) -> None:
         """Resolver 回调:记录表达式的变量深度
@@ -2638,6 +2642,33 @@ class Interpreter:
             raise TypeError(f"Err() 期望1个参数,得到 {len(args)}个")
         return make_err(args[0])
 
+    def _set_source(self, code: str) -> None:
+        """设置源码行列表,用于错误上下文显示"""
+        self.source_lines = code.split('\n')
+
+    def _error_context(self, msg: str) -> str:
+        """格式化运行时错误,附加行号和源码片段"""
+        parts = [msg]
+        if self.source_lines and 0 < self.current_line <= len(self.source_lines):
+            line = self.current_line
+            col = self.current_col
+            src = self.source_lines[line - 1]
+            parts.append(f"   at line {line}, column {col}")
+            # 显示源码行
+            parts.append(f"   {line} | {src}")
+            # 指示箭头
+            if col > 0:
+                indent = 4 + len(str(line))
+                parts.append(f"   {' ' * indent}{' ' * (col - 1)}^")
+        return '\n'.join(parts)
+
+    def _track_node(self, node) -> None:
+        """跟踪当前执行的 AST 节点位置"""
+        if hasattr(node, 'line'):
+            self.current_line = node.line or self.current_line
+        if hasattr(node, 'column'):
+            self.current_col = node.column or self.current_col
+
     def execute_program(self, program: Program, module_mode: bool = False) -> RuntimeValue:
         """执行整个程序
         module_mode=True 时只注册函数/变量,不执行main(用于模块加载)
@@ -2672,6 +2703,14 @@ class Interpreter:
 
     def execute_statement(self, stmt: ASTNode) -> RuntimeValue:
         """执行语句"""
+        self._track_node(stmt)
+        try:
+            return self._execute_statement_safe(stmt)
+        except (NameError, ValueError, TypeError, RuntimeError) as e:
+            raise type(e)(self._error_context(str(e)))
+
+    def _execute_statement_safe(self, stmt: ASTNode) -> RuntimeValue:
+        """执行语句（内部，不含错误包装）"""
         if isinstance(stmt, VariableDecl):
             return self.execute_variable_decl(stmt)
         elif isinstance(stmt, Assignment):
@@ -3309,6 +3348,7 @@ class Interpreter:
 
     def evaluate_expression(self, expr: Expression, context: Optional[Dict] = None) -> RuntimeValue:
         """评估表达式"""
+        self._track_node(expr)
         if context is None:
             context = {}
 
@@ -3863,6 +3903,9 @@ class IntentREPL:
                 print(f"⚠️  发现 {len(parser.errors)} 个语法错误:")
                 for err in parser.errors:
                     print(f"    • {err}")
+
+            # 设置源码用于错误上下文
+            self.interpreter._set_source(code)
 
             # 解释执行
             result = self.interpreter.execute_program(ast)
