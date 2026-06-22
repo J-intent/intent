@@ -1078,7 +1078,72 @@ class Parser:
                 self.advance()
         self.expect(TokenType.SYMBOL, '}')
 
+        # 穷举性检查
+        self._check_match_exhaustive(cases, start_token)
+
         return MatchExpr(value=value, cases=cases, line=start_token.line, column=start_token.column)
+
+    def _check_match_exhaustive(self, cases, token) -> None:
+        """静态检查 match 分支是否穷举所有可能情况"""
+        # 收集所有叶子模式（展平或模式）
+        all_patterns = []
+        for case in cases:
+            all_patterns.extend(self._flatten_or_pattern(case.pattern))
+
+        # 通配符 _ → 总是穷举
+        if any(isinstance(p, WildcardPattern) for p in all_patterns):
+            return
+        # 变量模式也匹配一切
+        if any(isinstance(p, VariablePattern) for p in all_patterns):
+            return
+
+        # Bool 穷举: true + false 必须同时存在
+        bool_values = set()
+        has_non_bool = False
+        for p in all_patterns:
+            if isinstance(p, LiteralPattern) and isinstance(p.value, bool):
+                bool_values.add(p.value)
+            elif isinstance(p, LiteralPattern):
+                has_non_bool = True
+        if bool_values and not has_non_bool:
+            if True not in bool_values:
+                self.error(token, "match 未穷举: Bool 类型缺少 true 分支")
+                return
+            if False not in bool_values:
+                self.error(token, "match 未穷举: Bool 类型缺少 false 分支")
+                return
+            return  # 纯 Bool match 已穷举
+
+        # 构造器模式: 如果只用了 Ok/Err，两者都需要
+        constructors = set()
+        has_other_pattern = False
+        for p in all_patterns:
+            if isinstance(p, ConstructorPattern):
+                constructors.add(p.constructor)
+            elif not isinstance(p, LiteralPattern):
+                has_other_pattern = True
+        if constructors and not has_other_pattern:
+            if 'Ok' in constructors and 'Err' in constructors:
+                return  # Result 穷举
+            if 'Ok' not in constructors:
+                self.error(token, "match 未穷举: Result 类型缺少 Ok 分支")
+            if 'Err' not in constructors:
+                self.error(token, "match 未穷举: Result 类型缺少 Err 分支")
+            return
+
+        # 无法静态确定但无通配符 → 警告
+        if not has_other_pattern and not constructors:
+            self.error(token,
+                f"match 缺少通配符 _ 分支，可能未穷举所有情况")
+
+    def _flatten_or_pattern(self, pattern: 'MatchPattern') -> list:
+        """展平或模式为叶子模式列表"""
+        if isinstance(pattern, OrPattern):
+            result = []
+            for p in pattern.patterns:
+                result.extend(self._flatten_or_pattern(p))
+            return result
+        return [pattern]
 
     def _parse_match_case(self) -> Optional['MatchCase']:
         """解析单个 match 分支: pattern [if guard] => body"""
