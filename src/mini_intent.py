@@ -2585,9 +2585,12 @@ class Interpreter:
         if expected is None:
             return  # 未知类型，宽容处理
         if not expected.can_assign_from(value.get_type()):
-            actual = value.get_type().name
-            msg = f"类型不匹配{context}: 期望 {type_name}，但得到 {actual}"
-            raise TypeError(msg)
+            # 基类名宽松匹配：裸类型名（如 Dict）允许匹配任何同族泛型（如 Dict<String, Int>）
+            # 避免类型推断后精确校验因泛型参数不一致而误报
+            if not value.get_type().name.startswith(type_name):
+                actual = value.get_type().name
+                msg = f"类型不匹配{context}: 期望 {type_name}，但得到 {actual}"
+                raise TypeError(msg)
     
     def get_default_value(self, type_name: Optional[str]) -> RuntimeValue:
         """获取默认值"""
