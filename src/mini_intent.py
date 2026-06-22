@@ -2572,6 +2572,8 @@ class Interpreter:
             'sum': self._builtin_sum,
             'Ok': self._builtin_ok,
             'Err': self._builtin_err,
+            'read_file': self._builtin_read_file,
+            'write_file': self._builtin_write_file,
         }
 
     def _builtin_print(self, args: List[RuntimeValue]) -> RuntimeValue:
@@ -2728,6 +2730,37 @@ class Interpreter:
         if len(args) != 1:
             raise TypeError(f"Err() 期望1个参数,得到 {len(args)}个")
         return make_err(args[0])
+
+    def _builtin_read_file(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """read_file(path) — 读取文件内容为字符串"""
+        if len(args) != 1:
+            raise TypeError(f"read_file() 期望1个参数,得到 {len(args)}个")
+        path = args[0]
+        if not isinstance(path, StringValue):
+            raise TypeError(f"read_file() 参数必须是字符串")
+        try:
+            with open(path.value, 'r', encoding='utf-8') as f:
+                return StringValue(f.read())
+        except FileNotFoundError:
+            raise RuntimeError(f"文件不存在: {path.value}")
+        except PermissionError:
+            raise RuntimeError(f"没有权限读取文件: {path.value}")
+
+    def _builtin_write_file(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """write_file(path, content) — 写入字符串到文件"""
+        if len(args) != 2:
+            raise TypeError(f"write_file() 期望2个参数(path, content),得到 {len(args)}个")
+        path, content = args[0], args[1]
+        if not isinstance(path, StringValue):
+            raise TypeError(f"write_file() 第1个参数必须是字符串")
+        if not isinstance(content, StringValue):
+            raise TypeError(f"write_file() 第2个参数必须是字符串")
+        try:
+            with open(path.value, 'w', encoding='utf-8') as f:
+                f.write(content.value)
+            return IntValue(0)
+        except PermissionError:
+            raise RuntimeError(f"没有权限写入文件: {path.value}")
 
     def _set_source(self, code: str) -> None:
         """设置源码行列表,用于错误上下文显示"""
