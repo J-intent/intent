@@ -196,7 +196,7 @@ class Lexer:
         'invariant', 'pure', 'effect', 'import', 'from', 'as',
         'None', 'True', 'False', 'true', 'false', 'null',
         'and', 'or', 'not', 'in', 'is',
-        'class', 'this'  # 类系统
+        'class', 'this', 'mut'  # 类系统
     }
 
     # 内置类型名 - 不是关键字,只是预定义的类型标识符
@@ -898,9 +898,19 @@ class Parser:
     def parse_variable_decl(self) -> VariableDecl:
         """解析变量声明"""
         keyword = self.current_token.value
-        is_const = keyword == 'const'
         start_token = self.current_token
         self.advance()  # 跳过let/var/const
+
+        # 检测 mut 关键字: let mut x = ... 表示可变变量
+        if keyword == 'let' and self.match(TokenType.KEYWORD, 'mut'):
+            is_const = False
+            self.advance()  # 跳过 mut
+        elif keyword == 'var':
+            is_const = False
+        elif keyword == 'let':
+            is_const = True
+        else:
+            is_const = (keyword == 'const')
 
         decl = VariableDecl(
             line=start_token.line,
