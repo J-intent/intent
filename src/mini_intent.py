@@ -327,7 +327,7 @@ class Lexer:
         char = self.current_char()
         
         # 先检查是否是标点符号
-        if char in '(){}[],:;.':
+        if char in '(){}[],:;.?' :
             self.tokens.append(Token(TokenType.SYMBOL, char, self.line, self.column, self.filename))
             self.advance()
             return
@@ -1295,7 +1295,18 @@ class Parser:
             operand = self.parse_unary()
             return UnaryOp(op=op_token.value, operand=operand, line=op_token.line, column=op_token.column)
         
-        return self.parse_primary()
+        return self.parse_postfix()
+    
+    def parse_postfix(self) -> Expression:
+        """解析后缀运算符: expr?  (?,Err 传播)"""
+        expr = self.parse_primary()
+        
+        while self.match(TokenType.SYMBOL, '?'):
+            token = self.current_token
+            self.advance()
+            expr = TryExpr(expr=expr, line=token.line, column=token.column)
+        
+        return expr
     
     def parse_primary(self) -> Expression:
         """解析基本表达式"""
@@ -1557,6 +1568,13 @@ class IfExpr(Expression):
     condition: Expression = None
     then_body: List[ASTNode] = field(default_factory=list)
     else_body: List[ASTNode] = field(default_factory=list)
+    line: int = 0
+    column: int = 0
+
+@dataclass
+class TryExpr(Expression):
+    """? 运算符: expr ?  —— 遇 Err 提前 return"""
+    expr: Expression = None
     line: int = 0
     column: int = 0
 
@@ -2507,12 +2525,13 @@ class Interpreter:
         value = self.evaluate_expression(stmt.value) if stmt.value else self.get_default_value(stmt.var_type)
         
         # 类型推断：当未标注类型时，从初始值推断
-        if (stmt.var_type is None or stmt.var_type == "Any") and stmt.value:
-            stmt.var_type = self._infer_type_from_value(value)
+        effective_type = stmt.var_type
+        if (effective_type is None or effective_type == "Any") and stmt.value:
+            effective_type = self._infer_type_from_value(value)
         
         # 运行时类型校验
-        if stmt.var_type and stmt.var_type != "Any":
-            self._check_type(value, stmt.var_type, f"变量 '{stmt.name}'")
+        if effective_type and effective_type != "Any":
+            self._check_type(value, effective_type, f"变量 '{stmt.name}'")
         
         self.current_scope.declare(stmt.name, value, stmt.is_const)
         return value
@@ -3172,6 +3191,20 @@ class Interpreter:
         elif isinstance(expr, MatchExpr):
             return self.execute_match(expr, context)
         
+        elif isinstance(expr, TryExpr):
+            # ?,Err 传播: expr ? 
+            result = self.evaluate_expression(expr.expr, context)
+            if isinstance(result, ResultValue) and not result.is_ok:
+                # Err → 提前 return
+                self.return_flag = True
+                self.return_value = result
+                return result
+            # Ok → 解包内部值
+            if isinstance(result, ResultValue):
+                return result.ok_value
+            # 非 Result 类型 → 透传
+            return result
+        
         elif isinstance(expr, BinaryOp):
             left = self.evaluate_expression(expr.left, context)
             right = self.evaluate_expression(expr.right, context)
@@ -3270,6 +3303,14 @@ class Interpreter:
         # 字符串拼接
         if op == '+' and isinstance(left, StringValue) and isinstance(right, StringValue):
             return StringValue(left.value + right.value)
+        # 字符串 + 任意类型 → 字符串拼接
+        if op == '+' and isinstance(left, StringValue):
+            right_str = right.value if isinstance(right, StringValue) else str(right.value)
+            return StringValue(left.value + right_str)
+        if op == '+' and isinstance(right, StringValue):
+            left_str = left.value if isinstance(left, StringValue) else str(left.value)
+            return StringValue(left_str + right.value)
+        
         # 字符串重复
         if op == '*' and isinstance(left, StringValue) and isinstance(right, IntValue):
             return StringValue(left.value * int(right.value))

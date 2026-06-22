@@ -248,7 +248,8 @@ class Resolver:
         from mini_intent import (
             Literal, Variable, BinaryOp, UnaryOp, CallExpr,
             MemberAccess, ListExpr, DictExpr, SubscriptExpr, PipeExpr, IfExpr,
-            MatchExpr, LiteralPattern, VariablePattern, WildcardPattern, OrPattern
+            MatchExpr, TryExpr,
+            LiteralPattern, VariablePattern, WildcardPattern, OrPattern, ConstructorPattern
         )
         
         if isinstance(expr, Literal):
@@ -308,6 +309,9 @@ class Resolver:
                     self._resolve_expr(case.body)
                 else:
                     self._resolve_block(case.body_block)
+        
+        elif isinstance(expr, TryExpr):
+            self._resolve_expr(expr.expr)
     
     def _resolve_pattern(self, pattern) -> None:
         """解析匹配模式"""
