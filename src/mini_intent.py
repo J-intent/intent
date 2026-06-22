@@ -564,13 +564,16 @@ class CallExpr(Expression):
 class Parser:
     """语法分析器 - 将Token流转换为AST"""
 
-    def __init__(self, tokens: List[Token]):
+    def __init__(self, tokens: List[Token], source: str = None):
         self.tokens = tokens
         self.pos = 0
         self.current_token = self.tokens[0] if tokens else Token(TokenType.EOF, "", 0, 0)
         self.previous = Token(TokenType.EOF, "", 0, 0)  # 上一个消费的 token
         self.errors: List[str] = []  # 收集所有语法错误
         self.panic_mode = False  # panic mode: 跳过 token 直到找到同步点
+        self.source_lines: List[str] = None  # 源码行（用于错误上下文）
+        if source:
+            self.source_lines = source.split('\n')
 
     def advance(self):
         """前进到下一个token"""
@@ -581,13 +584,32 @@ class Parser:
         else:
             self.current_token = Token(TokenType.EOF, "", 0, 0)
 
+    def _set_source(self, source: str):
+        """设置源码，用于错误信息上下文"""
+        self.source_lines = source.split('\n')
+
+    def _format_error(self, token: Token, message: str) -> str:
+        """格式化带源码上下文的错误信息"""
+        line_num = token.line
+        col_num = token.column
+        header = f"语法错误: {message}"
+        loc = f"   at line {line_num}, column {col_num}"
+
+        if self.source_lines and 0 < line_num <= len(self.source_lines):
+            src = self.source_lines[line_num - 1]
+            src_display = f"   {line_num} | {src}"
+            pointer = ' ' * (len(f"   {line_num} | ") + col_num - 1) + '^'
+            return f"{header}\n{loc}\n{src_display}\n{pointer}"
+        else:
+            return f"{header}\n{loc}"
+
     def error(self, token: Token, message: str):
         """记录错误并抛出。panic_mode 下只抛出不记录(抑制级联报错)"""
+        formatted = self._format_error(token, message)
         if not self.panic_mode:
-            err = f"语法错误: {message},行 {token.line},列 {token.column}"
-            self.errors.append(err)
+            self.errors.append(formatted)
         self.panic_mode = True
-        raise SyntaxError(f"语法错误: {message},行 {token.line},列 {token.column}")
+        raise SyntaxError(formatted)
 
     def synchronize(self):
         """跳过 token 直到语句边界(; / 关键字 / } / EOF)"""
@@ -2420,7 +2442,7 @@ class ModuleSystem:
                 # 解析并执行模块代码
                 lexer = Lexer(code, filepath)
                 tokens = lexer.tokenize()
-                parser = Parser(tokens)
+                parser = Parser(tokens, code)
                 ast = parser.parse()
 
                 # 执行模块代码
@@ -3183,7 +3205,7 @@ class Interpreter:
                 # 解析并执行模块代码(module_mode=True)
                 lexer = Lexer(code, module_file)
                 tokens = lexer.tokenize()
-                parser = Parser(tokens)
+                parser = Parser(tokens, code)
                 ast = parser.parse()
                 self.execute_program(ast, module_mode=True)
 
@@ -3960,7 +3982,7 @@ class IntentREPL:
             tokens = lexer.tokenize()
 
             # 语法分析
-            parser = Parser(tokens)
+            parser = Parser(tokens, code)
             ast = parser.parse()
 
             # 如有解析错误,报告但不阻止执行(尽可能多的正确部分仍可执行)
@@ -4229,7 +4251,7 @@ def run_code(code: str, interpreter: Interpreter, args):
             print("📐 语法分析...")
             lexer = Lexer(code)
             tokens = lexer.tokenize()
-            parser = Parser(tokens)
+            parser = Parser(tokens, code)
             ast = parser.parse()
 
             print("\n语法分析结果:")
@@ -4251,7 +4273,7 @@ def run_code(code: str, interpreter: Interpreter, args):
         print("⚡ 解释执行...\n")
         lexer = Lexer(code)
         tokens = lexer.tokenize()
-        parser = Parser(tokens)
+        parser = Parser(tokens, code)
         ast = parser.parse()
 
         # 如有解析错误,报告但不阻止执行(尽可能多的正确部分仍可执行)
