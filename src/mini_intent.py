@@ -3058,7 +3058,6 @@ class Interpreter:
                     self.current_scope = old_scope
                     return result
                 elif self.break_flag:
-                    self.break_flag = False
                     self.current_scope = old_scope
                     break
                 elif self.continue_flag:
@@ -3068,6 +3067,7 @@ class Interpreter:
             self.current_scope = old_scope
 
             if self.break_flag:
+                self.break_flag = False
                 break
 
         return result
@@ -3097,7 +3097,6 @@ class Interpreter:
                     self.current_scope = old_scope
                     return result
                 elif self.break_flag:
-                    self.break_flag = False
                     break
                 elif self.continue_flag:
                     self.continue_flag = False
@@ -3106,6 +3105,7 @@ class Interpreter:
             self.current_scope = old_scope
 
             if self.break_flag:
+                self.break_flag = False
                 break
 
         return result
