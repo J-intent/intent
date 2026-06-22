@@ -311,7 +311,10 @@ class Resolver:
     
     def _resolve_pattern(self, pattern) -> None:
         """解析匹配模式"""
-        from mini_intent import LiteralPattern, VariablePattern, WildcardPattern, OrPattern
+        from mini_intent import (
+            LiteralPattern, VariablePattern, WildcardPattern,
+            OrPattern, ConstructorPattern
+        )
         
         if isinstance(pattern, LiteralPattern) or isinstance(pattern, WildcardPattern):
             pass
@@ -320,6 +323,9 @@ class Resolver:
         elif isinstance(pattern, OrPattern):
             for sub in pattern.patterns:
                 self._resolve_pattern(sub)
+        elif isinstance(pattern, ConstructorPattern):
+            if pattern.inner:
+                self._resolve_pattern(pattern.inner)
     
     def _resolve_variable_expr(self, expr) -> None:
         """解析变量引用"""

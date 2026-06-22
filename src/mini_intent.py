@@ -692,10 +692,10 @@ class Parser:
         # 返回类型 (支持 :Type 和 ->Type 两种语法)
         if self.match(TokenType.SYMBOL, ':'):
             self.advance()
-            func.return_type = self.expect(TokenType.IDENTIFIER).value
+            func.return_type = self._parse_type_annotation()
         elif self.match(TokenType.OPERATOR, '->'):
             self.advance()
-            func.return_type = self.expect(TokenType.IDENTIFIER).value
+            func.return_type = self._parse_type_annotation()
         
         # 契约
         while True:
@@ -750,7 +750,7 @@ class Parser:
             param_type = "Any"  # 默认类型
             if self.match(TokenType.SYMBOL, ':'):
                 self.advance()  # 消耗冒号
-                param_type = self.expect(TokenType.IDENTIFIER).value
+                param_type = self._parse_type_annotation()
             params.append((param_name, param_type))
             
             # 更多参数
@@ -761,7 +761,7 @@ class Parser:
                 param_type = "Any"
                 if self.match(TokenType.SYMBOL, ':'):
                     self.advance()  # 消耗冒号
-                    param_type = self.expect(TokenType.IDENTIFIER).value
+                    param_type = self._parse_type_annotation()
                 params.append((param_name, param_type))
         
         return params
@@ -866,7 +866,7 @@ class Parser:
         # 类型注解
         if self.match(TokenType.SYMBOL, ':'):
             self.advance()
-            decl.var_type = self.expect(TokenType.IDENTIFIER).value
+            decl.var_type = self._parse_type_annotation()
         
         # 初始值
         if self.match(TokenType.OPERATOR, '='):
@@ -1095,9 +1095,19 @@ class Parser:
             self.advance()
             return LiteralPattern(value=token.value)
         
-        # 标识符 → 变量模式
+        # 标识符 → 变量模式 或 构造器模式 (Ok(v)/Err(e))
         if self.match(TokenType.IDENTIFIER):
             token = self.current_token
+            name = token.value
+            
+            # 构造器模式: Ok(inner) / Err(inner)
+            if name in ('Ok', 'Err') and self.peek() and self.peek().type == TokenType.SYMBOL and self.peek().value == '(':
+                self.advance()  # 消费 Ok/Err
+                self.expect(TokenType.SYMBOL, '(')
+                inner = self._parse_pattern()
+                self.expect(TokenType.SYMBOL, ')')
+                return ConstructorPattern(constructor=name, inner=inner)
+            
             self.advance()
             return VariablePattern(name=token.value)
         
@@ -1111,6 +1121,29 @@ class Parser:
             self.advance()
             patterns.append(self._parse_pattern())
         return OrPattern(patterns=patterns)
+    
+    def _parse_type_annotation(self) -> str:
+        """解析类型标注: Int | List[Int] | Dict[String, Int] | Result[Int, String]"""
+        base = self.expect(TokenType.IDENTIFIER).value
+        
+        # 泛型参数 (支持 <> 和 [])
+        if self.match(TokenType.OPERATOR, '<') or self.match(TokenType.SYMBOL, '['):
+            bracket = self.current_token.value
+            self.advance()
+            args = []
+            # 第一个类型参数
+            next_type = self._parse_type_annotation()
+            args.append(next_type)
+            while self.match(TokenType.SYMBOL, ','):
+                self.advance()
+                args.append(self._parse_type_annotation())
+            if bracket == '<':
+                self.expect(TokenType.OPERATOR, '>')
+            else:
+                self.expect(TokenType.SYMBOL, ']')
+            return f"{base}<{', '.join(args)}>"
+        
+        return base
     
     def parse_while_stmt(self) -> WhileStmt:
         """解析while循环"""
@@ -1475,6 +1508,12 @@ class OrPattern(MatchPattern):
     patterns: List[MatchPattern] = field(default_factory=list)
 
 @dataclass
+class ConstructorPattern(MatchPattern):
+    """构造器模式: Ok(v), Err(e) — 解构 Result 等"""
+    constructor: str = ""  # "Ok" | "Err"
+    inner: Optional[MatchPattern] = None  # 内部模式 (v, e)
+
+@dataclass
 class MatchCase(ASTNode):
     """match 分支: pattern [if guard] => body"""
     pattern: MatchPattern = None
@@ -1603,6 +1642,20 @@ class DictType(Type):
         if isinstance(other, DictType):
             return (self.key_type.can_assign_from(other.key_type) and
                     self.value_type.can_assign_from(other.value_type))
+        return False
+
+class ResultType(Type):
+    """Result<T, E> — 成功或失败的结果类型"""
+    
+    def __init__(self, ok_type: Type, err_type: Type):
+        super().__init__(f"Result[{ok_type}, {err_type}]")
+        self.ok_type = ok_type
+        self.err_type = err_type
+    
+    def can_assign_from(self, other: Type) -> bool:
+        if isinstance(other, ResultType):
+            return (self.ok_type.can_assign_from(other.ok_type) and
+                    self.err_type.can_assign_from(other.err_type))
         return False
 
 # ==================== 运行时值 ====================
@@ -1742,6 +1795,64 @@ class DictValue(RuntimeValue):
     
     def to_bool(self) -> bool:
         return len(self.value) > 0
+
+@dataclass
+class ResultValue(RuntimeValue):
+    """Result<T, E> 值 — 可能成功也可能失败"""
+    is_ok: bool = True
+    
+    def __init__(self, ok_type: Type, err_type: Type):
+        super().__init__(ResultType(ok_type, err_type), None)
+        self.is_ok = True
+        self.ok_value = None
+        self.err_value = None
+        self.ok_type = ok_type
+        self.err_type = err_type
+    
+    def __str__(self):
+        if self.is_ok:
+            return f"Ok({self.ok_value})"
+        return f"Err({self.err_value})"
+    
+    def __repr__(self):
+        return str(self)
+    
+    def get_type(self) -> Type:
+        return ResultType(self.ok_type, self.err_type)
+    
+    def to_bool(self) -> bool:
+        return self.is_ok
+    
+    def unwrap(self) -> RuntimeValue:
+        """解包 Ok 值，如果是 Err 则抛异常"""
+        if self.is_ok:
+            return self.ok_value
+        raise NameError(f"unwrap 了 Err: {self.err_value}")
+    
+    def copy(self) -> 'ResultValue':
+        rv = ResultValue(self.ok_type, self.err_type)
+        rv.is_ok = self.is_ok
+        rv.ok_value = self.ok_value.copy() if self.ok_value else None
+        rv.err_value = self.err_value.copy() if self.err_value else self.err_value
+        return rv
+
+def make_ok(value: RuntimeValue, err_type: Type = None) -> ResultValue:
+    """创建 Ok 值"""
+    if err_type is None:
+        err_type = StringType()
+    rv = ResultValue(value.get_type(), err_type)
+    rv.is_ok = True
+    rv.ok_value = value
+    return rv
+
+def make_err(error: RuntimeValue, ok_type: Type = None) -> ResultValue:
+    """创建 Err 值"""
+    if ok_type is None:
+        ok_type = IntType()
+    rv = ResultValue(ok_type, error.get_type())
+    rv.is_ok = False
+    rv.err_value = error
+    return rv
 
 @dataclass
 class FunctionValue(RuntimeValue):
@@ -2173,6 +2284,8 @@ class Interpreter:
             'max': self._builtin_max,
             'min': self._builtin_min,
             'sum': self._builtin_sum,
+            'Ok': self._builtin_ok,
+            'Err': self._builtin_err,
         }
     
     def _builtin_print(self, args: List[RuntimeValue]) -> RuntimeValue:
@@ -2317,6 +2430,18 @@ class Interpreter:
             total = sum(v.value for v in values)
             return FloatValue(total)
         raise TypeError(f"sum() 列表元素必须是数字")
+    
+    def _builtin_ok(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """Ok(value) — 创建成功的 Result"""
+        if len(args) != 1:
+            raise TypeError(f"Ok() 期望1个参数，得到 {len(args)}个")
+        return make_ok(args[0])
+    
+    def _builtin_err(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """Err(error) — 创建失败的 Result"""
+        if len(args) != 1:
+            raise TypeError(f"Err() 期望1个参数，得到 {len(args)}个")
+        return make_err(args[0])
     
     def execute_program(self, program: Program, module_mode: bool = False) -> RuntimeValue:
         """执行整个程序
@@ -2695,6 +2820,19 @@ class Interpreter:
             for sub in pattern.patterns:
                 if self._pattern_match(sub, value, bindings):
                     return True
+            return False
+        
+        if isinstance(pattern, ConstructorPattern):
+            if not isinstance(value, ResultValue):
+                return False
+            if pattern.constructor == 'Ok' and value.is_ok:
+                if pattern.inner:
+                    return self._pattern_match(pattern.inner, value.ok_value, bindings)
+                return True
+            if pattern.constructor == 'Err' and not value.is_ok:
+                if pattern.inner:
+                    return self._pattern_match(pattern.inner, value.err_value, bindings)
+                return True
             return False
         
         raise MatchError(f"不支持的匹配模式: {type(pattern).__name__}")
