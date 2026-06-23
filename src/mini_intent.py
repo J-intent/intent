@@ -425,6 +425,7 @@ class Program(ASTNode):
 class FunctionDef(ASTNode):
     """函数定义节点"""
     name: str = ""
+    type_params: List[str] = field(default_factory=list)  # 泛型参数如 ['T', 'U']
     params: List[Tuple[str, str]] = field(default_factory=list)  # (参数名, 类型)
     return_type: Optional[str] = None
     requires: List['Expression'] = field(default_factory=list)  # 前置条件
@@ -719,6 +720,15 @@ class Parser:
 
         # 函数名
         func.name = self.expect(TokenType.IDENTIFIER).value
+
+        # 泛型参数: identity<T>(x: T) -> T
+        if self.match(TokenType.OPERATOR, '<'):
+            self.advance()
+            func.type_params.append(self.expect(TokenType.IDENTIFIER).value)
+            while self.match(TokenType.SYMBOL, ','):
+                self.advance()
+                func.type_params.append(self.expect(TokenType.IDENTIFIER).value)
+            self.expect(TokenType.OPERATOR, '>')
 
         # 参数列表
         self.expect(TokenType.SYMBOL, '(')
@@ -3180,6 +3190,56 @@ class Interpreter:
                 return name
         return "Any"
 
+    def _unify_types(self, decl_str: str, actual_type, bindings: Dict[str, str]):
+        """统一类型标注与运行时的 Type 对象，填充类型参数绑定
+
+        decl_str: 声明中的类型标注字符串，如 "List<T>" 或 "T"
+        actual_type: 实际的 Type 对象，如 ListType(IntType())
+        bindings: 类型参数 → 具体类型名的映射
+        """
+        if not decl_str:
+            return
+
+        # 情况1: decl_str 本身就是一个类型参数名
+        if decl_str in bindings or self._is_type_param(decl_str):
+            bindings[decl_str] = actual_type.name
+            return
+
+        # 情况2: decl_str 是 List<T> 对应 actual 是 ListType(X)
+        if decl_str.startswith("List<") and decl_str.endswith(">"):
+            inner = decl_str[5:-1]   # "T"
+            if isinstance(actual_type, ListType):
+                self._unify_types(inner, actual_type.element_type, bindings)
+            return
+
+        # 情况3: decl_str 是 Dict<K,V>
+        if decl_str.startswith("Dict<") and decl_str.endswith(">"):
+            inner = decl_str[5:-1]
+            parts = [p.strip() for p in inner.split(",")]
+            if isinstance(actual_type, DictType) and len(parts) == 2:
+                self._unify_types(parts[0], actual_type.key_type, bindings)
+                self._unify_types(parts[1], actual_type.value_type, bindings)
+            return
+
+    def _is_type_param(self, name: str) -> bool:
+        """判断一个类型名是否是泛型参数（首字母大写单字母）= 类型变量"""
+        return bool(name) and len(name) == 1 and name[0].isupper()
+
+    def _subst_type(self, type_name: str, bindings: Dict[str, str]) -> str:
+        """将类型标注中的泛型参数替换为推断出的具体类型
+        identity<T>(x: T) -> T  +  T=Int → Int
+        """
+        if not type_name or not bindings:
+            return type_name
+        # 词法化: Dict<T, Int> → ["Dict<", "T", ", ", "Int", ">"]
+        result = type_name
+        for tp, concrete in bindings.items():
+            # 只替换单词级别的 T，避免 "T" 出现在 "Tuple" 中
+            import re
+            pattern = r'(?<![a-zA-Z0-9_])' + re.escape(tp) + r'(?![a-zA-Z0-9_])'
+            result = re.sub(pattern, concrete, result)
+        return result
+
     def _type_from_name(self, type_name: str) -> Optional[Type]:
         """类型名 → Type 实例"""
         if type_name == "Int":
@@ -3611,10 +3671,11 @@ class Interpreter:
 
     def execute_function(self, func, args: List[RuntimeValue],
                           closure_scope: Optional[Scope] = None) -> RuntimeValue:
-        """执行函数 - 支持闭包
+        """执行函数 - 支持闭包和泛型类型推断
 
         如果 func 是 FunctionValue,自动提取其闭包作用域。
         闭包作用域作为新作用域的 parent,而非当前的 current_scope。
+        泛型参数从实参类型推断,代入形参注解和返回类型注解。
         """
         # 提取 FunctionValue 的闭包
         if isinstance(func, FunctionValue):
@@ -3628,14 +3689,34 @@ class Interpreter:
         func_name = getattr(func_def, 'name', '<lambda>')
         print(f"📋 执行函数: {func_name}")
 
+        # ── 泛型类型推断 ──
+        type_bindings: Dict[str, str] = {}
+        type_params = getattr(func_def, 'type_params', [])
+        if type_params:
+            # 对每个参数：统一声明的类型标注与实际类型，解出类型参数的绑定
+            for (param_name, decl_type), arg_value in zip(func_def.params, args):
+                if decl_type:
+                    self._unify_types(decl_type, arg_value.get_type(), type_bindings)
+            # 未绑定类型参数的 fallback
+            for tp in type_params:
+                if tp not in type_bindings:
+                    type_bindings[tp] = "Any"
+            # 代入形参标注和返回类型
+            subst_params = [(name, self._subst_type(pt, type_bindings))
+                            for name, pt in func_def.params]
+            subst_return = self._subst_type(func_def.return_type, type_bindings)
+        else:
+            subst_params = func_def.params
+            subst_return = func_def.return_type
+
         # 保存旧的变量状态,用闭包作用域作为父作用域
         old_scope = self.current_scope
         parent = closure_scope if closure_scope is not None else old_scope
         self.current_scope = Scope(parent=parent)
 
         # 设置参数(在验证契约之前,使参数名可用于 requires/ensures)
-        # 同时进行运行时类型校验
-        for (param_name, param_type), arg_value in zip(func_def.params, args):
+        # 同时进行运行时类型校验(使用泛型代入后的类型)
+        for (param_name, param_type), arg_value in zip(subst_params, args):
             if param_type and param_type != "Any":
                 self._check_type(arg_value, param_type, f"@ 参数 '{param_name}' (函数 {func_name})")
             self.current_scope.declare(param_name, arg_value.copy(), False)
@@ -3679,9 +3760,9 @@ class Interpreter:
         # 恢复作用域
         self.current_scope = old_scope
 
-        # 校验返回类型
-        if func_def.return_type and func_def.return_type != "Any":
-            self._check_type(result, func_def.return_type, f"@ 返回值 (函数 {func_name})")
+        # 校验返回类型(使用泛型代入后的返回类型)
+        if subst_return and subst_return != "Any":
+            self._check_type(result, subst_return, f"@ 返回值 (函数 {func_name})")
 
         return result
 
