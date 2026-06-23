@@ -2873,7 +2873,11 @@ class Interpreter:
         try:
             return self._execute_statement_safe(stmt)
         except (NameError, ValueError, TypeError, RuntimeError) as e:
-            raise type(e)(self._error_context(str(e)))
+            msg = str(e)
+            # 防止多层嵌套调用重复包装（如 main→bad() 在每层 execute_statement 都触发）
+            if '   at line' in msg:
+                raise
+            raise type(e)(self._error_context(msg))
 
     def _execute_statement_safe(self, stmt: ASTNode) -> RuntimeValue:
         """执行语句（内部，不含错误包装）"""
@@ -2907,6 +2911,10 @@ class Interpreter:
     def execute_variable_decl(self, stmt: VariableDecl) -> RuntimeValue:
         """执行变量声明"""
         value = self.evaluate_expression(stmt.value) if stmt.value else self.get_default_value(stmt.var_type)
+
+        # ? 操作符提前返回时不校验类型（错误值正在传播）
+        if self.return_flag:
+            return value
 
         # 类型推断:当未标注类型时,从初始值推断
         effective_type = stmt.var_type
