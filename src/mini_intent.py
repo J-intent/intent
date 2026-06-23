@@ -961,7 +961,11 @@ class Parser:
         # 表达式语句
         expr = self.parse_expression()
         if expr:
-            self.expect(TokenType.SYMBOL, ';')
+            # 跳过后续换行 → 函数体末尾的表达式允许省略分号
+            while self.match(TokenType.NEWLINE):
+                self.advance()
+            if not self.match(TokenType.SYMBOL, '}'):
+                self.expect(TokenType.SYMBOL, ';')
             return expr
 
         return None
