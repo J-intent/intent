@@ -1959,6 +1959,14 @@ class FloatValue(RuntimeValue):
     def __str__(self):
         return str(self.value)
 
+    def __eq__(self, other):
+        if isinstance(other, FloatValue):
+            return self.value == other.value
+        return NotImplemented
+
+    def __hash__(self):
+        return hash(float(self.value))
+
 class StringValue(RuntimeValue):
     """字符串值"""
 
@@ -1967,6 +1975,14 @@ class StringValue(RuntimeValue):
 
     def __str__(self):
         return self.value
+
+    def __eq__(self, other):
+        if isinstance(other, StringValue):
+            return self.value == other.value
+        return NotImplemented
+
+    def __hash__(self):
+        return hash(self.value)
 
 class BoolValue(RuntimeValue):
     """布尔值"""
@@ -1983,7 +1999,9 @@ class BoolValue(RuntimeValue):
 class ListValue(RuntimeValue):
     """列表值"""
 
-    def __init__(self, values: List[RuntimeValue], element_type: Type):
+    def __init__(self, values: List[RuntimeValue], element_type: Type = None):
+        if element_type is None:
+            element_type = IntType() if not values else values[0].get_type()
         super().__init__(ListType(element_type), values)
 
     def __str__(self):
@@ -2021,8 +2039,14 @@ class NoneValue(RuntimeValue):
 class DictValue(RuntimeValue):
     """字典值 - 键值对集合"""
 
-    def __init__(self, entries: Dict, key_type: Type, value_type: Type):
+    def __init__(self, entries: Dict = None, key_type: Type = None, value_type: Type = None):
         """entries: Python dict key (str/int/float) → RuntimeValue"""
+        if entries is None:
+            entries = {}
+        if key_type is None:
+            key_type = StringType()
+        if value_type is None:
+            value_type = IntType()
         super().__init__(DictType(key_type, value_type), entries)
 
     def __str__(self):
@@ -2033,7 +2057,17 @@ class DictValue(RuntimeValue):
         return str(self)
 
     def get(self, key) -> RuntimeValue:
-        return self.value.get(key)
+        val = self.value.get(key)
+        if val is not None:
+            return val
+        # 松散匹配：如果 raw value 跟 dict key 的 RuntimeValue.value 相等
+        raw_key = key
+        if isinstance(key, (StringValue, IntValue, FloatValue, BoolValue)):
+            raw_key = key.value
+        for k, v in self.value.items():
+            if (isinstance(k, (StringValue, IntValue, FloatValue, BoolValue))
+                    and k.value == raw_key):
+                return v
 
     def set(self, key, value: RuntimeValue):
         self.value[key] = value
@@ -2620,6 +2654,30 @@ class Interpreter:
             'Err': self._builtin_err,
             'read_file': self._builtin_read_file,
             'write_file': self._builtin_write_file,
+            # std/time
+            'now': self._builtin_now,
+            'sleep': self._builtin_sleep,
+            # std/json
+            'json_parse': self._builtin_json_parse,
+            'json_dump': self._builtin_json_dump,
+            # std/math
+            'sqrt': self._builtin_sqrt,
+            'pow': self._builtin_pow,
+            'floor': self._builtin_floor,
+            'ceil': self._builtin_ceil,
+            # std/random
+            'random': self._builtin_random,
+            'randint': self._builtin_randint,
+            # input
+            'input': self._builtin_input,
+            # string
+            'split': self._builtin_split,
+            'join': self._builtin_join,
+            'trim': self._builtin_trim,
+            'ord': self._builtin_ord,
+            'chr': self._builtin_chr,
+            # sys
+            'version': self._builtin_version,
         }
 
     def _builtin_print(self, args: List[RuntimeValue]) -> RuntimeValue:
@@ -2807,6 +2865,188 @@ class Interpreter:
             return IntValue(0)
         except PermissionError:
             raise RuntimeError(f"没有权限写入文件: {path.value}")
+
+    # ══ std/time ──
+    def _builtin_now(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """now() — 返回当前 Unix 时间戳（秒，浮点）"""
+        import time
+        return FloatValue(time.time())
+
+    def _builtin_sleep(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """sleep(seconds: Float) — 暂停指定秒数"""
+        import time
+        if len(args) != 1:
+            raise TypeError(f"sleep() 期望1个参数,得到 {len(args)}个")
+        secs = args[0]
+        if isinstance(secs, IntValue):
+            secs = FloatValue(float(secs.value))
+        if not isinstance(secs, FloatValue):
+            raise TypeError(f"sleep() 参数必须是数字")
+        time.sleep(secs.value)
+        return IntValue(0)
+
+    # ══ std/json ──
+    def _builtin_json_parse(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """json_parse(json_str: String) — 解析 JSON 字符串为 Dict/List"""
+        import json as _json
+        if len(args) != 1:
+            raise TypeError(f"json_parse() 期望1个参数,得到 {len(args)}个")
+        if not isinstance(args[0], StringValue):
+            raise TypeError(f"json_parse() 参数必须是字符串")
+        try:
+            py_val = _json.loads(args[0].value)
+        except _json.JSONDecodeError as je:
+            raise ValueError(f"JSON 解析失败: {je.msg} (第{je.lineno}行第{je.colno}列)")
+        return self._py_to_runtime(py_val)
+
+    def _builtin_json_dump(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """json_dump(value) — 将值序列化为 JSON 字符串"""
+        import json as _json
+        if len(args) != 1:
+            raise TypeError(f"json_dump() 期望1个参数,得到 {len(args)}个")
+        py_val = self._runtime_to_py(args[0])
+        return StringValue(_json.dumps(py_val, ensure_ascii=False))
+
+    def _py_to_runtime(self, py_val):
+        """Python 原生值 → Intent RuntimeValue"""
+        if isinstance(py_val, dict):
+            d = DictValue()
+            for k, v in py_val.items():
+                d.value[StringValue(k)] = self._py_to_runtime(v)
+            return d
+        elif isinstance(py_val, list):
+            return ListValue([self._py_to_runtime(item) for item in py_val])
+        elif isinstance(py_val, bool):
+            return BoolValue(py_val)
+        elif isinstance(py_val, int):
+            return IntValue(py_val)
+        elif isinstance(py_val, float):
+            return FloatValue(py_val)
+        elif isinstance(py_val, str):
+            return StringValue(py_val)
+        elif py_val is None:
+            return NoneValue()
+        return StringValue(str(py_val))
+
+    def _runtime_to_py(self, val):
+        """Intent RuntimeValue → Python 原生值"""
+        if isinstance(val, IntValue):
+            return val.value
+        elif isinstance(val, FloatValue):
+            return val.value
+        elif isinstance(val, StringValue):
+            return val.value
+        elif isinstance(val, BoolValue):
+            return val.value
+        elif isinstance(val, NoneValue):
+            return None
+        elif isinstance(val, ListValue):
+            return [self._runtime_to_py(item) for item in val.value]
+        elif isinstance(val, DictValue):
+            return {self._runtime_to_py(k): self._runtime_to_py(v) for k, v in val.value.items()}
+        elif isinstance(val, InstanceValue):
+            # 类实例 → {"fields": ...} 字典
+            d = {}
+            for k, v in val.fields.items():
+                d[k] = self._runtime_to_py(v)
+            return d
+        return str(val)
+
+    # ══ std/math 补充 ──
+    def _builtin_sqrt(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """sqrt(x: Float) — 平方根"""
+        import math
+        if len(args) != 1:
+            raise TypeError(f"sqrt() 期望1个参数,得到 {len(args)}个")
+        x = float(args[0].value)
+        return FloatValue(math.sqrt(x))
+
+    def _builtin_pow(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """pow(base: Float, exp: Float) — 幂运算"""
+        if len(args) != 2:
+            raise TypeError(f"pow() 期望2个参数,得到 {len(args)}个")
+        return FloatValue(float(args[0].value) ** float(args[1].value))
+
+    def _builtin_floor(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """floor(x: Float) — 向下取整"""
+        import math
+        if len(args) != 1:
+            raise TypeError(f"floor() 期望1个参数,得到 {len(args)}个")
+        return IntValue(int(math.floor(float(args[0].value))))
+
+    def _builtin_ceil(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """ceil(x: Float) — 向上取整"""
+        import math
+        if len(args) != 1:
+            raise TypeError(f"ceil() 期望1个参数,得到 {len(args)}个")
+        return IntValue(int(math.ceil(float(args[0].value))))
+
+    # ══ std/random ──
+    def _builtin_random(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """random() — 返回 [0,1) 均匀分布浮点数"""
+        import random
+        return FloatValue(random.random())
+
+    def _builtin_randint(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """randint(lo: Int, hi: Int) — [lo, hi] 闭区间随机整数"""
+        import random
+        if len(args) != 2:
+            raise TypeError(f"randint() 期望2个参数,得到 {len(args)}个")
+        lo = int(args[0].value)
+        hi = int(args[1].value)
+        return IntValue(random.randint(lo, hi))
+
+    # ══ input ──
+    def _builtin_input(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """input(prompt: String) — 读取用户输入"""
+        prompt = args[0].value if args else ""
+        s = input(prompt)
+        return StringValue(s)
+
+    # ══ string operations ──
+    def _builtin_split(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """split(s: String, sep: String) — 按分隔符切割字符串"""
+        if len(args) != 2:
+            raise TypeError(f"split() 期望2个参数(s, sep),得到 {len(args)}个")
+        s = args[0].value
+        sep = args[1].value
+        return ListValue([StringValue(part) for part in s.split(sep)])
+
+    def _builtin_join(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """join(sep: String, parts: List[String]) — 用分隔符连接列表"""
+        if len(args) != 2:
+            raise TypeError(f"join() 期望2个参数(sep, parts),得到 {len(args)}个")
+        sep = args[0].value
+        if not isinstance(args[1], ListValue):
+            raise TypeError(f"join() 第2个参数必须是列表")
+        parts = [item.value for item in args[1].value]
+        return StringValue(sep.join(parts))
+
+    def _builtin_trim(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """trim(s: String) — 去除首尾空白"""
+        if len(args) != 1:
+            raise TypeError(f"trim() 期望1个参数,得到 {len(args)}个")
+        return StringValue(args[0].value.strip())
+
+    def _builtin_ord(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """ord(ch: String) — 字符→整数码点"""
+        if len(args) != 1:
+            raise TypeError(f"ord() 期望1个参数,得到 {len(args)}个")
+        s = args[0].value
+        if len(s) != 1:
+            raise ValueError(f"ord() 期望长度为1的字符串,得到 '{s}'")
+        return IntValue(ord(s))
+
+    def _builtin_chr(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """chr(n: Int) — 整数码点→字符"""
+        if len(args) != 1:
+            raise TypeError(f"chr() 期望1个参数,得到 {len(args)}个")
+        return StringValue(chr(int(args[0].value)))
+
+    # ══ sys ──
+    def _builtin_version(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """version() — 返回 Intent 解释器版本"""
+        return StringValue("Intent 1.0.0-alpha | 心学为体 禅道为翼 马哲为用")
 
     def _set_source(self, code: str) -> None:
         """设置源码行列表,用于错误上下文显示"""
