@@ -196,7 +196,7 @@ class Lexer:
         'invariant', 'pure', 'effect', 'import', 'from', 'as',
         'None', 'True', 'False', 'true', 'false', 'null',
         'and', 'or', 'not', 'in', 'is',
-        'class', 'this', 'mut'  # 类系统
+        'class', 'this', 'mut', 'fn'  # 类系统 + 匿名函数
     }
 
     # 内置类型名 - 不是关键字,只是预定义的类型标识符
@@ -560,6 +560,13 @@ class CallExpr(Expression):
     func: str = ""
     args: List[Expression] = field(default_factory=list)
 
+@dataclass
+class LambdaExpr(Expression):
+    """匿名函数表达式: fn(params) { body }"""
+    params: List = field(default_factory=list)    # [(name, type_annotation)]
+    body: List[ASTNode] = field(default_factory=list)
+    return_type: str = None
+
 # ==================== 语法分析器 ====================
 class Parser:
     """语法分析器 - 将Token流转换为AST"""
@@ -794,6 +801,38 @@ class Parser:
                 params.append((param_name, param_type))
 
         return params
+
+    def parse_lambda_expr(self) -> 'LambdaExpr':
+        """解析匿名函数表达式: fn(params) { body }"""
+        start_token = self.expect(TokenType.KEYWORD, 'fn')
+        
+        # 参数列表
+        self.expect(TokenType.SYMBOL, '(')
+        params = self.parse_parameter_list()
+        self.expect(TokenType.SYMBOL, ')')
+        
+        # 可选的返回类型
+        return_type = None
+        if self.match(TokenType.SYMBOL, ':'):
+            self.advance()
+            return_type = self._parse_type_annotation()
+        elif self.match(TokenType.OPERATOR, '->'):
+            self.advance()
+            return_type = self._parse_type_annotation()
+        
+        # 函数体
+        self.expect(TokenType.SYMBOL, '{')
+        body = []
+        while not self.match(TokenType.SYMBOL, '}'):
+            stmt = self.parse_statement()
+            if stmt:
+                body.append(stmt)
+        self.expect(TokenType.SYMBOL, '}')
+        
+        return LambdaExpr(
+            params=params, body=body, return_type=return_type,
+            line=start_token.line, column=start_token.column
+        )
 
     def parse_class_decl(self) -> Optional['ClassStmt']:
         """解析类声明 class Name < SuperClass { methods... }"""
@@ -1550,6 +1589,10 @@ class Parser:
         elif self.match(TokenType.KEYWORD, 'match'):
             return self.parse_match_expr()
 
+        # 匿名函数: fn(params) { body }
+        elif self.match(TokenType.KEYWORD, 'fn'):
+            return self.parse_lambda_expr()
+
         # 变量
         elif self.match(TokenType.IDENTIFIER):
             self.advance()
@@ -2067,17 +2110,20 @@ class FunctionValue(RuntimeValue):
     closure: Any = None            # 定义时的 Scope
 
     def __init__(self, func_def, closure):
-        super().__init__(StringType(), func_def.name)
+        display_name = getattr(func_def, 'name', '<lambda>')
+        super().__init__(StringType(), display_name)
         self.func_def = func_def
         self.closure = closure
 
     def __str__(self):
         contract = ""
-        if self.func_def.requires:
+        func_def = self.func_def
+        if hasattr(func_def, 'requires') and func_def.requires:
             contract += "⚖️"
-        if self.func_def.is_pure:
+        if hasattr(func_def, 'is_pure') and func_def.is_pure:
             contract += "🧘"
-        return f"<功夫 {contract}{self.func_def.name}>"
+        display_name = getattr(func_def, 'name', '<lambda>')
+        return f"<功夫 {contract}{display_name}>"
 
     def __repr__(self):
         return str(self)
@@ -3330,7 +3376,9 @@ class Interpreter:
         else:
             func_def = func
 
-        print(f"📋 执行函数: {func_def.name}")
+        # LambdaExpr 没有 name 属性，用特殊名称
+        func_name = getattr(func_def, 'name', '<lambda>')
+        print(f"📋 执行函数: {func_name}")
 
         # 保存旧的变量状态,用闭包作用域作为父作用域
         old_scope = self.current_scope
@@ -3341,7 +3389,7 @@ class Interpreter:
         # 同时进行运行时类型校验
         for (param_name, param_type), arg_value in zip(func_def.params, args):
             if param_type and param_type != "Any":
-                self._check_type(arg_value, param_type, f"@ 参数 '{param_name}' (函数 {func_def.name})")
+                self._check_type(arg_value, param_type, f"@ 参数 '{param_name}' (函数 {func_name})")
             self.current_scope.declare(param_name, arg_value.copy(), False)
 
         # 准备验证上下文(包含参数绑定)
@@ -3352,9 +3400,10 @@ class Interpreter:
         }
 
         # 验证前置条件
-        if func_def.requires:
+        func_requires = getattr(func_def, 'requires', [])
+        if func_requires:
             print("⚖️  验证前置条件...")
-            if not self.contract_verifier.verify_requires(func_def.requires, context):
+            if not self.contract_verifier.verify_requires(func_requires, context):
                 print("❌ 前置条件验证失败,停止执行")
                 self.current_scope = old_scope
                 return IntValue(1)
@@ -3370,11 +3419,12 @@ class Interpreter:
                 break
 
         # 验证后置条件
-        if func_def.ensures:
+        func_ensures = getattr(func_def, 'ensures', [])
+        if func_ensures:
             print("⚖️  验证后置条件...")
             # 将 result 放入全局作用域,使 ensures 表达式的 result 可解析
             self.global_scope.symbols['result'] = result
-            if not self.contract_verifier.verify_ensures(func_def.ensures, result, context):
+            if not self.contract_verifier.verify_ensures(func_ensures, result, context):
                 print("⚠️  后置条件验证失败")
             del self.global_scope.symbols['result']
 
@@ -3383,7 +3433,7 @@ class Interpreter:
 
         # 校验返回类型
         if func_def.return_type and func_def.return_type != "Any":
-            self._check_type(result, func_def.return_type, f"@ 返回值 (函数 {func_def.name})")
+            self._check_type(result, func_def.return_type, f"@ 返回值 (函数 {func_name})")
 
         return result
 
@@ -3669,17 +3719,22 @@ class Interpreter:
             elif isinstance(expr.func, str):
                 func_name = expr.func
 
-            # ClassValue 类实例化: Point(3, 4)
+            # 1️⃣ 检查作用域中的 FunctionValue（lambda/闭包/变量赋值的函数）
             if func_name:
                 try:
                     var_val = self.current_scope.get(func_name)
                 except NameError:
                     var_val = None
-                if var_val is not None and isinstance(var_val, ClassValue):
+                if var_val is not None:
                     args = [self.evaluate_expression(arg, context) for arg in expr.args]
-                    return var_val.call(self, args)
+                    # ClassValue → 类实例化
+                    if isinstance(var_val, ClassValue):
+                        return var_val.call(self, args)
+                    # FunctionValue → 调用 lambda 或闭包
+                    if isinstance(var_val, FunctionValue):
+                        return self.execute_function(var_val, args)
 
-            # 处理MemberAccess作为函数的情况 (如 std.math.add(x, y) 或 p.method())
+            # 2️⃣ 处理MemberAccess作为函数的情况 (如 std.math.add(x, y) 或 p.method())
             if isinstance(expr.func, MemberAccess):
                 # 先求值 MemberAccess 链，获取实际函数/方法
                 func_val = self.evaluate_expression(expr.func, context)
@@ -3748,6 +3803,10 @@ class Interpreter:
             first_val = entries[first_key]
             kt = StringType() if isinstance(first_key, str) else IntType()
             return DictValue(entries, kt, first_val.get_type() if entries else IntType())
+
+        elif isinstance(expr, LambdaExpr):
+            # 创建闭包 - 捕获当前作用域
+            return FunctionValue(expr, self.current_scope)
 
         else:
             raise RuntimeError(f"不支持的表达式类型: {type(expr).__name__}")

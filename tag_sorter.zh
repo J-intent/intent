@@ -1,0 +1,405 @@
+// Dynamo Revit 标签排序工具 — 中文方言版
+// 保存为 tag_sorter.zh，运行 python zh2py.py tag_sorter.zh > out.py
+
+导入 clr
+导入 sys
+导入 math
+clr.AddReference('RevitNodes')
+导入 Revit
+clr.ImportExtensions(Revit.Elements)
+clr.ImportExtensions(Revit.GeometryConversion)
+clr.AddReference('RevitServices')
+从 RevitServices.Persistence 导入 DocumentManager
+从 RevitServices.Transactions 导入 TransactionManager
+clr.AddReference('RevitAPI')
+从 Autodesk.Revit.DB 导入 *
+clr.AddReference('ProtoGeometry')
+从 Autodesk.DesignScript.Geometry 导入 *
+clr.AddReference('System.Windows.Forms')
+clr.AddReference('System.Drawing')
+从 System.Windows.Forms 导入 *
+从 System.Drawing 导入 *
+
+设 doc = DocumentManager.Instance.CurrentDBDocument
+设 uidoc = DocumentManager.Instance.CurrentUIApplication.ActiveUIDocument
+设 app = DocumentManager.Instance.CurrentUIApplication.Application
+设 view = doc.ActiveView
+
+设 selected_ids = uidoc.Selection.GetElementIds()
+设 selected_elements = [doc.GetElement(element_id) 循环 element_id 属于 selected_ids]
+设 tags = [elem 循环 elem 属于 selected_elements 如果 isinstance(elem, IndependentTag)]
+
+定义 get_tagged_element(tag):
+    尝试:
+        设 elements = 列表(tag.GetTaggedLocalElements())
+        如果 elements: 
+            返回 elements[0]
+    捕获: 
+        通过
+    返回 空
+
+定义 get_element_location(element):
+    尝试:
+        如果 hasattr(element, 'Location'):
+            如果 isinstance(element.Location, LocationPoint):
+                返回 element.Location.Point
+            否则如果 isinstance(element.Location, LocationCurve):
+                返回 element.Location.Curve.Evaluate(0.5, 真)
+    捕获: 
+        通过
+    返回 空
+
+定义 get_leader_points(tag):
+    尝试:
+        tag.HasLeader = 真
+        tag.LeaderEndCondition = LeaderEndCondition.Free
+        设 head_pos = tag.TagHeadPosition
+        
+        如果 int(app.VersionNumber) < 2022:
+            设 leader_end = tag.LeaderEnd
+        否则:
+            设 references = 列表(tag.GetTaggedReferences())
+            设 leader_end = tag.GetLeaderEnd(references[0]) 如果 references 否则 head_pos
+            
+        返回 head_pos, leader_end
+    捕获: 
+        返回 空, 空
+
+定义 calculate_elbow_point(head_pos, leader_end, view, angle=60):
+    尝试:
+        设 crop_box = view.CropBox
+        设 transform = crop_box.Transform
+        设 head_pos_transformed = transform.Inverse.OfPoint(head_pos)
+        设 leader_end_transformed = transform.Inverse.OfPoint(leader_end)
+        
+        设 dx = head_pos_transformed.X - leader_end_transformed.X
+        设 dy = head_pos_transformed.Y - leader_end_transformed.Y
+        设 rad = math.radians(angle)
+        
+        如果 abs(dx) > abs(dy):
+            设 ex = leader_end_transformed.X + math.copysign(abs(dy) / math.tan(rad), dx)
+            设 ey = leader_end_transformed.Y + dy
+        否则:
+            设 ex = leader_end_transformed.X + dx
+            设 ey = leader_end_transformed.Y + math.copysign(abs(dx) * math.tan(rad), dy)
+            
+        设 elbow_transformed = XYZ(ex, ey, head_pos_transformed.Z)
+        返回 transform.OfPoint(elbow_transformed)
+    捕获: 
+        返回 head_pos
+
+定义 get_text_size(tag):
+    尝试:
+        设 tag_type = doc.GetElement(tag.GetTypeId())
+        设 text_size_param = tag_type.LookupParameter("Text Size")
+        返回 text_size_param.AsDouble() 如果 text_size_param 否则 4
+    捕获: 
+        返回 4
+
+定义 set_leader_elbow(tag, point):
+    尝试:
+        如果 int(app.VersionNumber) < 2022:
+            tag.LeaderElbow = point
+        否则:
+            设 references = 列表(tag.GetTaggedReferences())
+            如果 references: 
+                tag.SetLeaderElbow(references[0], point)
+    捕获: 
+        通过
+
+定义 reset_leader_end(tag):
+    尝试:
+        tag.LeaderEndCondition = LeaderEndCondition.Attached
+        如果 int(app.VersionNumber) >= 2022:
+            设 references = 列表(tag.GetTaggedReferences())
+            如果 references:
+                设 element = get_tagged_element(tag)
+                如果 element:
+                    设 element_location = get_element_location(element)
+                    如果 element_location: 
+                        tag.SetLeaderEnd(references[0], element_location)
+    捕获: 
+        通过
+
+定义 calculate_sort_key_simple(tag_info):
+    尝试:
+        设 crop_box = view.CropBox
+        设 transform = crop_box.Transform
+        设 elbow_transformed = transform.Inverse.OfPoint(tag_info['final_elbow_point'])
+        返回 elbow_transformed.X
+    捕获: 
+        返回 0
+
+定义 calculate_sort_key_relative(tag_info):
+    尝试:
+        设 tag = tag_info['tag']
+        设 elbow_point = tag_info['final_elbow_point']
+        设 element = get_tagged_element(tag)
+        
+        如果 非 element: 
+            返回 -calculate_sort_key_simple(tag_info)
+            
+        设 element_location = get_element_location(element)
+        如果 非 element_location: 
+            返回 -calculate_sort_key_simple(tag_info)
+       
+        设 crop_box = view.CropBox
+        设 transform = crop_box.Transform
+        
+        设 elbow_transformed = transform.Inverse.OfPoint(elbow_point)
+        设 element_transformed = transform.Inverse.OfPoint(element_location)
+            
+        如果 element_transformed.Y > elbow_transformed.Y:
+            返回 elbow_transformed.X 如果 element_transformed.X > elbow_transformed.X 否则 -elbow_transformed.X
+        否则:
+            返回 elbow_transformed.X 如果 element_transformed.X < elbow_transformed.X 否则 -elbow_transformed.X
+    捕获: 
+        返回 calculate_sort_key_simple(tag_info)
+
+定义 show_settings_dialog():
+    设 form = Form()
+    form.Text = "sorting_J"
+    form.Size = Size(300, 380)  
+    form.StartPosition = FormStartPosition.CenterScreen
+    
+    设 stack_label = Label()
+    stack_label.Text = "叠到第一个:"
+    stack_label.Location = Point(20, 20)
+    stack_label.Size = Size(120, 25)
+    form.Controls.Add(stack_label)
+    
+    设 stack_checkbox = CheckBox()
+    stack_checkbox.Text = ""
+    stack_checkbox.Location = Point(150, 20)
+    stack_checkbox.Size = Size(120, 25)
+    stack_checkbox.Checked = 真
+    form.Controls.Add(stack_checkbox)
+    
+    设 leader_label = Label()
+    leader_label.Text = "引线角度:"
+    leader_label.Location = Point(20, 50)
+    leader_label.Size = Size(100, 25)
+    form.Controls.Add(leader_label)
+    
+    设 leader_checkbox = CheckBox()
+    leader_checkbox.Text = ""
+    leader_checkbox.Location = Point(150, 50)
+    leader_checkbox.Size = Size(120, 25)
+    leader_checkbox.Checked = 真
+    form.Controls.Add(leader_checkbox)
+    
+    设 arrange_label = Label()
+    arrange_label.Text = "标签排列:"
+    arrange_label.Location = Point(20, 80)
+    arrange_label.Size = Size(100, 25)
+    form.Controls.Add(arrange_label)
+    
+    设 arrange_checkbox = CheckBox()
+    arrange_checkbox.Text = ""
+    arrange_checkbox.Location = Point(150, 80)
+    arrange_checkbox.Size = Size(120, 25)
+    arrange_checkbox.Checked = 真
+    arrange_checkbox.Enabled = stack_checkbox.Checked 且 leader_checkbox.Checked
+    form.Controls.Add(arrange_checkbox)
+    
+    设 angle_label = Label()
+    angle_label.Text = "引线角度值:"
+    angle_label.Location = Point(20, 110)
+    angle_label.Size = Size(100, 20)
+    form.Controls.Add(angle_label)
+    
+    设 angle_textbox = TextBox()
+    angle_textbox.Text = "60"
+    angle_textbox.Location = Point(130, 110)
+    angle_textbox.Size = Size(50, 20)
+    form.Controls.Add(angle_textbox)
+    
+    设 spacing_label = Label()
+    spacing_label.Text = "标签间距:"
+    spacing_label.Location = Point(20, 140)
+    spacing_label.Size = Size(100, 20)
+    form.Controls.Add(spacing_label)
+    
+    设 spacing_textbox = TextBox()
+    spacing_textbox.Text = "1.0"
+    spacing_textbox.Location = Point(130, 140)
+    spacing_textbox.Size = Size(50, 20)
+    spacing_textbox.Enabled = arrange_checkbox.Checked
+    form.Controls.Add(spacing_textbox)
+    
+    设 sort_method_label = Label()
+    sort_method_label.Text = "标签位置:"
+    sort_method_label.Location = Point(20, 170)
+    sort_method_label.Size = Size(200, 20)
+    form.Controls.Add(sort_method_label)
+    
+    设 sort_method_group = GroupBox()
+    sort_method_group.Location = Point(20, 180)
+    sort_method_group.Size = Size(270, 80)
+    form.Controls.Add(sort_method_group)
+    
+    设 method2_radio = RadioButton()
+    method2_radio.Text = "任意位置"
+    method2_radio.Location = Point(20, 25)
+    method2_radio.Size = Size(150, 23)
+    method2_radio.Checked = 真
+    sort_method_group.Controls.Add(method2_radio)
+    
+    设 method1_radio = RadioButton()
+    method1_radio.Text = "测试"
+    method1_radio.Location = Point(20, 45)
+    method1_radio.Size = Size(150, 30)
+    sort_method_group.Controls.Add(method1_radio)
+    
+    定义 update_arrange_enabled(sender, e):
+        arrange_checkbox.Enabled = stack_checkbox.Checked 且 leader_checkbox.Checked
+        如果 非 arrange_checkbox.Enabled:
+            arrange_checkbox.Checked = 假
+        spacing_textbox.Enabled = arrange_checkbox.Checked
+    
+    stack_checkbox.CheckedChanged += update_arrange_enabled
+    leader_checkbox.CheckedChanged += update_arrange_enabled
+    
+    定义 update_spacing_enabled(sender, e):
+        spacing_textbox.Enabled = arrange_checkbox.Checked
+    
+    arrange_checkbox.CheckedChanged += update_spacing_enabled
+    
+    设 ok_button = Button()
+    ok_button.Text = "√"
+    ok_button.Location = Point(30, 270)
+    ok_button.Size = Size(60, 30)
+    ok_button.DialogResult = DialogResult.OK
+    form.Controls.Add(ok_button)
+    
+    设 cancel_button = Button()
+    cancel_button.Text = "×"
+    cancel_button.Location = Point(200, 270)
+    cancel_button.Size = Size(60, 30)
+    cancel_button.DialogResult = DialogResult.Cancel
+    form.Controls.Add(cancel_button)
+    
+    设 result = form.ShowDialog()
+    
+    如果 result == DialogResult.OK:
+        尝试:
+            设 stack_enabled = stack_checkbox.Checked
+            设 leader_enabled = leader_checkbox.Checked
+            设 arrange_enabled = arrange_checkbox.Checked
+            设 angle = float(angle_textbox.Text) 如果 leader_enabled 否则 60
+            设 spacing = float(spacing_textbox.Text) 如果 arrange_enabled 否则 1.0
+            
+            如果 method1_radio.Checked:
+                设 sort_method = "simple"
+            否则:
+                设 sort_method = "relative"
+            
+            返回 stack_enabled, leader_enabled, arrange_enabled, angle, spacing, sort_method
+        捕获:
+            MessageBox.Show("请输入有效的数值!")
+            返回 空, 空, 空, 空, 空, 空
+    否则:
+        返回 空, 空, 空, 空, 空, 空
+
+定义 stack_tags(tags):
+    如果 非 tags 或 长度(tags) <= 1:
+        返回 假
+    
+    尝试:
+        设 first_tag = tags[0]
+        设 first_position = first_tag.TagHeadPosition
+        
+        循环 tag 属于 tags[1:]:
+            tag.TagHeadPosition = first_position
+            
+        返回 真
+    捕获:
+        返回 假
+
+定义 main():
+    如果 非 tags:
+        打印("未选择任何标签")
+        返回 空
+        
+    设 settings = show_settings_dialog()
+    如果 settings[0] 是 空:
+        打印("取消操作")
+        返回 空
+    
+    设 stack_enabled, leader_enabled, arrange_enabled, angle, spacing, sort_method = settings
+    
+    TransactionManager.Instance.EnsureInTransaction(doc)
+    
+    尝试:
+        如果 stack_enabled:
+            stack_tags(tags)
+        
+        设 tag_info_list = []
+        循环 tag 属于 tags:
+            reset_leader_end(tag)
+            
+            设 head_pos, leader_end = get_leader_points(tag)
+            
+            如果 head_pos 且 leader_end:
+     
+                设 final_elbow_point = calculate_elbow_point(head_pos, leader_end, view, angle) 如果 leader_enabled 否则 head_pos
+                
+                设 text_height = get_text_size(tag)
+                
+                tag_info_list.append({
+                    'tag': tag,
+                    'head_pos': head_pos,
+                    'final_elbow_point': final_elbow_point,  
+                    'text_height': text_height
+                })
+        
+        循环 tag_info 属于 tag_info_list:
+            如果 sort_method == "simple":
+                tag_info['sort_key'] = calculate_sort_key_simple(tag_info)
+            否则:
+                tag_info['sort_key'] = calculate_sort_key_relative(tag_info)
+        
+        tag_info_list.sort(key=lambda x: x['sort_key'])
+        
+        如果 tag_info_list 且 arrange_enabled:
+            设 crop_box = view.CropBox
+            设 transform = crop_box.Transform
+            
+            设 first_head_pos = tag_info_list[0]['head_pos']
+            设 first_head_pos_transformed = transform.Inverse.OfPoint(first_head_pos)
+            
+            循环 i, tag_info 属于 enumerate(tag_info_list):
+                设 new_y = first_head_pos_transformed.Y - (i * spacing)
+                
+                设 new_head_pos_transformed = XYZ(
+                    first_head_pos_transformed.X,
+                    new_y,
+                    first_head_pos_transformed.Z
+                )
+                
+                设 new_head_pos = transform.OfPoint(new_head_pos_transformed)
+                
+                tag_info['tag'].TagHeadPosition = new_head_pos
+                
+                如果 leader_enabled:
+                    _, new_leader_end = get_leader_points(tag_info['tag'])
+                    如果 new_leader_end:
+                        设 new_elbow_point = calculate_elbow_point(new_head_pos, new_leader_end, view, angle)
+                        set_leader_elbow(tag_info['tag'], new_elbow_point)
+                
+                reset_leader_end(tag_info['tag'])
+        否则:
+            循环 tag_info 属于 tag_info_list:
+                如果 leader_enabled:
+                    set_leader_elbow(tag_info['tag'], tag_info['final_elbow_point'])
+                
+                reset_leader_end(tag_info['tag'])
+                
+    捕获 异常 作为 e:
+        打印("处理过程中发生错误: " + 字符串(e))
+    最终:
+        TransactionManager.Instance.TransactionTaskDone()
+    
+    返回 tags
+
+OUT = main()
