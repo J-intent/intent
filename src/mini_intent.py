@@ -3620,24 +3620,52 @@ class Interpreter:
                 print(f"[警告] 加载模块失败: {module_name}, {e}")
                 return IntValue(0)
 
-        # 将模块中的所有符号导入当前作用域(以 alias.name 形式)
-        module_scope = self.modules[module_name]
-        for name, value in module_scope.symbols.items():
-            # 以 alias.name 形式注册(如 std.add)
-            qualified_name = f"{alias}.{name}"
-            # 只在作用域中注册一次(qualified name)
-            if not self.current_scope.has(qualified_name):
-                self.current_scope.declare(qualified_name, value, False)
-            # 如果是函数定义,注册到 self.functions
-            if hasattr(value, 'body'):  # FunctionDef 有 body 属性
-                self.functions[qualified_name] = value
+        # 将模块中的所有符号导入当前作用域
+        module_scope_obj = self.modules[module_name]
 
-        # 创建一个带module_ref的模块值,用于属性访问(如 std.add())
-        module_value = RuntimeValue(StringType(), alias)
-        module_value.module_ref = module_scope  # 保存模块引用
-        # 也以模块名注册
-        if not self.current_scope.has(alias):
-            self.current_scope.declare(alias, module_value, False)
+        # ── 层级模块注册 (如 std.math → 注册 "std", "std" 内注册 "math") ──
+        alias_parts = alias.split('.')
+        # 构建嵌套：从最外层向内逐层
+        outer_name = alias_parts[0]          # "std"
+        # 如果最外层还不存在，创建它
+        if not self.current_scope.has(outer_name):
+            outer_scope = Scope(parent=self.global_scope)
+            outer_val = RuntimeValue(StringType(), outer_name)
+            outer_val.module_ref = outer_scope
+            self.current_scope.declare(outer_name, outer_val, False)
+        else:
+            outer_val = self.current_scope.get(outer_name)
+            outer_scope = getattr(outer_val, 'module_ref', None)
+            if outer_scope is None or not isinstance(outer_scope, Scope):
+                outer_scope = Scope(parent=self.global_scope)
+                outer_val.module_ref = outer_scope
+        # 逐层挂载
+        cursor_scope = outer_scope
+        cursor_val = outer_val
+        for i in range(1, len(alias_parts)):
+            part = alias_parts[i]
+            prefix = '.'.join(alias_parts[:i+1])
+            if part not in cursor_scope.symbols:
+                inner_scope = Scope(parent=self.global_scope)
+                inner_val = RuntimeValue(StringType(), prefix)
+                inner_val.module_ref = inner_scope
+                cursor_scope.declare(part, inner_val, False, allow_redefine=True)
+            else:
+                existing = cursor_scope.symbols[part]
+                if hasattr(existing, 'module_ref') and isinstance(existing.module_ref, Scope):
+                    inner_scope = existing.module_ref
+                else:
+                    inner_scope = Scope(parent=self.global_scope)
+                    existing.module_ref = inner_scope
+                inner_val = existing
+            cursor_scope = inner_scope
+            cursor_val = inner_val
+        # 把模块实际符号挂到最内层
+        for name, value in module_scope_obj.symbols.items():
+            cursor_scope.declare(name, value, False, allow_redefine=True)
+            if hasattr(value, 'body'):
+                full_name = f"{alias}.{name}"
+                self.functions[full_name] = value
 
         return IntValue(0)
 
