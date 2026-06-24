@@ -1,0 +1,27 @@
+// std/json.intent — JSON 序列化标准库
+// 心学为体：数据是结构的呈现，解析即理解
+// 禅道为翼：转换间保持精确映射
+// 马哲为用：连通外部世界的桥梁
+//
+// 注意：json_parse/json_dump 在全局 builtin 中，模块函数不与之同名
+
+// parse(json_str: String) — 解析 JSON 字符串
+def parse(json_str: String) {
+    return json_parse(json_str);
+}
+
+// stringify(value: Any) — 将值序列化为 JSON 字符串
+def stringify(value) -> String {
+    return json_dump(value);
+}
+
+// read_json(path: String) — 从文件读取并解析 JSON
+def read_json(path: String) {
+    return json_parse(read_file(path));
+}
+
+// write_json(path: String, value) — 将值序列化后写入文件
+def write_json(path: String, value) -> Int {
+    let json_str = json_dump(value);
+    return write_file(path, json_str);
+}

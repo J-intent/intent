@@ -3600,10 +3600,11 @@ class Interpreter:
                 ast = parser.parse()
                 self.execute_program(ast, module_mode=True)
 
-                # 把模块内注册的函数也存入模块作用域
+                # 把模块内注册的函数也存入模块作用域（包装为 FunctionValue 支持模块内互调）
                 for fname, fdef in self.functions.items():
                     if fname not in old_functions:
-                        module_scope.declare(fname, fdef, False, allow_redefine=True)
+                        fv = FunctionValue(fdef, module_scope)
+                        module_scope.declare(fname, fv, False, allow_redefine=True)
 
                 # 恢复状态
                 self.current_scope = old_scope
@@ -4271,6 +4272,14 @@ class Interpreter:
                     return BoolValue(left.value == right.value)
                 elif op == '!=':
                     return BoolValue(left.value != right.value)
+                elif op == '<':
+                    return BoolValue(left.value < right.value)
+                elif op == '>':
+                    return BoolValue(left.value > right.value)
+                elif op == '<=':
+                    return BoolValue(left.value <= right.value)
+                elif op == '>=':
+                    return BoolValue(left.value >= right.value)
 
             # None 比较
             if isinstance(left, NoneValue) and isinstance(right, NoneValue):

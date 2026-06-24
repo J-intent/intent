@@ -1,0 +1,31 @@
+// std/time.intent — 时间标准库
+// 心学为体：时间是流程中的当下觉察
+// 禅道为翼：精确衡量每一步
+// 马哲为用：提供计时、延时等实用工具
+//
+// 注意：内置 now/sleep 在全局作用域，模块函数不能与之同名
+
+// current_timestamp() — 返回当前 Unix 时间戳（浮点秒数）
+def current_timestamp() -> Float {
+    return now();
+}
+
+// delay(seconds) — 暂停指定秒数
+def delay(seconds: Float) -> Int {
+    return sleep(seconds);
+}
+
+// timestamp_ns() — 高精度纳秒时刻
+def timestamp_ns() -> Float {
+    return now() * 1000000000.0;
+}
+
+// elapsed_ms(start: Float) — 从 start 到现在的毫秒数
+def elapsed_ms(start: Float) -> Float {
+    return (now() - start) * 1000.0;
+}
+
+// elapsed_ns(start: Float) — 纳秒级耗时
+def elapsed_ns(start: Float) -> Float {
+    return (now() * 1000000000.0) - start;
+}
