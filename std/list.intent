@@ -1,7 +1,7 @@
 // std/list.intent — 列表操作模块
 // 心学为体：列表有序，操作需循规
 // 禅道为翼：处理列表时心无挂碍
-// 马哲为用：提供集合操作的辩证方法
+// 马哲为用：提供集合操作的辩证方法，每个函数都以契约约束行为
 
 def sum(lst) -> Int {
     let mut s = 0;
@@ -32,7 +32,11 @@ def all(lst, pred) -> Bool {
     return true;
 }
 
-def take(lst, n: Int) {
+def take(lst, n: Int)
+requires n >= 0
+ensures len(result) <= len(lst)
+ensures len(result) <= n
+{
     let mut result = [];
     let mut i = 0;
     for x in lst {
@@ -43,7 +47,10 @@ def take(lst, n: Int) {
     return result;
 }
 
-def drop(lst, n: Int) {
+def drop(lst, n: Int)
+requires n >= 0
+ensures len(result) <= len(lst)
+{
     let mut result = [];
     let mut i = 0;
     for x in lst {
@@ -55,7 +62,9 @@ def drop(lst, n: Int) {
     return result;
 }
 
-def zip(a, b) {
+def zip(a, b)
+ensures len(result) <= len(a) and len(result) <= len(b)
+{
     let mut result = [];
     let mut i = 0;
     let limit = min(len(a), len(b));
@@ -66,7 +75,9 @@ def zip(a, b) {
     return result;
 }
 
-def map(lst, f) {
+def map(lst, f)
+ensures len(result) == len(lst)
+{
     let mut result = [];
     for x in lst {
         result = result + [f(x)];
@@ -74,7 +85,9 @@ def map(lst, f) {
     return result;
 }
 
-def filter(lst, pred) {
+def filter(lst, pred)
+ensures len(result) <= len(lst)
+{
     let mut result = [];
     for x in lst {
         if pred(x) {

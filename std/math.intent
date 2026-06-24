@@ -1,31 +1,47 @@
 // std/math.intent — 数学运算模块
-// 基础运算
+// 心学为体：数有其理，算有其道
+// 禅道为翼：纯函数无副作用，心无杂念
+// 马哲为用：用契约保证每一步都是正确的
 
-def add(a: Int, b: Int) -> Int {
+// ══ 基础运算 ══
+
+def add(a: Int, b: Int) -> Int
+ensures result == a + b
+{
     return a + b;
 }
 
-def multiply(a: Int, b: Int) -> Int {
+def multiply(a: Int, b: Int) -> Int
+ensures result == a * b
+{
     return a * b;
 }
 
-def square(x: Int) -> Int {
+def square(x: Int) -> Int
+ensures result >= 0
+{
     return x * x;
 }
 
-def abs(x: Int) -> Int {
+def abs(x: Int) -> Int
+ensures result >= 0
+{
     if x < 0 {
         return 0 - x;
     }
     return x;
 }
 
-def max(a: Int, b: Int) -> Int {
+def max(a: Int, b: Int) -> Int
+ensures result >= a and result >= b
+{
     if a > b { return a; }
     return b;
 }
 
-def min(a: Int, b: Int) -> Int {
+def min(a: Int, b: Int) -> Int
+ensures result <= a and result <= b
+{
     if a < b { return a; }
     return b;
 }
