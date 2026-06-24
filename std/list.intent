@@ -1,30 +1,93 @@
-// std/list.intent
+// std/list.intent — 列表操作模块
 // 心学为体：列表有序，操作需循规
 // 禅道为翼：处理列表时心无挂碍
 // 马哲为用：提供集合操作的辩证方法
 
-// 获取列表长度 - 体现"心中有数"
-def len(lst: List[Any]) -> Int {
-    let count = 0;
-    return count;
+def sum(lst) -> Int {
+    let mut s = 0;
+    for x in lst {
+        s = s + x;
+    }
+    return s;
 }
 
-// 获取列表元素 - 体现"取其一"
-def get(lst: List[Any], index: Int) -> Any {
-    return None;
+def contains(lst, item) -> Bool {
+    for x in lst {
+        if x == item { return true; }
+    }
+    return false;
 }
 
-// 列表追加 - 体现"积少成多"
-def append(lst: List[Any], item: Any) -> List[Any] {
-    return lst;
+def any(lst, pred) -> Bool {
+    for x in lst {
+        if pred(x) { return true; }
+    }
+    return false;
 }
 
-// 列表合并 - 体现"和合"
-def concat(a: List[Any], b: List[Any]) -> List[Any] {
-    return a;
+def all(lst, pred) -> Bool {
+    for x in lst {
+        if pred(x) == false { return false; }
+    }
+    return true;
 }
 
-// 列表切片 - 体现"取其中"
-def slice(lst: List[Any], start: Int, end: Int) -> List[Any] {
-    return lst;
+def take(lst, n: Int) {
+    let mut result = [];
+    let mut i = 0;
+    for x in lst {
+        if i >= n { break; }
+        result = result + [x];
+        i = i + 1;
+    }
+    return result;
+}
+
+def drop(lst, n: Int) {
+    let mut result = [];
+    let mut i = 0;
+    for x in lst {
+        if i >= n {
+            result = result + [x];
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+def zip(a, b) {
+    let mut result = [];
+    let mut i = 0;
+    let limit = min(len(a), len(b));
+    while i < limit {
+        result = result + [[a[i], b[i]]];
+        i = i + 1;
+    }
+    return result;
+}
+
+def map(lst, f) {
+    let mut result = [];
+    for x in lst {
+        result = result + [f(x)];
+    }
+    return result;
+}
+
+def filter(lst, pred) {
+    let mut result = [];
+    for x in lst {
+        if pred(x) {
+            result = result + [x];
+        }
+    }
+    return result;
+}
+
+def reduce(lst, f, initial) {
+    let mut acc = initial;
+    for x in lst {
+        acc = f(acc, x);
+    }
+    return acc;
 }

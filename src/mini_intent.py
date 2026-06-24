@@ -3660,12 +3660,16 @@ class Interpreter:
                 inner_val = existing
             cursor_scope = inner_scope
             cursor_val = inner_val
-        # 把模块实际符号挂到最内层
+        # 把模块实际符号挂到最内层（FunctionDef 包成 FunctionValue 以支持高阶函数传参）
         for name, value in module_scope_obj.symbols.items():
-            cursor_scope.declare(name, value, False, allow_redefine=True)
             if hasattr(value, 'body'):
+                # 函数: 包成 FunctionValue（闭包=模块作用域）
+                fv = FunctionValue(value, module_scope_obj)
+                cursor_scope.declare(name, fv, False, allow_redefine=True)
                 full_name = f"{alias}.{name}"
-                self.functions[full_name] = value
+                self.functions[full_name] = fv
+            else:
+                cursor_scope.declare(name, value, False, allow_redefine=True)
 
         return IntValue(0)
 
@@ -4101,13 +4105,17 @@ class Interpreter:
                 func_val = self.evaluate_expression(expr.func, context)
                 args = [self.evaluate_expression(arg, context) for arg in expr.args]
 
-                # FunctionValue → 可能是实例方法
-                if isinstance(func_val, FunctionValue):
-                    instance = self._get_member_access_instance(expr.func)
-                    return self._execute_method(func_val, instance, args)
+                # 检查根对象是 InstanceValue 还是模块 → 不同调度方式
+                instance = self._get_member_access_instance(expr.func)
+                is_instance_call = isinstance(instance, InstanceValue)
 
-                # FunctionDef → 模块函数
+                # FunctionDef → 模块函数（兼容旧格式）
                 if hasattr(func_val, 'body'):
+                    return self.execute_function(func_val, args)
+                # FunctionValue → 实例方法=走 _execute_method, 模块函数=走 execute_function
+                if isinstance(func_val, FunctionValue):
+                    if is_instance_call:
+                        return self._execute_method(func_val, instance, args)
                     return self.execute_function(func_val, args)
 
                 raise NameError(f"无法调用 {func_val}")
@@ -4184,6 +4192,16 @@ class Interpreter:
         if op == '+' and isinstance(right, StringValue):
             left_str = left.value if isinstance(left, StringValue) else str(left.value)
             return StringValue(left_str + right.value)
+
+        # 列表拼接
+        if op == '+' and isinstance(left, ListValue) and isinstance(right, ListValue):
+            return ListValue(left.value + right.value,
+                           element_type=left.type.element_type if left.type.element_type else right.type.element_type)
+        # 列表重复
+        if op == '*' and isinstance(left, ListValue) and isinstance(right, IntValue):
+            return ListValue(left.value * int(right.value), element_type=left.type.element_type)
+        if op == '*' and isinstance(left, IntValue) and isinstance(right, ListValue):
+            return ListValue(int(left.value) * right.value, element_type=right.type.element_type)
 
         # 字符串重复
         if op == '*' and isinstance(left, StringValue) and isinstance(right, IntValue):
