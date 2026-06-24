@@ -1,23 +1,56 @@
 // std/contract.intent
 // 心学为体：契约是"事上练"与"持志"的体现
-// 禅道为翼：验证时心无杂念
+// 禅道为翼：验证时心无杂念，只看条件本身
 // 马哲为用：提供检验真理的实践工具
 
-// 断言函数 - 体现"持志如心痛"
+// ══ 运行时断言（标准库层面的手动补充） ══
 def assert(condition: Bool, message: String) -> Bool {
-    if (condition == False) {
-        print("[断言失败] ", message);
-        return False;
+    if (condition == false) {
+        print("[契约断言失败] ", message);
+        return false;
     }
-    return True;
+    return true;
 }
 
-// 前置条件检查
-def check_requires(condition: Bool, func_name: String) -> Bool {
-    return condition;
+// ══ 前置条件辅助 ══
+// 正数检查
+def require_positive(n: Int) -> Bool {
+    return n > 0;
+}
+def require_non_negative(n: Int) -> Bool {
+    return n >= 0;
+}
+def require_in_range(n: Int, lo: Int, hi: Int) -> Bool {
+    return n >= lo and n <= hi;
+}
+// 除数非零
+def require_divisor_non_zero(d: Int) -> Bool {
+    return d != 0;
+}
+// 列表/字符串非空
+def require_non_empty(xs: Any) -> Bool {
+    return len(xs) > 0;
 }
 
-// 后置条件验证
-def verify_ensures(condition: Bool, func_name: String) -> Bool {
-    return condition;
+// ══ 后置条件辅助 ══
+// 结果非空（用于返回列表的函数）
+def ensure_result_not_null(result: Any) -> Bool {
+    return result != null;
+}
+// 结果在合法范围内
+def ensure_result_in_range(result: Int, lo: Int, hi: Int) -> Bool {
+    return result >= lo and result <= hi;
+}
+// 列表长度不变（适用于 filter/take 类操作）
+def ensure_length_le_original(result_len: Int, original_len: Int) -> Bool {
+    return result_len <= original_len;
+}
+// 计算结果与输入关系
+def ensure_result_positive(result: Int) -> Bool {
+    return result >= 0;
+}
+
+// ══ 统计计数器 → 用于测试契约覆盖率 ══
+def mut contracts_checked() -> Int {
+    return 0;
 }

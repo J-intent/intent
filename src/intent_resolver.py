@@ -350,6 +350,8 @@ class Resolver:
         elif isinstance(expr, MatchExpr):
             self._resolve_expr(expr.value)
             for case in expr.cases:
+                # 每个 case 进入新作用域(绑定变量)
+                self._begin_scope()
                 self._resolve_pattern(case.pattern)
                 if case.guard:
                     self._resolve_expr(case.guard)
@@ -357,6 +359,7 @@ class Resolver:
                     self._resolve_expr(case.body)
                 else:
                     self._resolve_block(case.body_block)
+                self._end_scope()
 
         elif isinstance(expr, TryExpr):
             self._resolve_expr(expr.expr)
