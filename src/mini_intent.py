@@ -3126,11 +3126,15 @@ class Interpreter:
         self._track_node(stmt)
         try:
             return self._execute_statement_safe(stmt)
-        except (NameError, ValueError, TypeError, RuntimeError) as e:
+        except (NameError, ValueError, TypeError, RuntimeError, IndexError, KeyError, ZeroDivisionError) as e:
             msg = str(e)
             # 防止多层嵌套调用重复包装（如 main→bad() 在每层 execute_statement 都触发）
             if '   at line' in msg:
                 raise
+            # KeyError 特殊处理：Python 的 KeyError.__str__ 使用 repr() 显示
+            # 导致错误信息中引号被双重转义，统一转为 RuntimeError
+            if isinstance(e, KeyError):
+                raise RuntimeError(self._error_context(msg))
             raise type(e)(self._error_context(msg))
 
     def _execute_statement_safe(self, stmt: ASTNode) -> RuntimeValue:
