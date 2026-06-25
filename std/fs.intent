@@ -1,0 +1,60 @@
+// std/fs — 文件系统操作模块
+// 委托全局 builtin: list_dir, file_exists, is_dir, is_file,
+//   make_dir, delete_file, read_file, write_file, file_size, file_modified
+// 注意: 模块函数名避免与 builtin 同名 (如 is_dir builtin → is_directory 模块函数)
+
+// ls(path: String) → List[String]  列出目录内容
+def ls(path: String) -> List {
+    return list_dir(path);
+}
+
+// exists(path: String) → Bool  检查路径是否存在
+def exists(path: String) -> Bool {
+    return file_exists(path);
+}
+
+// is_directory(path: String) → Bool
+def is_directory(path: String) -> Bool {
+    return is_dir(path);
+}
+
+// is_regular_file(path: String) → Bool
+def is_regular_file(path: String) -> Bool {
+    return is_file(path);
+}
+
+// mkdir(path: String)  创建目录(含父目录)
+def mkdir(path: String) {
+    make_dir(path);
+}
+
+// remove(path: String)  删除文件
+def remove(path: String) {
+    delete_file(path);
+}
+
+// read_all(path: String) → String  读取整个文件为字符串
+def read_all(path: String) -> String
+    requires file_exists(path)
+{
+    return read_file(path);
+}
+
+// write_all(path: String, content: String)  写入文件
+def write_all(path: String, content: String) {
+    write_file(path, content);
+}
+
+// size_bytes(path: String) → Int  文件大小(字节)
+def size_bytes(path: String) -> Int
+    requires file_exists(path)
+{
+    return file_size(path);
+}
+
+// mtime(path: String) → Float  最后修改时间(Unix时间戳)
+def mtime(path: String) -> Float
+    requires file_exists(path)
+{
+    return file_modified(path);
+}

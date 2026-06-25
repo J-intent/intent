@@ -1,0 +1,37 @@
+// std/os — 操作系统接口模块
+// 全局 builtin: env, cwd, ch_dir, shell, platform, path_* (函数名避免同名遮蔽)
+
+// getenv(key: String) → String  读取环境变量
+def getenv(key: String) -> String {
+    return env(key);
+}
+
+// curdir() → String  当前工作目录
+def curdir() -> String {
+    return cwd();
+}
+
+// chdir(path: String)  切换目录
+def chdir(path: String) {
+    ch_dir(path);
+}
+
+// run(cmd: String) → String  执行 shell 命令
+def run(cmd: String) -> String {
+    return shell(cmd);
+}
+
+// sys_platform() → String  操作系统平台
+def sys_platform() -> String {
+    return platform();
+}
+
+// home_dir() → String  用户主目录
+def home_dir() -> String {
+    return env("USERPROFILE");
+}
+
+// path_join(a: String, b: String) → String  路径拼接
+def path_join(a: String, b: String) -> String {
+    return path_join(a, b);
+}

@@ -2684,6 +2684,25 @@ class Interpreter:
             'chr': self._builtin_chr,
             # sys
             'version': self._builtin_version,
+            # std/fs
+            'list_dir': self._builtin_list_dir,
+            'file_exists': self._builtin_file_exists,
+            'is_dir': self._builtin_is_dir,
+            'is_file': self._builtin_is_file,
+            'make_dir': self._builtin_make_dir,
+            'delete_file': self._builtin_delete_file,
+            'file_size': self._builtin_file_size,
+            'file_modified': self._builtin_file_modified,
+            # std/os
+            'env': self._builtin_env,
+            'cwd': self._builtin_cwd,
+            'ch_dir': self._builtin_ch_dir,
+            'shell': self._builtin_shell,
+            'platform': self._builtin_platform,
+            'path_join': self._builtin_path_join,
+            'path_basename': self._builtin_path_basename,
+            'path_dirname': self._builtin_path_dirname,
+            'path_ext': self._builtin_path_ext,
         }
 
     def _builtin_print(self, args: List[RuntimeValue]) -> RuntimeValue:
@@ -3053,6 +3072,113 @@ class Interpreter:
     def _builtin_version(self, args: List[RuntimeValue]) -> RuntimeValue:
         """version() — 返回 Intent 解释器版本"""
         return StringValue("Intent 1.0.0-alpha | 心学为体 禅道为翼 马哲为用")
+
+    # ══ fs (文件系统) ──
+    def _builtin_list_dir(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """list_dir(path: String) → List[String] — 列出目录内容"""
+        if len(args) != 1:
+            raise TypeError(f"list_dir() 期望1个参数,得到 {len(args)}个")
+        entries = os.listdir(args[0].value)
+        return ListValue([StringValue(e) for e in entries])
+
+    def _builtin_file_exists(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """file_exists(path: String) → Bool — 检查文件/目录是否存在"""
+        if len(args) != 1:
+            raise TypeError(f"file_exists() 期望1个参数,得到 {len(args)}个")
+        return BoolValue(os.path.exists(args[0].value))
+
+    def _builtin_is_dir(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """is_dir(path: String) → Bool"""
+        if len(args) != 1:
+            raise TypeError(f"is_dir() 期望1个参数,得到 {len(args)}个")
+        return BoolValue(os.path.isdir(args[0].value))
+
+    def _builtin_is_file(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """is_file(path: String) → Bool"""
+        if len(args) != 1:
+            raise TypeError(f"is_file() 期望1个参数,得到 {len(args)}个")
+        return BoolValue(os.path.isfile(args[0].value))
+
+    def _builtin_make_dir(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """make_dir(path: String) — 创建目录"""
+        if len(args) != 1:
+            raise TypeError(f"make_dir() 期望1个参数,得到 {len(args)}个")
+        os.makedirs(args[0].value, exist_ok=True)
+        return NoneValue()
+
+    def _builtin_delete_file(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """delete_file(path: String) — 删除文件"""
+        if len(args) != 1:
+            raise TypeError(f"delete_file() 期望1个参数,得到 {len(args)}个")
+        os.remove(args[0].value)
+        return NoneValue()
+
+    def _builtin_file_size(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """file_size(path: String) → Int — 文件大小(字节)"""
+        if len(args) != 1:
+            raise TypeError(f"file_size() 期望1个参数,得到 {len(args)}个")
+        return IntValue(os.path.getsize(args[0].value))
+
+    def _builtin_file_modified(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """file_modified(path: String) → Float — 最后修改时间(Unix时间戳)"""
+        if len(args) != 1:
+            raise TypeError(f"file_modified() 期望1个参数,得到 {len(args)}个")
+        return FloatValue(os.path.getmtime(args[0].value))
+
+    # ══ os (操作系统) ──
+    def _builtin_env(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """env(key: String) → String — 读取环境变量"""
+        if len(args) != 1:
+            raise TypeError(f"env() 期望1个参数,得到 {len(args)}个")
+        val = os.environ.get(args[0].value, "")
+        return StringValue(val)
+
+    def _builtin_cwd(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """cwd() → String — 获取当前工作目录"""
+        return StringValue(os.getcwd())
+
+    def _builtin_ch_dir(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """ch_dir(path: String) — 切换工作目录"""
+        if len(args) != 1:
+            raise TypeError(f"ch_dir() 期望1个参数,得到 {len(args)}个")
+        os.chdir(args[0].value)
+        return NoneValue()
+
+    def _builtin_shell(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """shell(cmd: String) → String — 执行 shell 命令并返回 stdout"""
+        if len(args) != 1:
+            raise TypeError(f"shell() 期望1个参数,得到 {len(args)}个")
+        result = os.popen(args[0].value).read()
+        return StringValue(result)
+
+    def _builtin_platform(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """platform() → String — 返回操作系统平台"""
+        return StringValue(sys.platform)
+
+    def _builtin_path_join(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """path_join(a: String, b: String) → String — 拼接两个路径"""
+        if len(args) != 2:
+            raise TypeError(f"path_join() 期望2个参数,得到 {len(args)}个")
+        return StringValue(os.path.join(args[0].value, args[1].value))
+
+    def _builtin_path_basename(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """path_basename(path: String) → String — 提取文件名"""
+        if len(args) != 1:
+            raise TypeError(f"path_basename() 期望1个参数,得到 {len(args)}个")
+        return StringValue(os.path.basename(args[0].value))
+
+    def _builtin_path_dirname(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """path_dirname(path: String) → String — 提取目录名"""
+        if len(args) != 1:
+            raise TypeError(f"path_dirname() 期望1个参数,得到 {len(args)}个")
+        return StringValue(os.path.dirname(args[0].value))
+
+    def _builtin_path_ext(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """path_ext(path: String) → String — 提取扩展名"""
+        if len(args) != 1:
+            raise TypeError(f"path_ext() 期望1个参数,得到 {len(args)}个")
+        _, ext = os.path.splitext(args[0].value)
+        return StringValue(ext)
 
     def _set_source(self, code: str) -> None:
         """设置源码行列表,用于错误上下文显示"""
