@@ -2355,14 +2355,10 @@ class ContractVerifier:
         for i, condition in enumerate(requires):
             try:
                 result = self.interpreter.evaluate_expression(condition, context)
-                if isinstance(result, BoolValue) and result.value:
-                    print(f"  ✓ 前置条件{i+1}: {self.expr_to_str(condition)}")
-                else:
-                    print(f"  ✗ 前置条件{i+1}失败: {self.expr_to_str(condition)}")
+                if not (isinstance(result, BoolValue) and result.value):
                     self.error_messages.append(f"前置条件{i+1}失败: {self.expr_to_str(condition)}")
                     all_passed = False
             except Exception as e:
-                print(f"  ⚠ 前置条件{i+1}验证错误: {e}")
                 self.error_messages.append(f"前置条件{i+1}验证错误: {e}")
                 all_passed = False
 
@@ -2379,14 +2375,10 @@ class ContractVerifier:
         for i, condition in enumerate(ensures):
             try:
                 eval_result = self.interpreter.evaluate_expression(condition, context)
-                if isinstance(eval_result, BoolValue) and eval_result.value:
-                    print(f"  ✓ 后置条件{i+1}: {self.expr_to_str(condition)}")
-                else:
-                    print(f"  ✗ 后置条件{i+1}失败: {self.expr_to_str(condition)}")
+                if not (isinstance(eval_result, BoolValue) and eval_result.value):
                     self.error_messages.append(f"后置条件{i+1}失败: {self.expr_to_str(condition)}")
                     all_passed = False
             except Exception as e:
-                print(f"  ⚠ 后置条件{i+1}验证错误: {e}")
                 self.error_messages.append(f"后置条件{i+1}验证错误: {e}")
                 all_passed = False
 
@@ -2404,7 +2396,11 @@ class ContractVerifier:
             return str(expr.value)
         elif isinstance(expr, CallExpr):
             args = ", ".join(self.expr_to_str(arg) for arg in expr.args)
-            return f"{expr.func}({args})"
+            return f"{self.expr_to_str(expr.callee)}({args})" if hasattr(expr, 'callee') and expr.callee else f"{expr.func}({args})"
+        elif isinstance(expr, MemberAccess):
+            return f"{self.expr_to_str(expr.obj)}.{expr.member}"
+        elif isinstance(expr, SubscriptExpr):
+            return f"{self.expr_to_str(expr.obj)}[{self.expr_to_str(expr.index)}]"
         return str(expr)
 
     def get_errors(self) -> List[str]:
@@ -2628,17 +2624,13 @@ class Interpreter:
             from intent_resolver import Resolver
             resolver = Resolver(self)
             resolver.resolve_program(program)
-            if resolver.errors:
-                print(f"⚠️  [语义分析] 发现 {len(resolver.errors)} 个问题:")
-                for err in resolver.errors[:5]:  # 最多显示5个
-                    print(f"   • {err}")
-                if len(resolver.errors) > 5:
-                    print(f"   ... 还有 {len(resolver.errors) - 5} 个")
+            # Resolver 错误静默记录,不打印 — 运行时错误已足够定位问题
         except ImportError:
             # Resolver 模块不存在时静默跳过
             pass
-        except Exception as e:
-            print(f"⚠️  [语义分析] 运行失败: {e}")
+        except Exception:
+            # Resolver 异常静默,不打断程序执行
+            pass
 
     def add_module_search_path(self, file_dir: str):
         """添加基于文件目录的搜索路径"""
@@ -3116,7 +3108,6 @@ class Interpreter:
 
         # 查找并执行main函数
         if 'main' in self.functions:
-            print("🚀 执行main函数:")
             result = self.execute_function(self.functions['main'], [])
 
         return result
@@ -3728,7 +3719,6 @@ class Interpreter:
 
         # LambdaExpr 没有 name 属性，用特殊名称
         func_name = getattr(func_def, 'name', '<lambda>')
-        print(f"📋 执行函数: {func_name}")
 
         # ── 泛型类型推断 ──
         type_bindings: Dict[str, str] = {}
@@ -3772,9 +3762,7 @@ class Interpreter:
         # 验证前置条件
         func_requires = getattr(func_def, 'requires', [])
         if func_requires:
-            print("⚖️  验证前置条件...")
             if not self.contract_verifier.verify_requires(func_requires, context):
-                print("❌ 前置条件验证失败,停止执行")
                 self.current_scope = old_scope
                 return IntValue(1)
 
@@ -3791,11 +3779,11 @@ class Interpreter:
         # 验证后置条件
         func_ensures = getattr(func_def, 'ensures', [])
         if func_ensures:
-            print("⚖️  验证后置条件...")
             # 将 result 放入全局作用域,使 ensures 表达式的 result 可解析
             self.global_scope.symbols['result'] = result
             if not self.contract_verifier.verify_ensures(func_ensures, result, context):
-                print("⚠️  后置条件验证失败")
+                # 静默失败,不抛异常 — 契约违反记录在 error_messages 中
+                pass
             del self.global_scope.symbols['result']
 
         # 恢复作用域
