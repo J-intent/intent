@@ -1,0 +1,56 @@
+// dynscan — Dynamo脚本扫描工具 (Intent 实战)
+// 扫描目录统计 .dyn 文件,输出摘要
+import std.os;
+import std.fs;
+import std.json;
+
+def has_dyn_ext(path: String) -> Int {
+    let n = len(path);
+    if n < 4 { return 0; };
+    let c0 = path[n - 4];
+    let c1 = path[n - 3];
+    let c2 = path[n - 2];
+    let c3 = path[n - 1];
+    if c0 == "." and c1 == "d" and c2 == "y" and c3 == "n" {
+        return 1;
+    };
+    return 0;
+}
+
+let root = "D:\\Desktop";
+let mut file_count = 0;
+let mut total_bytes = 0;
+let files_json = "[";
+
+def scan(dir: String) {
+    let entries = list_dir(dir);
+    let mut i = 0;
+    while i < len(entries) {
+        let entry = entries[i];
+        let full = path_join(dir, entry);
+        if is_dir(full) {
+            if entry != "." and entry != ".." {
+                scan(full);
+            };
+        };
+        if is_file(full) {
+            if has_dyn_ext(entry) == 1 {
+                let sz = file_size(full);
+                file_count = file_count + 1;
+                total_bytes = total_bytes + sz;
+            };
+        };
+        i = i + 1;
+    };
+}
+
+let t0 = now();
+scan(root);
+let elapsed = now() - t0;
+
+print("=== DynoScan Report ===");
+print("Root: " + root);
+print("Files: " + str(file_count));
+print("Total: " + str(total_bytes / 1024) + " KB");
+print("Time: " + str(elapsed * 1000) + " ms");
+print("Done!");

@@ -103,9 +103,8 @@ class PhilosophyTranslator:
                     user_mapping = json.load(f)
                 # 深度合并映射
                 default_mapping["keywords"].update(user_mapping.get("keywords", {}))
-                print(f"🧘 已加载哲学映射: {mapping_file}")
-            except Exception as e:
-                print(f"⚠ 映射文件加载失败: {e}")
+            except Exception:
+                pass
 
         return default_mapping
 
@@ -4710,6 +4709,11 @@ class IntentREPL:
 def main():
     """主函数"""
     import argparse
+    # Windows 编码修复
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
     parser = argparse.ArgumentParser(
         description=f'Intent语言解释器 v{VERSION} - {PHILOSOPHY_SLOGAN}',
