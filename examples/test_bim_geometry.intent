@@ -1,0 +1,55 @@
+// BIM 几何模块: 完整功能测试（逐步验证）
+import std.bim.unit;
+import std.bim.geometry;
+
+// === 1. Vector3D ===
+print("=== Vector3D ===");
+let v1 = std.bim.geometry.Vector3D();
+v1.create(3.0, 0.0, 0.0);
+print("v1.length = " + str(v1.length()));
+
+let v2 = std.bim.geometry.Vector3D();
+v2.create(0.0, 4.0, 0.0);
+let v3 = v1.cross(v2);
+print("v1×v2.z = " + str(v3.z));  // should be 12
+
+let v4 = v1.add(v2);
+print("(3,0,0)+(0,4,0) = (" + str(v4.x) + "," + str(v4.y) + "," + str(v4.z) + ")");
+
+let d = v1.dot(v2);
+print("(3,0,0)·(0,4,0) = " + str(d));  // should be 0
+
+let n = v2.normalize();
+print("(0,4,0) norm = (" + str(n.x) + "," + str(n.y) + "," + str(n.z) + ")");  // (0,1,0)
+
+// === 2. Point3D ===
+print("=== Point3D ===");
+let p1 = std.bim.geometry.Point3D();
+p1.create(1.0, 2.0, 3.0);
+let p2 = std.bim.geometry.Point3D();
+p2.create(4.0, 6.0, 8.0);
+let dist = p1.distance_to(p2);
+print("dist = " + str(dist));  // 7.071
+
+// === 3. Line3D ===
+print("=== Line3D ===");
+let line = std.bim.geometry.Line3D();
+line.create(p1, p2);
+print("line.len = " + str(line.length()));
+let dir = line.direction();
+print("dir.y = " + str(dir.y));  // ~0.534
+
+// === 4. BBox3D ===
+print("=== BBox3D ===");
+let bb = std.bim.geometry.BBox3D();
+bb.create(p1, p2);
+print("vol = " + str(bb.volume()));
+print("center = (" + str(bb.center().x) + "," + str(bb.center().y) + "," + str(bb.center().z) + ")");
+
+// === 5. Unit ===
+print("=== Unit ===");
+print("3m = " + str(std.bim.unit.m_to_mm(3.0)) + "mm");
+print("5000mm = " + str(std.bim.unit.mm_to_m(5000.0)) + "m");
+print("10ft = " + str(std.bim.unit.ft_to_m(10.0)) + "m");
+
+print("=== ALL PASS ===");

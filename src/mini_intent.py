@@ -1504,10 +1504,13 @@ class Parser:
                 self.advance()
                 call = CallExpr(func=expr, line=expr.line, column=expr.column)
                 if not self.match(TokenType.SYMBOL, ')'):
+                    self._skip_newlines()
                     call.args.append(self.parse_expression())
                     while self.match(TokenType.SYMBOL, ','):
                         self.advance()
+                        self._skip_newlines()
                         call.args.append(self.parse_expression())
+                self._skip_newlines()
                 self.expect(TokenType.SYMBOL, ')')
                 expr = call
             
@@ -1639,15 +1642,24 @@ class Parser:
 
         call = CallExpr(func=func_name, line=start_token.line, column=start_token.column)
 
-        # 解析参数
+        # 解析参数（括号内允许换行）
         if not self.match(TokenType.SYMBOL, ')'):
+            self._skip_newlines()
             call.args.append(self.parse_expression())
             while self.match(TokenType.SYMBOL, ','):
                 self.advance()
+                self._skip_newlines()
                 call.args.append(self.parse_expression())
 
+        self._skip_newlines()
         self.expect(TokenType.SYMBOL, ')')
         return call
+
+
+    def _skip_newlines(self):
+        """跳过换行符（用于括号内多行参数/元素）"""
+        while self.match(TokenType.NEWLINE):
+            self.advance()
 
     def parse_list_expr(self) -> 'ListExpr':
         """解析列表表达式"""
@@ -3987,17 +3999,14 @@ class Interpreter:
         return result
 
     def _get_member_access_instance(self, member_access):
-        """从 MemberAccess 链中获取根实例（如 p.distance → p = InstanceValue）"""
-        current = member_access
-        while isinstance(current, MemberAccess):
-            current = current.obj
-        if isinstance(current, Variable):
-            val = self.current_scope.get(current.name)
-            if isinstance(val, InstanceValue):
-                return val
-        elif isinstance(current, ThisExpr):
-            return self.current_scope.get('this')
-        return self.evaluate_expression(current)
+        """从 MemberAccess 链中获取方法接收者实例
+        如 this.start.distance_to(...) → this.start = Point3D InstanceValue
+           line.midpoint() → line = Line3D InstanceValue
+        关键：取倒数第二层对象（方法前的那个），而非链的根部
+        """
+        if isinstance(member_access, MemberAccess):
+            return self.evaluate_expression(member_access.obj)
+        return None
 
     def evaluate_expression(self, expr: Expression, context: Optional[Dict] = None) -> RuntimeValue:
         """评估表达式"""
@@ -4050,6 +4059,10 @@ class Interpreter:
                 member_val = obj_value.get(expr.member)
                 if member_val is not None:
                     return member_val
+                # 字段未找到，尝试查找方法（如 this.to(other)）
+                method = obj_value.klass.find_method(expr.member)
+                if method is not None:
+                    return method
                 raise NameError(f"实例没有属性 '{expr.member}'")
 
             # 如果obj_value是模块引用,获取模块导出
@@ -4235,6 +4248,9 @@ class Interpreter:
                     if is_instance_call:
                         return self._execute_method(func_val, instance, args)
                     return self.execute_function(func_val, args)
+                # ClassValue → 类构造函数 (如 std.bim.geometry.Vector3D())
+                if isinstance(func_val, ClassValue):
+                    return func_val.call(self, args)
 
                 raise NameError(f"无法调用 {func_val}")
 
