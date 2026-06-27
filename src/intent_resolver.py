@@ -263,7 +263,11 @@ class Resolver:
 
     def _resolve_for(self, stmt) -> None:
         self._begin_scope()
-        if stmt.var:
+        if stmt.vars:
+            for vname in stmt.vars:
+                self._declare(vname)
+                self._define(vname)
+        elif stmt.var:
             self._declare(stmt.var)
             self._define(stmt.var)
         self._resolve_expr(stmt.iterable)

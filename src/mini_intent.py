@@ -479,6 +479,7 @@ class WhileStmt(ASTNode):
 class ForStmt(ASTNode):
     """for循环"""
     var: str = ""
+    vars: list = field(default_factory=list)  # 解包变量列表,如 [i, x]
     iterable: 'Expression' = None
     body: List[ASTNode] = field(default_factory=list)
 
@@ -946,6 +947,10 @@ class Parser:
             self.expect(TokenType.SYMBOL, ';')
             return stmt
 
+        # 嵌套函数定义（闭包）
+        if self.match(TokenType.KEYWORD, 'def'):
+            return self.parse_function_def()
+
         # Import语句
         if self.match(TokenType.KEYWORD, 'import'):
             return self.parse_import_stmt()
@@ -1370,8 +1375,17 @@ class Parser:
         start_token = self.expect(TokenType.KEYWORD, 'for')
         stmt = ForStmt(line=start_token.line, column=start_token.column)
 
-        # 循环变量
-        stmt.var = self.expect(TokenType.IDENTIFIER).value
+        # 检查是否是解包语法: for (i, x) in items
+        if self.match(TokenType.SYMBOL, '('):
+            self.advance()  # 跳过 (
+            stmt.vars.append(self.expect(TokenType.IDENTIFIER).value)
+            while self.match(TokenType.SYMBOL, ','):
+                self.advance()
+                stmt.vars.append(self.expect(TokenType.IDENTIFIER).value)
+            self.expect(TokenType.SYMBOL, ')')
+        else:
+            # 单变量: for x in items
+            stmt.var = self.expect(TokenType.IDENTIFIER).value
 
         # in关键字
         self.expect(TokenType.KEYWORD, 'in')
@@ -1491,6 +1505,12 @@ class Parser:
 
     def parse_unary(self) -> Expression:
         """解析一元运算"""
+        # 'not' 关键字作为逻辑非
+        if self.match(TokenType.KEYWORD, 'not'):
+            op_token = self.current_token
+            self.advance()
+            operand = self.parse_unary()
+            return UnaryOp(op='!', operand=operand, line=op_token.line, column=op_token.column)
         if self.match(TokenType.OPERATOR) and self.current_token.value in ('+', '-', '!'):
             op_token = self.current_token
             self.advance()
@@ -1685,18 +1705,25 @@ class Parser:
         start_token = self.expect(TokenType.SYMBOL, '{')
         expr = DictExpr(line=start_token.line, column=start_token.column)
 
+        self._skip_newlines()
         if not self.match(TokenType.SYMBOL, '}'):
             key = self.parse_expression()
             self.expect(TokenType.SYMBOL, ':')
+            self._skip_newlines()
             value = self.parse_expression()
             expr.entries.append((key, value))
             while self.match(TokenType.SYMBOL, ','):
                 self.advance()
+                self._skip_newlines()
+                if self.match(TokenType.SYMBOL, '}'):
+                    break  # trailing comma
                 key = self.parse_expression()
                 self.expect(TokenType.SYMBOL, ':')
+                self._skip_newlines()
                 value = self.parse_expression()
                 expr.entries.append((key, value))
 
+        self._skip_newlines()
         self.expect(TokenType.SYMBOL, '}')
         return expr
 
@@ -2039,6 +2066,9 @@ class ListValue(RuntimeValue):
         return f"[{items}]"
 
     def get(self, index: int) -> RuntimeValue:
+        # 支持负数索引
+        if index < 0:
+            index = len(self.value) + index
         if 0 <= index < len(self.value):
             return self.value[index]
         raise IndexError(f"列表索引 {index} 越界")
@@ -2662,6 +2692,8 @@ class Interpreter:
         return {
             'print': self._builtin_print,
             'len': self._builtin_len,
+            'keys': self._builtin_keys,
+            'values': self._builtin_values,
             'range': self._builtin_range,
             'int': self._builtin_int,
             'float': self._builtin_float,
@@ -2745,6 +2777,24 @@ class Interpreter:
         if isinstance(value, (ListValue, StringValue, DictValue)):
             return IntValue(len(value.value))
         raise TypeError(f"len() 不支持类型 {value.type}")
+
+    def _builtin_keys(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置keys函数:返回字典所有键"""
+        if len(args) != 1 or not isinstance(args[0], DictValue):
+            raise TypeError("keys() 期望1个Dict参数")
+        keys_list = []
+        for k in args[0].value.keys():
+            if isinstance(k, str):
+                keys_list.append(StringValue(k))
+            else:
+                keys_list.append(k)
+        return ListValue(keys_list, element_type=StringType())
+
+    def _builtin_values(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置values函数:返回字典所有值"""
+        if len(args) != 1 or not isinstance(args[0], DictValue):
+            raise TypeError("values() 期望1个Dict参数")
+        return ListValue(list(args[0].value.values()), element_type=StringType())
 
     def _builtin_range(self, args: List[RuntimeValue]) -> RuntimeValue:
         """内置range函数"""
@@ -3360,6 +3410,11 @@ class Interpreter:
             return self.evaluate_expression(stmt)
         elif isinstance(stmt, ClassStmt):
             return self.execute_class_decl(stmt)
+        elif isinstance(stmt, FunctionDef):
+            # 嵌套函数定义：注册到当前作用域（闭包捕获）
+            func_val = FunctionValue(stmt, self.current_scope)
+            self.current_scope.declare(stmt.name, func_val)
+            return func_val
         else:
             raise RuntimeError(f"未知语句类型: {type(stmt).__name__}")
 
@@ -3641,13 +3696,21 @@ class Interpreter:
         if not isinstance(iterable, ListValue):
             raise TypeError(f"for循环期望列表,得到 {iterable.type}")
 
-        for item in iterable.value:
+        for item_idx, item in enumerate(iterable.value):
             # 进入循环体作用域
             old_scope = self.current_scope
             self.current_scope = self.current_scope.enter()
 
             # 设置循环变量
-            self.current_scope.declare(stmt.var, item.copy(), False)
+            if stmt.vars:
+                # 解包模式: for (i, x) in items
+                # i = 索引, x = 值
+                idx_val = IntValue(item_idx)
+                self.current_scope.declare(stmt.vars[0], idx_val, False)
+                if len(stmt.vars) > 1:
+                    self.current_scope.declare(stmt.vars[1], item.copy(), False)
+            else:
+                self.current_scope.declare(stmt.var, item.copy(), False)
 
             # 执行循环体
             for body_stmt in stmt.body:
@@ -4190,6 +4253,8 @@ class Interpreter:
                 return val
             elif isinstance(obj, StringValue):
                 idx = index.value
+                if idx < 0:
+                    idx = len(obj.value) + idx
                 if idx < 0 or idx >= len(obj.value):
                     raise IndexError(f"字符串索引 {idx} 越界")
                 return StringValue(obj.value[idx])
