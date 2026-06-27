@@ -1,0 +1,277 @@
+// std/bim/polygon.intent — 多段线 & 多边形
+// 心学为体：边界即定义，围合即空间
+// 禅道为翼：点串成线，线围成面，面生万物
+// 马哲为用：房间边界/墙线/楼板轮廓的核心抽象
+
+import std.bim.geometry;
+import std.bim.unit;
+import std.math;
+
+// ═══════════════════════════════════════════
+// Polyline — 多段线（有序点串）
+// ═══════════════════════════════════════════
+
+class Polyline {
+    def init() {
+        this.points = [];
+    }
+
+    // 从点列表构造
+    def from_list(pts: List) {
+        this.points = pts;
+    }
+
+    // 添加点
+    def add(p: Point3D) {
+        this.points = this.points + [p];
+    }
+
+    // 顶点数
+    def count() -> Int {
+        return len(this.points);
+    }
+
+    // 是否闭合（首尾重合）
+    def is_closed() -> Bool {
+        let n = len(this.points);
+        if n < 2 { return false; };
+        let first = this.points[0];
+        let last = this.points[n - 1];
+        return first.distance_to(last) < 0.0001;
+    }
+
+    // 总长度（各段之和）
+    def length() -> Float {
+        let mut total = 0.0;
+        let n = len(this.points);
+        let mut i = 1;
+        while i < n {
+            total = total + this.points[i - 1].distance_to(this.points[i]);
+            i = i + 1;
+        };
+        return total;
+    }
+
+    // 获取第 i 段线段
+    def segment(i: Int) -> Line3D {
+        let line = Line3D();
+        line.create(this.points[i], this.points[i + 1]);
+        return line;
+    }
+
+    // 包围盒
+    def bbox() -> BBox3D {
+        let b = BBox3D();
+        let first = this.points[0];
+        b.create(first, first);
+        let mut i = 1;
+        let n = len(this.points);
+        while i < n {
+            b.expand(this.points[i]);
+            i = i + 1;
+        };
+        return b;
+    }
+
+    // 质心（顶点平均）
+    def centroid() -> Point3D {
+        let n = len(this.points);
+        let mut sx = 0.0;
+        let mut sy = 0.0;
+        let mut sz = 0.0;
+        let mut i = 0;
+        while i < n {
+            sx = sx + this.points[i].x;
+            sy = sy + this.points[i].y;
+            sz = sz + this.points[i].z;
+            i = i + 1;
+        };
+        let c = Point3D();
+        c.create(sx / n, sy / n, sz / n);
+        return c;
+    }
+}
+
+
+// ═══════════════════════════════════════════
+// Polygon — 平面多边形（闭合）
+// ═══════════════════════════════════════════
+
+class Polygon {
+    def init() {
+        this.vertices = [];
+    }
+
+    def from_list(pts: List) {
+        this.vertices = pts;
+    }
+
+    def add(p: Point3D) {
+        this.vertices = this.vertices + [p];
+    }
+
+    def count() -> Int {
+        return len(this.vertices);
+    }
+
+    // Shoelace 公式计算面积（投影到 XY 平面）
+    def area_xy() -> Float {
+        let n = len(this.vertices);
+        if n < 3 { return 0.0; };
+        let mut sum = 0.0;
+        let mut i = 0;
+        while i < n {
+            let j = (i + 1) % n;
+            let pi = this.vertices[i];
+            let pj = this.vertices[j];
+            sum = sum + pi.x * pj.y - pj.x * pi.y;
+            i = i + 1;
+        };
+        return abs(sum) / 2.0;
+    }
+
+    // 周长
+    def perimeter() -> Float {
+        let n = len(this.vertices);
+        if n < 2 { return 0.0; };
+        let mut total = 0.0;
+        let mut i = 0;
+        while i < n {
+            let j = (i + 1) % n;
+            total = total + this.vertices[i].distance_to(this.vertices[j]);
+            i = i + 1;
+        };
+        return total;
+    }
+
+    // 质心（面积加权，XY 平面）
+    def centroid_xy() -> Point3D {
+        let n = len(this.vertices);
+        if n < 3 {
+            // 退化：返回顶点平均
+            let c = Polyline();
+            c.from_list(this.vertices);
+            return c.centroid();
+        };
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        let mut area = 0.0;
+        let mut i = 0;
+        while i < n {
+            let j = (i + 1) % n;
+            let pi = this.vertices[i];
+            let pj = this.vertices[j];
+            let cross = pi.x * pj.y - pj.x * pi.y;
+            area = area + cross;
+            cx = cx + (pi.x + pj.x) * cross;
+            cy = cy + (pi.y + pj.y) * cross;
+            i = i + 1;
+        };
+        area = area / 2.0;
+        if abs(area) < 0.000001 {
+            let c = Polyline();
+            c.from_list(this.vertices);
+            return c.centroid();
+        };
+        let result = Point3D();
+        result.create(cx / (6.0 * area), cy / (6.0 * area), 0.0);
+        return result;
+    }
+
+    // 点在多边形内（射线法，XY 平面）
+    def contains_xy(point: Point3D) -> Bool {
+        let n = len(this.vertices);
+        if n < 3 { return false; };
+        let mut inside = false;
+        let mut i = 0;
+        while i < n {
+            let j = (i + n - 1) % n;
+            let pi = this.vertices[i];
+            let pj = this.vertices[j];
+            if ((pi.y > point.y) != (pj.y > point.y)) {
+                let x_intersect = (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x;
+                if point.x < x_intersect {
+                    if inside { inside = false; } else { inside = true; };
+                };
+            };
+            i = i + 1;
+        };
+        return inside;
+    }
+
+    // 包围盒
+    def bbox() -> BBox3D {
+        let b = BBox3D();
+        let first = this.vertices[0];
+        b.create(first, first);
+        let mut i = 1;
+        let n = len(this.vertices);
+        while i < n {
+            b.expand(this.vertices[i]);
+            i = i + 1;
+        };
+        return b;
+    }
+
+    // 是否凸多边形（XY 平面）
+    def is_convex_xy() -> Bool {
+        let n = len(this.vertices);
+        if n < 4 { return true; };
+        let mut sign = 0;
+        let mut i = 0;
+        while i < n {
+            let j = (i + 1) % n;
+            let k = (i + 2) % n;
+            let dx1 = this.vertices[j].x - this.vertices[i].x;
+            let dy1 = this.vertices[j].y - this.vertices[i].y;
+            let dx2 = this.vertices[k].x - this.vertices[j].x;
+            let dy2 = this.vertices[k].y - this.vertices[j].y;
+            let cross = dx1 * dy2 - dx2 * dy1;
+            if abs(cross) > 0.000001 {
+                if sign == 0 {
+                    if cross > 0 { sign = 1; } else { sign = -1; };
+                }
+                if cross > 0 and sign < 0 { return false; };
+                if cross < 0 and sign > 0 { return false; };
+            };
+            i = i + 1;
+        };
+        return true;
+    }
+}
+
+
+// ═══════════════════════════════════════════
+// 工厂函数
+// ═══════════════════════════════════════════
+
+// 矩形多边形（XY 平面，从两点）
+def make_rect_xy(min_pt: Point3D, max_pt: Point3D) -> Polygon {
+    let p1 = Point3D();
+    p1.create(min_pt.x, min_pt.y, min_pt.z);
+    let p2 = Point3D();
+    p2.create(max_pt.x, min_pt.y, min_pt.z);
+    let p3 = Point3D();
+    p3.create(max_pt.x, max_pt.y, min_pt.z);
+    let p4 = Point3D();
+    p4.create(min_pt.x, max_pt.y, min_pt.z);
+    let poly = Polygon();
+    poly.from_list([p1, p2, p3, p4]);
+    return poly;
+}
+
+// 正多边形（XY 平面，中心+半径+边数）
+def make_regular_xy(center: Point3D, radius: Float, sides: Int) -> Polygon {
+    let mut pts = [];
+    let mut i = 0;
+    while i < sides {
+        let angle = 2.0 * pi() * i / sides;
+        let p = Point3D();
+        p.create(center.x + radius * cos(angle), center.y + radius * sin(angle), center.z);
+        pts = pts + [p];
+        i = i + 1;
+    };
+    let poly = Polygon();
+    poly.from_list(pts);
+    return poly;
+}

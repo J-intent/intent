@@ -1,0 +1,215 @@
+// std/bim/transform.intent — 空间变换
+// 心学为体：物有定位，变有定法
+// 禅道为翼：变换链纯函数组合，非线性时不变
+// 马哲为用：变换 = 劳动工具，平移万物
+
+import std.bim.geometry;
+import std.bim.unit;
+import std.math;
+
+// ═══════════════════════════════════════════
+// Matrix3x3 — 3×3 旋转/缩放矩阵（行主序）
+// ═══════════════════════════════════════════
+
+class Matrix3x3 {
+    def init() {
+        this.m00 = 1.0; this.m01 = 0.0; this.m02 = 0.0;
+        this.m10 = 0.0; this.m11 = 1.0; this.m12 = 0.0;
+        this.m20 = 0.0; this.m21 = 0.0; this.m22 = 1.0;
+    }
+
+    def set(a00: Float, a01: Float, a02: Float, a10: Float, a11: Float, a12: Float, a20: Float, a21: Float, a22: Float) {
+        this.m00 = a00; this.m01 = a01; this.m02 = a02;
+        this.m10 = a10; this.m11 = a11; this.m12 = a12;
+        this.m20 = a20; this.m21 = a21; this.m22 = a22;
+    }
+
+    // 矩阵 × 向量
+    def transform(v: Vector3D) -> Vector3D {
+        let r = Vector3D();
+        r.create(this.m00 * v.x + this.m01 * v.y + this.m02 * v.z,
+                 this.m10 * v.x + this.m11 * v.y + this.m12 * v.z,
+                 this.m20 * v.x + this.m21 * v.y + this.m22 * v.z);
+        return r;
+    }
+
+    // 矩阵 × 矩阵
+    def multiply(other: Matrix3x3) -> Matrix3x3 {
+        let r = Matrix3x3();
+        r.set(
+            this.m00 * other.m00 + this.m01 * other.m10 + this.m02 * other.m20,
+            this.m00 * other.m01 + this.m01 * other.m11 + this.m02 * other.m21,
+            this.m00 * other.m02 + this.m01 * other.m12 + this.m02 * other.m22,
+            this.m10 * other.m00 + this.m11 * other.m10 + this.m12 * other.m20,
+            this.m10 * other.m01 + this.m11 * other.m11 + this.m12 * other.m21,
+            this.m10 * other.m02 + this.m11 * other.m12 + this.m12 * other.m22,
+            this.m20 * other.m00 + this.m21 * other.m10 + this.m22 * other.m20,
+            this.m20 * other.m01 + this.m21 * other.m11 + this.m22 * other.m21,
+            this.m20 * other.m02 + this.m21 * other.m12 + this.m22 * other.m22
+        );
+        return r;
+    }
+
+    // 转置
+    def transpose() -> Matrix3x3 {
+        let r = Matrix3x3();
+        r.set(this.m00, this.m10, this.m20,
+              this.m01, this.m11, this.m21,
+              this.m02, this.m12, this.m22);
+        return r;
+    }
+
+    // 行列式
+    def determinant() -> Float {
+        return this.m00 * (this.m11 * this.m22 - this.m12 * this.m21) - this.m01 * (this.m10 * this.m22 - this.m12 * this.m20) + this.m02 * (this.m10 * this.m21 - this.m11 * this.m20);
+    }
+}
+
+
+// ═══════════════════════════════════════════
+// 变换厂函数（纯函数组合）
+// ═══════════════════════════════════════════
+
+// 平移点
+def translate_point(p: Point3D, v: Vector3D) -> Point3D {
+    return p.add_vector(v);
+}
+
+// 绕 X 轴旋转
+def rotate_x_matrix(angle_rad: Float) -> Matrix3x3 {
+    let c = cos(angle_rad);
+    let s = sin(angle_rad);
+    let m = Matrix3x3();
+    m.set(1.0, 0.0, 0.0,  0.0, c, -s,  0.0, s, c);
+    return m;
+}
+
+// 绕 Y 轴旋转
+def rotate_y_matrix(angle_rad: Float) -> Matrix3x3 {
+    let c = cos(angle_rad);
+    let s = sin(angle_rad);
+    let m = Matrix3x3();
+    m.set(c, 0.0, s,  0.0, 1.0, 0.0,  -s, 0.0, c);
+    return m;
+}
+
+// 绕 Z 轴旋转
+def rotate_z_matrix(angle_rad: Float) -> Matrix3x3 {
+    let c = cos(angle_rad);
+    let s = sin(angle_rad);
+    let m = Matrix3x3();
+    m.set(c, -s, 0.0,  s, c, 0.0,  0.0, 0.0, 1.0);
+    return m;
+}
+
+// 绕任意轴旋转（Rodrigues 公式）
+def rotate_around_axis_matrix(v: Vector3D, angle_rad: Float) -> Matrix3x3 {
+    let axis = v.normalize();
+    let c = cos(angle_rad);
+    let s = sin(angle_rad);
+    let omc = 1.0 - c;
+    let m = Matrix3x3();
+    m.set(
+        c + omc * axis.x * axis.x,
+        omc * axis.x * axis.y - s * axis.z,
+        omc * axis.x * axis.z + s * axis.y,
+        omc * axis.x * axis.y + s * axis.z,
+        c + omc * axis.y * axis.y,
+        omc * axis.y * axis.z - s * axis.x,
+        omc * axis.x * axis.z - s * axis.y,
+        omc * axis.y * axis.z + s * axis.x,
+        c + omc * axis.z * axis.z
+    );
+    return m;
+}
+
+// 均匀缩放矩阵
+def scale_matrix(sx: Float, sy: Float, sz: Float) -> Matrix3x3 {
+    let m = Matrix3x3();
+    m.set(sx, 0.0, 0.0,  0.0, sy, 0.0,  0.0, 0.0, sz);
+    return m;
+}
+
+// 向量缩放
+def scale_vector(v: Vector3D, s: Float) -> Vector3D {
+    return v.scale(s);
+}
+
+// 旋转向量
+def rotate_vector(v: Vector3D, matrix: Matrix3x3) -> Vector3D {
+    return matrix.transform(v);
+}
+
+// 绕 Z 轴旋转点（BIM 最常用：平面旋转）
+def rotate_point_2d(p: Point3D, center: Point3D, angle_rad: Float) -> Point3D {
+    let v = center.to(p);
+    let m = rotate_z_matrix(angle_rad);
+    let rotated_v = m.transform(v);
+    return center.add_vector(rotated_v);
+}
+
+// 镜像：绕 YZ 平面（X 取反）
+def mirror_x(point: Point3D) -> Point3D {
+    let r = Point3D();
+    r.create(-point.x, point.y, point.z);
+    return r;
+}
+
+// 镜像：绕 XZ 平面（Y 取反）
+def mirror_y(point: Point3D) -> Point3D {
+    let r = Point3D();
+    r.create(point.x, -point.y, point.z);
+    return r;
+}
+
+// 投影到 XY 平面（Z=0）
+def project_to_xy(point: Point3D) -> Point3D {
+    let r = Point3D();
+    r.create(point.x, point.y, 0.0);
+    return r;
+}
+
+
+// ═══════════════════════════════════════════
+// CoordinateSystem — Revit 风格局部坐标系
+// ═══════════════════════════════════════════
+
+class CoordinateSystem {
+    def init() {
+        this.origin = Point3D();
+        this.x_axis = Vector3D();
+        this.y_axis = Vector3D();
+        this.z_axis = Vector3D();
+        this.x_axis.create(1.0, 0.0, 0.0);
+        this.y_axis.create(0.0, 1.0, 0.0);
+        this.z_axis.create(0.0, 0.0, 1.0);
+    }
+
+    def create(origin: Point3D, x_axis: Vector3D, y_axis: Vector3D) {
+        this.origin = origin;
+        this.x_axis = x_axis.normalize();
+        this.y_axis = y_axis.normalize();
+        this.z_axis = this.x_axis.cross(this.y_axis);
+    }
+
+    // 全局 → 局部
+    def to_local(global_point: Point3D) -> Point3D {
+        let v = this.origin.to(global_point);
+        let ax = this.x_axis; let ay = this.y_axis; let az = this.z_axis;
+        let r = Point3D();
+        r.create(v.x * ax.x + v.y * ax.y + v.z * ax.z,
+                 v.x * ay.x + v.y * ay.y + v.z * ay.z,
+                 v.x * az.x + v.y * az.y + v.z * az.z);
+        return r;
+    }
+
+    // 局部 → 全局
+    def to_global(local_point: Point3D) -> Point3D {
+        let ax = this.x_axis; let ay = this.y_axis; let az = this.z_axis;
+        let v = Vector3D();
+        v.create(local_point.x * ax.x + local_point.y * ay.x + local_point.z * az.x,
+                 local_point.x * ax.y + local_point.y * ay.y + local_point.z * az.y,
+                 local_point.x * ax.z + local_point.y * ay.z + local_point.z * az.z);
+        return this.origin.add_vector(v);
+    }
+}

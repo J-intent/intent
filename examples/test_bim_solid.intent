@@ -1,0 +1,116 @@
+// BIM solid & collision 模块完整测试
+
+import std.bim.unit;
+import std.bim.geometry;
+import std.bim.solid;
+
+print("=== Plane ===");
+let n = Vector3D();
+n.create(0.0, 0.0, 1.0);
+let p0 = Point3D();
+p0.create(0.0, 0.0, 0.0);
+let pl = Plane();
+pl.create_from_normal(n, p0);
+let pt = Point3D();
+pt.create(1.0, 2.0, 3.0);
+let d = pl.distance_to(pt);
+print("dist(pt to xy-plane) = " + str(d));
+// 投影
+let pj = pl.project(pt);
+print("proj(pt) z = " + str(pj.z));
+
+// 三点平面
+let a = Point3D();
+a.create(0.0, 0.0, 0.0);
+let b = Point3D();
+b.create(1.0, 0.0, 0.0);
+let c = Point3D();
+c.create(0.0, 1.0, 0.0);
+let pl2 = Plane();
+pl2.create_from_points(a, b, c);
+let d2 = pl2.distance_to(pt);
+print("xy-plane via 3pts dist(z=3) = " + str(d2));
+
+// 线面交点
+let line = Line3D();
+line.create(p0, pt);
+let ip = pl2.intersect_line(line);
+print("line-plane intersect z = " + str(ip.z));
+
+print("=== Sphere ===");
+let sc = Point3D();
+sc.create(0.0, 0.0, 0.0);
+let sp = Sphere();
+sp.create(sc, 5.0);
+let tp = Point3D();
+tp.create(3.0, 4.0, 0.0);
+print("contains(3,4,0) = " + str(sp.contains(tp)));
+let out = Point3D();
+out.create(5.0, 5.0, 5.0);
+print("contains(5,5,5) = " + str(sp.contains(out)));
+print("volume = " + str(sp.volume()));
+
+print("=== Cylinder (pipe collision) ===");
+// 管道 A: 沿 X 轴
+let as2 = Point3D();
+as2.create(0.0, 0.0, 0.0);
+let ae2 = Point3D();
+ae2.create(10.0, 0.0, 0.0);
+let ca = Cylinder();
+ca.create(as2, ae2, 1.0);
+
+// 管道 B: 平行距离 0.5 → 碰撞
+let bs2 = Point3D();
+bs2.create(5.0, 1.5, 0.0);
+let be2 = Point3D();
+be2.create(5.0, 1.5, 10.0);
+let cb = Cylinder();
+cb.create(bs2, be2, 1.0);
+// sum_r = 2.0, dist = 1.5 < 2.0 → 碰撞
+print("pipe collide (should true) = " + str(ca.intersects_cylinder(cb)));
+
+// 管道 C: 距离 3.0 → 不碰撞
+let cs2 = Point3D();
+cs2.create(5.0, 5.0, 0.0);
+let ce2 = Point3D();
+ce2.create(5.0, 5.0, 10.0);
+let cc = Cylinder();
+cc.create(cs2, ce2, 1.0);
+print("pipe collide (should false) = " + str(ca.intersects_cylinder(cc)));
+
+// 管道 D: 正交交叉，z 方向碰撞
+let ds2 = Point3D();
+ds2.create(5.0, 0.0, -2.0);
+let de2 = Point3D();
+de2.create(5.0, 0.0, 3.0);
+let cd = Cylinder();
+cd.create(ds2, de2, 1.5);
+print("pipe orthogonal collide (should true) = " + str(ca.intersects_cylinder(cd)));
+
+// BBox 碰撞
+let bb1 = BBox3D();
+let bb1_min = Point3D();
+bb1_min.create(0.0, 0.0, 0.0);
+let bb1_max = Point3D();
+bb1_max.create(5.0, 5.0, 5.0);
+bb1.create(bb1_min, bb1_max);
+let bb2 = BBox3D();
+let bb2_min = Point3D();
+bb2_min.create(3.0, 3.0, 3.0);
+let bb2_max = Point3D();
+bb2_max.create(8.0, 8.0, 8.0);
+bb2.create(bb2_min, bb2_max);
+let bb3 = BBox3D();
+let bb3_min = Point3D();
+bb3_min.create(10.0, 10.0, 10.0);
+let bb3_max = Point3D();
+bb3_max.create(20.0, 20.0, 20.0);
+bb3.create(bb3_min, bb3_max);
+print("bbox intersect (1&2) = " + str(bbox_intersects(bb1, bb2)));
+print("bbox intersect (1&3) = " + str(bbox_intersects(bb1, bb3)));
+
+// pipe_collides 快捷函数
+let pc = pipe_collides(as2, ae2, 1.0, bs2, be2, 1.0);
+print("pipe_collides (should true) = " + str(pc));
+
+print("=== ALL PASS ===");

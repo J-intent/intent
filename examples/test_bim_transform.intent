@@ -1,0 +1,85 @@
+// BIM 变换模块: 完整功能测试
+import std.bim.unit;
+import std.bim.geometry;
+import std.bim.transform;
+
+print("=== Matrix3x3 ===");
+
+// 1. 单位矩阵 × 向量 = 向量本身
+let m0 = std.bim.transform.Matrix3x3();
+let v = std.bim.geometry.Vector3D();
+v.create(3.0, 4.0, 5.0);
+let r0 = m0.transform(v);
+print("identity×vec = (" + str(r0.x) + "," + str(r0.y) + "," + str(r0.z) + ")");
+
+// 2. 绕 Z 轴旋转 90°
+let rz = std.bim.transform.rotate_z_matrix(1.57079632679);
+let vx = std.bim.geometry.Vector3D();
+vx.create(1.0, 0.0, 0.0);
+let rx = rz.transform(vx);
+print("rotZ90(1,0,0) = (" + str(rx.x) + "," + str(rx.y) + "," + str(rx.z) + ")");
+
+// 3. 绕 X 轴旋转 90°: (0,1,0) → (0,0,1)
+let ry = std.bim.geometry.Vector3D();
+ry.create(0.0, 1.0, 0.0);
+let rx90 = std.bim.transform.rotate_x_matrix(1.57079632679);
+let rrx = rx90.transform(ry);
+print("rotX90(0,1,0) = (" + str(rrx.x) + "," + str(rrx.y) + "," + str(rrx.z) + ")");
+
+// 4. 缩放
+let sm = std.bim.transform.scale_matrix(2.0, 3.0, 4.0);
+let sv = sm.transform(v);
+print("scale(3,4,5)×(2,3,4) = (" + str(sv.x) + "," + str(sv.y) + "," + str(sv.z) + ")");
+
+// 5. 矩阵乘法: Rz(90) × Rz(90) = Rz(180)
+let rz2 = rz.multiply(rz);
+let vx2 = rz2.transform(vx);
+print("rotZ180(1,0,0) = (" + str(vx2.x) + "," + str(vx2.y) + "," + str(vx2.z) + ")");
+
+// 6. 行列式
+print("Rz det = " + str(rz.determinant()));
+
+print("=== Point Transform ===");
+
+// 7. 点平移
+let p = std.bim.geometry.Point3D();
+p.create(1.0, 2.0, 3.0);
+let tv = std.bim.geometry.Vector3D();
+tv.create(10.0, 20.0, 30.0);
+let pt = std.bim.transform.translate_point(p, tv);
+print("(1,2,3)+(10,20,30) = (" + str(pt.x) + "," + str(pt.y) + "," + str(pt.z) + ")");
+
+// 8. 2D 旋转
+let center = std.bim.geometry.Point3D();
+center.create(0.0, 0.0, 0.0);
+let rotated = std.bim.transform.rotate_point_2d(p, center, 1.57079632679);
+print("rot90(1,2,3) = (" + str(rotated.x) + "," + str(rotated.y) + "," + str(rotated.z) + ")");
+
+print("=== CoordinateSystem ===");
+
+// 9. 局部坐标系
+let cs = std.bim.transform.CoordinateSystem();
+let orig = std.bim.geometry.Point3D();
+orig.create(10.0, 10.0, 0.0);
+let xa = std.bim.geometry.Vector3D();
+xa.create(1.0, 0.0, 0.0);
+let ya = std.bim.geometry.Vector3D();
+ya.create(0.0, 1.0, 0.0);
+cs.create(orig, xa, ya);
+
+let gp = std.bim.geometry.Point3D();
+gp.create(15.0, 25.0, 0.0);
+let lp = cs.to_local(gp);
+print("global→local = (" + str(lp.x) + "," + str(lp.y) + "," + str(lp.z) + ")");
+
+let back = cs.to_global(lp);
+print("local→global = (" + str(back.x) + "," + str(back.y) + "," + str(back.z) + ")");
+
+print("=== Mirror & Project ===");
+let mp = std.bim.transform.mirror_x(p);
+print("mirror_x(1,2,3) = (" + str(mp.x) + "," + str(mp.y) + "," + str(mp.z) + ")");
+
+let proj = std.bim.transform.project_to_xy(p);
+print("proj_xy(1,2,3) = (" + str(proj.x) + "," + str(proj.y) + "," + str(proj.z) + ")");
+
+print("=== ALL PASS ===");

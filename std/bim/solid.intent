@@ -1,0 +1,242 @@
+// std/bim/solid.intent — 实体几何 & 碰撞检测
+// 心学为体：虚实相生，碰撞即关系
+// 禅道为翼：纯函数布尔组合，组合即新体
+// 马哲为用：碰撞检测 = BIM 实践第一步
+
+import std.bim.geometry;
+import std.bim.unit;
+import std.math;
+
+// ═══════════════════════════════════════════
+// Plane — 无限平面 ax+by+cz+d=0
+// ═══════════════════════════════════════════
+
+class Plane {
+    def init() {
+        this.normal = Vector3D();
+        this.d = 0.0;
+    }
+
+    // 从法向量+点创建
+    def create_from_normal(n: Vector3D, point: Point3D) {
+        this.normal = n.normalize();
+        this.d = 0.0 - (n.x * point.x + n.y * point.y + n.z * point.z);
+    }
+
+    // 从三个点创建
+    def create_from_points(a: Point3D, b: Point3D, c: Point3D) {
+        let v1 = a.to(b);
+        let v2 = a.to(c);
+        this.normal = v1.cross(v2).normalize();
+        this.d = 0.0 - (this.normal.x * a.x + this.normal.y * a.y + this.normal.z * a.z);
+    }
+
+    // 点到平面的有符距离
+    def distance_to(point: Point3D) -> Float {
+        return this.normal.x * point.x + this.normal.y * point.y + this.normal.z * point.z + this.d;
+    }
+
+    // 投影点到平面
+    def project(point: Point3D) -> Point3D {
+        let dist = this.distance_to(point);
+        let r = Point3D();
+        r.create(point.x - this.normal.x * dist,
+                 point.y - this.normal.y * dist,
+                 point.z - this.normal.z * dist);
+        return r;
+    }
+
+    // 求交：直线与平面
+    def intersect_line(line: Line3D) -> Point3D {
+        let d = this.normal.dot(line.direction());
+        let t = (0.0 - this.d - this.normal.dot(line.start)) / d;
+        let p = line.point_at(t);
+        return p;
+    }
+}
+
+
+// ═══════════════════════════════════════════
+// Sphere — 球体
+// ═══════════════════════════════════════════
+
+class Sphere {
+    def init() {
+        this.center = Point3D();
+        this.radius = 0.0;
+    }
+
+    def create(center: Point3D, radius: Float) {
+        this.center = center;
+        this.radius = radius;
+    }
+
+    // 点是否在球内（含表面）
+    def contains(point: Point3D) -> Bool {
+        let dx = point.x - this.center.x;
+        let dy = point.y - this.center.y;
+        let dz = point.z - this.center.z;
+        return dx * dx + dy * dy + dz * dz <= this.radius * this.radius;
+    }
+
+    // 与包围盒相交
+    def intersects_bbox(bbox: BBox3D) -> Bool {
+        let closest = Point3D();
+        let cx = this.center.x;
+        let cy = this.center.y;
+        let cz = this.center.z;
+        let cx2 = max(bbox.min_x, min(cx, bbox.max_x));
+        let cy2 = max(bbox.min_y, min(cy, bbox.max_y));
+        let cz2 = max(bbox.min_z, min(cz, bbox.max_z));
+        let dx2 = cx - cx2;
+        let dy2 = cy - cy2;
+        let dz2 = cz - cz2;
+        return dx2 * dx2 + dy2 * dy2 + dz2 * dz2 <= this.radius * this.radius;
+    }
+
+    // 体积
+    def volume() -> Float {
+        return 4.0 / 3.0 * pi() * this.radius * this.radius * this.radius;
+    }
+}
+
+
+// ═══════════════════════════════════════════
+// Cylinder — 圆柱体（BIM 核心：管道）
+// ═══════════════════════════════════════════
+
+class Cylinder {
+    def init() {
+        this.start = Point3D();
+        this.end = Point3D();
+        this.radius = 0.0;
+    }
+
+    def create(start: Point3D, end: Point3D, radius: Float) {
+        this.start = start;
+        this.end = end;
+        this.radius = radius;
+    }
+
+    // 轴线向量
+    def axis() -> Vector3D {
+        return this.start.to(this.end);
+    }
+
+    // 长度
+    def length() -> Float {
+        return this.start.distance_to(this.end);
+    }
+
+    // 最小距离：点到管心的投影距离
+    def distance_to_point(point: Point3D) -> Float {
+        let axis = this.axis();
+        let axis_len_sq = axis.length() * axis.length();
+        let to_point = this.start.to(point);
+        // 投影参数 t ∈ [0,1]
+        let t = max(0.0, min(1.0, axis.dot(to_point) / axis_len_sq));
+        // 投影点
+        let proj = Point3D();
+        proj.create(this.start.x + axis.x * t,
+                    this.start.y + axis.y * t,
+                    this.start.z + axis.z * t);
+        let dist = proj.distance_to(point);
+        return max(0.0, dist - this.radius);
+    }
+
+    // 与包围盒相交
+    def intersects_bbox(bbox: BBox3D) -> Bool {
+        return this.distance_to_point(bbox.center()) <= this.radius + bbox.half_diagonal();
+    }
+
+    // 两圆柱体碰撞（管道碰撞的核心检测！）
+    def intersects_cylinder(other: Cylinder) -> Bool {
+        // 解析：两线段最短距离 < r1 + r2
+        let a1 = this.start;
+        let a2 = this.end;
+        let b1 = other.start;
+        let b2 = other.end;
+        let d1_x = a2.x - a1.x;
+        let d1_y = a2.y - a1.y;
+        let d1_z = a2.z - a1.z;
+        let d2_x = b2.x - b1.x;
+        let d2_y = b2.y - b1.y;
+        let d2_z = b2.z - b1.z;
+        let r_x = a1.x - b1.x;
+        let r_y = a1.y - b1.y;
+        let r_z = a1.z - b1.z;
+        let a = d1_x * d1_x + d1_y * d1_y + d1_z * d1_z;
+        let e = d2_x * d2_x + d2_y * d2_y + d2_z * d2_z;
+        let f = d2_x * r_x + d2_y * r_y + d2_z * r_z;
+        let mut s = 0.0;
+        let mut t = 0.0;
+        if a <= 0.000001 and e <= 0.000001 {
+            // 两退化线段
+            s = 0.0;
+            t = 0.0;
+        }
+        if a <= 0.000001 and e > 0.000001 {
+            s = 0.0;
+            t = max(0.0, min(1.0, f / e));
+        }
+        if a > 0.000001 and e <= 0.000001 {
+            let c = d1_x * r_x + d1_y * r_y + d1_z * r_z;
+            s = max(0.0, min(1.0, 0.0 - c / a));
+            t = 0.0;
+        }
+        if a > 0.000001 and e > 0.000001 {
+            let b = d1_x * d2_x + d1_y * d2_y + d1_z * d2_z;
+            let c = d1_x * r_x + d1_y * r_y + d1_z * r_z;
+            let denom = a * e - b * b;
+            if abs(denom) < 0.000001 {
+                s = 0.0;
+                t = max(0.0, min(1.0, f / e));
+            }
+            if abs(denom) >= 0.000001 {
+                let sn = b * f - c * e;
+                let tn = a * f - b * c;
+                s = max(0.0, min(1.0, sn / denom));
+                t = max(0.0, min(1.0, tn / denom));
+            }
+        }
+        // 计算最近点距离
+        let cx = a1.x + d1_x * s - b1.x - d2_x * t;
+        let cy = a1.y + d1_y * s - b1.y - d2_y * t;
+        let cz = a1.z + d1_z * s - b1.z - d2_z * t;
+        let dist_sq = cx * cx + cy * cy + cz * cz;
+        let sum_r = this.radius + other.radius;
+        return dist_sq <= sum_r * sum_r;
+    }
+
+    // 包围盒
+    def bbox() -> BBox3D {
+        let b = BBox3D();
+        let ex = min(this.start.x, this.end.x) - this.radius;
+        let ey = min(this.start.y, this.end.y) - this.radius;
+        let ez = min(this.start.z, this.end.z) - this.radius;
+        let mx = max(this.start.x, this.end.x) + this.radius;
+        let my = max(this.start.y, this.end.y) + this.radius;
+        let mz = max(this.start.z, this.end.z) + this.radius;
+        b.create_from_corners(ex, ey, ez, mx, my, mz);
+        return b;
+    }
+}
+
+
+// ═══════════════════════════════════════════
+// 碰撞检测工厂函数
+// ═══════════════════════════════════════════
+
+// BBox vs BBox 碰撞
+def bbox_intersects(a: BBox3D, b: BBox3D) -> Bool {
+    return a.max.x >= b.min.x and a.min.x <= b.max.x and a.max.y >= b.min.y and a.min.y <= b.max.y and a.max.z >= b.min.z and a.min.z <= b.max.z;
+}
+
+// 管道碰撞（批量检测入口）
+def pipe_collides(a_start: Point3D, a_end: Point3D, a_r: Float, b_start: Point3D, b_end: Point3D, b_r: Float) -> Bool {
+    let c1 = Cylinder();
+    c1.create(a_start, a_end, a_r);
+    let c2 = Cylinder();
+    c2.create(b_start, b_end, b_r);
+    return c1.intersects_cylinder(c2);
+}

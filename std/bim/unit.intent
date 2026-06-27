@@ -1,0 +1,61 @@
+// std/bim/unit.intent — 单位与变换
+// BIM 核心：毫米↔米↔英尺，以及坐标变换
+
+// ═══════════════════════════════════════════
+// 长度单位常量（以米为基准）
+// ═══════════════════════════════════════════
+
+let UNIT_MM = 0.001;       // 毫米 → 米
+let UNIT_CM = 0.01;        // 厘米 → 米
+let UNIT_M = 1.0;          // 米
+let UNIT_FT = 0.3048;      // 英尺 → 米
+let UNIT_INCH = 0.0254;    // 英寸 → 米
+
+// ═══════════════════════════════════════════
+// 转换函数
+// ═══════════════════════════════════════════
+
+def mm_to_m(mm: Float) -> Float {
+    return mm * UNIT_MM;
+}
+
+def m_to_mm(m: Float) -> Float {
+    return m / UNIT_MM;
+}
+
+def ft_to_m(ft: Float) -> Float {
+    return ft * UNIT_FT;
+}
+
+def m_to_ft(m: Float) -> Float {
+    return m / UNIT_FT;
+}
+
+def inch_to_m(inch: Float) -> Float {
+    return inch * UNIT_INCH;
+}
+
+def m_to_inch(m: Float) -> Float {
+    return m / UNIT_INCH;
+}
+
+// 角度转换
+def deg_to_rad(deg: Float) -> Float {
+    return deg * 3.141592653589793 / 180.0;
+}
+
+def rad_to_deg(rad: Float) -> Float {
+    return rad * 180.0 / 3.141592653589793;
+}
+
+// ═══════════════════════════════════════════
+// Revit 常用：内部单位→毫米（Revit 内部存储用英尺）
+// ═══════════════════════════════════════════
+
+def revit_to_mm(internal: Float) -> Float {
+    return internal * 304.8;  // ft → mm
+}
+
+def mm_to_revit(mm: Float) -> Float {
+    return mm / 304.8;  // mm → ft
+}

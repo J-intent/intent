@@ -731,7 +731,9 @@ class Parser:
 
         # 参数列表
         self.expect(TokenType.SYMBOL, '(')
+        self._skip_newlines()
         func.params = self.parse_parameter_list()
+        self._skip_newlines()
         self.expect(TokenType.SYMBOL, ')')
 
         # 返回类型 (支持 :Type 和 ->Type 两种语法)
@@ -801,6 +803,7 @@ class Parser:
             # 更多参数
             while self.match(TokenType.SYMBOL, ','):
                 self.advance()  # 消耗逗号
+                self._skip_newlines()
                 param_name = self.expect(TokenType.IDENTIFIER).value
                 # 检查是否有类型标注
                 param_type = "Any"
@@ -817,7 +820,9 @@ class Parser:
         
         # 参数列表
         self.expect(TokenType.SYMBOL, '(')
+        self._skip_newlines()
         params = self.parse_parameter_list()
+        self._skip_newlines()
         self.expect(TokenType.SYMBOL, ')')
         
         # 可选的返回类型
@@ -2682,6 +2687,15 @@ class Interpreter:
             'pow': self._builtin_pow,
             'floor': self._builtin_floor,
             'ceil': self._builtin_ceil,
+            # 三角函数
+            'cos': self._builtin_cos,
+            'sin': self._builtin_sin,
+            'tan': self._builtin_tan,
+            'acos': self._builtin_acos,
+            'asin': self._builtin_asin,
+            'atan': self._builtin_atan,
+            'atan2': self._builtin_atan2,
+            'pi': self._builtin_pi,
             # std/random
             'random': self._builtin_random,
             'randint': self._builtin_randint,
@@ -3017,6 +3031,61 @@ class Interpreter:
             raise TypeError(f"ceil() 期望1个参数,得到 {len(args)}个")
         return IntValue(int(math.ceil(float(args[0].value))))
 
+
+    # ══ 三角函数 (math) ──
+    def _builtin_cos(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """cos(angle_rad: Float) — 余弦"""
+        import math
+        if len(args) != 1:
+            raise TypeError(f"cos() 期望1个参数,得到 {len(args)}个")
+        return FloatValue(math.cos(float(args[0].value)))
+
+    def _builtin_sin(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """sin(angle_rad: Float) — 正弦"""
+        import math
+        if len(args) != 1:
+            raise TypeError(f"sin() 期望1个参数,得到 {len(args)}个")
+        return FloatValue(math.sin(float(args[0].value)))
+
+    def _builtin_tan(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """tan(angle_rad: Float) — 正切"""
+        import math
+        if len(args) != 1:
+            raise TypeError(f"tan() 期望1个参数,得到 {len(args)}个")
+        return FloatValue(math.tan(float(args[0].value)))
+
+    def _builtin_acos(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """acos(x: Float) — 反余弦"""
+        import math
+        if len(args) != 1:
+            raise TypeError(f"acos() 期望1个参数,得到 {len(args)}个")
+        return FloatValue(math.acos(float(args[0].value)))
+
+    def _builtin_asin(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """asin(x: Float) — 反正弦"""
+        import math
+        if len(args) != 1:
+            raise TypeError(f"asin() 期望1个参数,得到 {len(args)}个")
+        return FloatValue(math.asin(float(args[0].value)))
+
+    def _builtin_atan(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """atan(x: Float) — 反正切"""
+        import math
+        if len(args) != 1:
+            raise TypeError(f"atan() 期望1个参数,得到 {len(args)}个")
+        return FloatValue(math.atan(float(args[0].value)))
+
+    def _builtin_atan2(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """atan2(y: Float, x: Float) — 四象限反正切"""
+        import math
+        if len(args) != 2:
+            raise TypeError(f"atan2() 期望2个参数,得到 {len(args)}个")
+        return FloatValue(math.atan2(float(args[0].value), float(args[1].value)))
+
+    def _builtin_pi(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """pi() — 圆周率 π"""
+        import math
+        return FloatValue(math.pi)
     # ══ std/random ──
     def _builtin_random(self, args: List[RuntimeValue]) -> RuntimeValue:
         """random() — 返回 [0,1) 均匀分布浮点数"""
@@ -3799,10 +3868,14 @@ class Interpreter:
                 # 函数: 包成 FunctionValue（闭包=模块作用域）
                 fv = FunctionValue(value, module_scope_obj)
                 cursor_scope.declare(name, fv, False, allow_redefine=True)
+                # 同时注入当前作用域（供模块内裸名调用）
+                self.current_scope.declare(name, fv, False, allow_redefine=True)
                 full_name = f"{alias}.{name}"
                 self.functions[full_name] = fv
             else:
                 cursor_scope.declare(name, value, False, allow_redefine=True)
+                # 同时注入当前作用域（供模块内裸名调用，如 ClassValue/Module 等非函数值）
+                self.current_scope.declare(name, value, False, allow_redefine=True)
 
         return IntValue(0)
 
@@ -4275,6 +4348,17 @@ class Interpreter:
                     args = [self.evaluate_expression(arg, context) for arg in expr.args]
                     return self.execute_function(func, args)
 
+            # 回退：从当前作用域查找（模块导入注入的符号）
+            if func_name and self.current_scope.has(func_name):
+                scope_val = self.current_scope.get(func_name)
+                if isinstance(scope_val, FunctionValue):
+                    args = [self.evaluate_expression(arg, context) for arg in expr.args]
+                    return self.execute_function(scope_val, args)
+                if isinstance(scope_val, ClassValue):
+                    args = [self.evaluate_expression(arg, context) for arg in expr.args]
+                    instance = scope_val.call(self, args)
+                    return instance
+
             raise NameError(f"未定义的函数: {func_name or expr.func}")
 
         elif isinstance(expr, ListExpr):
@@ -4413,6 +4497,13 @@ class Interpreter:
                     return BoolValue(left.value <= right.value)
                 elif op == '>=':
                     return BoolValue(left.value >= right.value)
+
+            # Bool 比较
+            if isinstance(left, BoolValue) and isinstance(right, BoolValue):
+                if op == '==':
+                    return BoolValue(left.value == right.value)
+                elif op == '!=':
+                    return BoolValue(left.value != right.value)
 
             # None 比较
             if isinstance(left, NoneValue) and isinstance(right, NoneValue):

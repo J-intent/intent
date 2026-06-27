@@ -1,0 +1,24 @@
+// 验证类语法
+
+class Point {
+    def init() {
+        this.x = 0;
+        this.y = 0;
+        this.z = 0;
+    }
+
+    def set(x: Int, y: Int, z: Int) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+
+    def length() -> Float {
+        return sqrt(this.x * this.x + this.y * this.y + this.z * this.z);
+    }
+}
+
+let p = Point();
+p.set(3, 4, 0);
+print("x=" + str(p.x) + " y=" + str(p.y) + " z=" + str(p.z));
+print("length=" + str(p.length()));

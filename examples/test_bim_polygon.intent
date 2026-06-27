@@ -1,0 +1,95 @@
+// BIM polygon 模块完整测试
+
+import std.bim.unit;
+import std.bim.geometry;
+import std.bim.polygon;
+
+print("=== Polyline ===");
+let pl = Polyline();
+let p0 = Point3D();
+p0.create(0.0, 0.0, 0.0);
+let p1 = Point3D();
+p1.create(3.0, 0.0, 0.0);
+let p2 = Point3D();
+p2.create(3.0, 4.0, 0.0);
+pl.from_list([p0, p1, p2]);
+print("count = " + str(pl.count()));
+print("length = " + str(pl.length()));
+print("is_closed = " + str(pl.is_closed()));
+let cent = pl.centroid();
+print("centroid = (" + str(cent.x) + "," + str(cent.y) + "," + str(cent.z) + ")");
+
+print("=== Polygon: Rectangle ===");
+let a = Point3D();
+a.create(0.0, 0.0, 0.0);
+let b = Point3D();
+b.create(5.0, 0.0, 0.0);
+let c = Point3D();
+c.create(5.0, 3.0, 0.0);
+let d = Point3D();
+d.create(0.0, 3.0, 0.0);
+let rect = Polygon();
+rect.from_list([a, b, c, d]);
+print("area = " + str(rect.area_xy()));
+print("perimeter = " + str(rect.perimeter()));
+print("is_convex = " + str(rect.is_convex_xy()));
+
+print("=== Polygon: Point in polygon ===");
+let inside = Point3D();
+inside.create(2.5, 1.5, 0.0);
+let outside = Point3D();
+outside.create(6.0, 6.0, 0.0);
+print("contains(2.5,1.5) = " + str(rect.contains_xy(inside)));
+print("contains(6,6) = " + str(rect.contains_xy(outside)));
+
+print("=== Polygon: Triangle ===");
+let t1 = Point3D();
+t1.create(0.0, 0.0, 0.0);
+let t2 = Point3D();
+t2.create(4.0, 0.0, 0.0);
+let t3 = Point3D();
+t3.create(2.0, 3.0, 0.0);
+let tri = Polygon();
+tri.from_list([t1, t2, t3]);
+print("tri area = " + str(tri.area_xy()));
+print("tri perimeter = " + str(tri.perimeter()));
+let tc = tri.centroid_xy();
+print("tri centroid = (" + str(tc.x) + "," + str(tc.y) + ")");
+
+print("=== make_rect_xy ===");
+let lo = Point3D();
+lo.create(0.0, 0.0, 0.0);
+let hi = Point3D();
+hi.create(10.0, 5.0, 0.0);
+let r2 = make_rect_xy(lo, hi);
+print("rect area = " + str(r2.area_xy()));
+print("rect perimeter = " + str(r2.perimeter()));
+
+print("=== make_regular_xy (hexagon) ===");
+let center = Point3D();
+center.create(0.0, 0.0, 0.0);
+let hexagon = make_regular_xy(center, 2.0, 6);
+print("hex vertices = " + str(hexagon.count()));
+print("hex area = " + str(hexagon.area_xy()));
+print("hex is_convex = " + str(hexagon.is_convex_xy()));
+
+print("=== Concave polygon ===");
+// L-shaped concave polygon
+let c1 = Point3D();
+c1.create(0.0, 0.0, 0.0);
+let c2 = Point3D();
+c2.create(3.0, 0.0, 0.0);
+let c3 = Point3D();
+c3.create(3.0, 1.0, 0.0);
+let c4 = Point3D();
+c4.create(1.0, 1.0, 0.0);
+let c5 = Point3D();
+c5.create(1.0, 3.0, 0.0);
+let c6 = Point3D();
+c6.create(0.0, 3.0, 0.0);
+let concave = Polygon();
+concave.from_list([c1, c2, c3, c4, c5, c6]);
+print("L-shape area = " + str(concave.area_xy()));
+print("L-shape is_convex = " + str(concave.is_convex_xy()));
+
+print("=== ALL PASS ===");

@@ -1,0 +1,283 @@
+// std/bim/geometry.intent — 三维几何内核
+// 心学为体：万物有形，点线面体皆有其理
+// 禅道为翼：向量运算纯函数，无副作用
+// 马哲为用：用契约保证每个几何计算都是正确的
+
+import std.bim.unit;
+
+// ═══════════════════════════════════════════
+// 辅助函数（必须在所有类之前定义，Resolver 需要）
+// ═══════════════════════════════════════════
+
+def min_float(a: Float, b: Float) -> Float {
+    if a < b { return a; };
+    return b;
+}
+
+def max_float(a: Float, b: Float) -> Float {
+    if a > b { return a; };
+    return b;
+}
+
+// ═══════════════════════════════════════════
+// Vector3D — 三维向量，所有几何运算的根基
+// ═══════════════════════════════════════════
+
+class Vector3D {
+    def init() {
+        this.x = 0.0;
+        this.y = 0.0;
+        this.z = 0.0;
+    }
+
+    def create(x: Float, y: Float, z: Float) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+
+    // 向量加法 v + w
+    def add(other: Vector3D) -> Vector3D {
+        let r = Vector3D();
+        r.create(this.x + other.x, this.y + other.y, this.z + other.z);
+        return r;
+    }
+
+    // 向量减法 v - w
+    def sub(other: Vector3D) -> Vector3D {
+        let r = Vector3D();
+        r.create(this.x - other.x, this.y - other.y, this.z - other.z);
+        return r;
+    }
+
+    // 标量乘法 v * s
+    def scale(s: Float) -> Vector3D {
+        let r = Vector3D();
+        r.create(this.x * s, this.y * s, this.z * s);
+        return r;
+    }
+
+    // 点积 v·w
+    def dot(other: Vector3D) -> Float {
+        return this.x * other.x + this.y * other.y + this.z * other.z;
+    }
+
+    // 叉积 v×w
+    def cross(other: Vector3D) -> Vector3D {
+        let r = Vector3D();
+        r.create(
+            this.y * other.z - this.z * other.y,
+            this.z * other.x - this.x * other.z,
+            this.x * other.y - this.y * other.x
+        );
+        return r;
+    }
+
+    // 向量长度 |v|
+    def length() -> Float {
+        return sqrt(this.x * this.x + this.y * this.y + this.z * this.z);
+    }
+
+    // 单位化 v/|v|
+    def normalize() -> Vector3D {
+        let len = this.length();
+        if len == 0.0 {
+            let r = Vector3D();
+            r.create(0.0, 0.0, 0.0);
+            return r;
+        };
+        return this.scale(1.0 / len);
+    }
+
+    // 向量取反 -v
+    def negate() -> Vector3D {
+        return this.scale(-1.0);
+    }
+
+    // 两点间向量 A→B
+    def from_points(a: Point3D, b: Point3D) {
+        this.x = b.x - a.x;
+        this.y = b.y - a.y;
+        this.z = b.z - a.z;
+    }
+
+    // 距离（用于点之间的距离）
+    def distance_to(other: Vector3D) -> Float {
+        let dx = this.x - other.x;
+        let dy = this.y - other.y;
+        let dz = this.z - other.z;
+        return sqrt(dx * dx + dy * dy + dz * dz);
+    }
+}
+
+
+// ═══════════════════════════════════════════
+// Point3D — 三维空间点
+// ═══════════════════════════════════════════
+
+class Point3D {
+    def init() {
+        this.x = 0.0;
+        this.y = 0.0;
+        this.z = 0.0;
+    }
+
+    def create(x: Float, y: Float, z: Float) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+
+    // 点 + 向量 = 新点
+    def add_vector(v: Vector3D) -> Point3D {
+        let r = Point3D();
+        r.create(this.x + v.x, this.y + v.y, this.z + v.z);
+        return r;
+    }
+
+    // 点 - 向量 = 新点
+    def sub_vector(v: Vector3D) -> Point3D {
+        let r = Point3D();
+        r.create(this.x - v.x, this.y - v.y, this.z - v.z);
+        return r;
+    }
+
+    // 两点间向量 this→other
+    def to(other: Point3D) -> Vector3D {
+        let v = Vector3D();
+        v.from_points(this, other);
+        return v;
+    }
+
+    // 两点距离
+    def distance_to(other: Point3D) -> Float {
+        return this.to(other).length();
+    }
+
+    // 中点
+    def midpoint(other: Point3D) -> Point3D {
+        let r = Point3D();
+        r.create(
+            (this.x + other.x) / 2.0,
+            (this.y + other.y) / 2.0,
+            (this.z + other.z) / 2.0
+        );
+        return r;
+    }
+}
+
+
+// ═══════════════════════════════════════════
+// Line3D — 空间线段（含方向）
+// ═══════════════════════════════════════════
+
+class Line3D {
+    def init() {
+        this.start = Point3D();
+        this.end = Point3D();
+    }
+
+    def create(start: Point3D, end: Point3D) {
+        this.start = start;
+        this.end = end;
+    }
+
+    // 方向向量
+    def direction() -> Vector3D {
+        let v = Vector3D();
+        v.from_points(this.start, this.end);
+        return v.normalize();
+    }
+
+    // 长度
+    def length() -> Float {
+        return this.start.distance_to(this.end);
+    }
+
+    // 线上点（参数 t: 0=start, 1=end）
+    def point_at(t: Float) -> Point3D {
+        let v = Vector3D();
+        v.from_points(this.start, this.end);
+        return this.start.add_vector(v.scale(t));
+    }
+
+    // 中点
+    def midpoint() -> Point3D {
+        return this.point_at(0.5);
+    }
+}
+
+
+// ═══════════════════════════════════════════
+// BBox3D — 轴对齐包围盒
+// ═══════════════════════════════════════════
+
+class BBox3D {
+    def init() {
+        this.min = Point3D();
+        this.max = Point3D();
+    }
+
+    def create(min: Point3D, max: Point3D) {
+        this.min = min;
+        this.max = max;
+    }
+
+    // 从两点构造
+    def from_points(a: Point3D, b: Point3D) {
+        this.min.create(
+            min_float(a.x, b.x),
+            min_float(a.y, b.y),
+            min_float(a.z, b.z)
+        );
+        this.max.create(
+            max_float(a.x, b.x),
+            max_float(a.y, b.y),
+            max_float(a.z, b.z)
+        );
+    }
+
+    // 包围盒尺寸
+    def size() -> Vector3D {
+        let v = Vector3D();
+        v.from_points(this.min, this.max);
+        return v;
+    }
+
+    // 中心点
+    def center() -> Point3D {
+        return this.min.midpoint(this.max);
+    }
+
+    // 体积
+    def volume() -> Float {
+        let s = this.size();
+        return s.x * s.y * s.z;
+    }
+
+    // 是否包含点
+    def contains(p: Point3D) -> Int {
+        if p.x < this.min.x or p.x > this.max.x { return 0; };
+        if p.y < this.min.y or p.y > this.max.y { return 0; };
+        if p.z < this.min.z or p.z > this.max.z { return 0; };
+        return 1;
+    }
+
+    // 两个包围盒是否相交
+    def intersects(other: BBox3D) -> Int {
+        if this.max.x < other.min.x or this.min.x > other.max.x { return 0; };
+        if this.max.y < other.min.y or this.min.y > other.max.y { return 0; };
+        if this.max.z < other.min.z or this.min.z > other.max.z { return 0; };
+        return 1;
+    }
+
+    // 扩展包围盒包含另一个点
+    def expand(p: Point3D) {
+        if p.x < this.min.x { this.min.x = p.x; };
+        if p.y < this.min.y { this.min.y = p.y; };
+        if p.z < this.min.z { this.min.z = p.z; };
+        if p.x > this.max.x { this.max.x = p.x; };
+        if p.y > this.max.y { this.max.y = p.y; };
+        if p.z > this.max.z { this.max.z = p.z; };
+    }
+}
