@@ -1819,15 +1819,21 @@ class Parser:
         def make_var(name):
             return Variable(name=name, line=token.line, column=token.column)
         
+        def make_expr(text):
+            """将插值表达式文本解析为AST"""
+            inner_lexer = Lexer(text)
+            inner_tokens = inner_lexer.tokenize()
+            inner_parser = Parser(inner_tokens, text)
+            return inner_parser.parse_expression()
+        
         # 第一个部分
         if parts[0][0] == 'str':
             result = make_str(parts[0][1])
         else:
             # 插值表达式 -> str(expr)
-            # 生成 str(expr) 调用
             result = CallExpr(
                 func=Variable(name='str', line=token.line, column=token.column),
-                args=[make_var(parts[0][1])],
+                args=[make_expr(parts[0][1])],
                 line=token.line, column=token.column
             )
         
@@ -1838,7 +1844,7 @@ class Parser:
             else:
                 right = CallExpr(
                     func=Variable(name='str', line=token.line, column=token.column),
-                    args=[make_var(parts[i][1])],
+                    args=[make_expr(parts[i][1])],
                     line=token.line, column=token.column
                 )
             result = BinaryOp(
@@ -4088,8 +4094,39 @@ class Interpreter:
         # 获取可迭代对象
         iterable = self.evaluate_expression(stmt.iterable)
 
+        if isinstance(iterable, DictValue):
+            # 字典遍历: for (k, v) in dict 或 for k in dict(遍历keys)
+            for key, val in iterable.value.items():
+                old_scope = self.current_scope
+                self.current_scope = self.current_scope.enter()
+
+                if stmt.vars and len(stmt.vars) >= 2:
+                    self.current_scope.declare(stmt.vars[0], StringValue(key), False)
+                    self.current_scope.declare(stmt.vars[1], val.copy(), False)
+                elif stmt.vars and len(stmt.vars) == 1:
+                    self.current_scope.declare(stmt.vars[0], StringValue(key), False)
+                else:
+                    self.current_scope.declare(stmt.var, StringValue(key), False)
+
+                for body_stmt in stmt.body:
+                    result = self.execute_statement(body_stmt)
+                    if self.return_flag:
+                        self.current_scope = old_scope
+                        return result
+                    elif self.break_flag:
+                        break
+                    elif self.continue_flag:
+                        self.continue_flag = False
+                        break
+
+                self.current_scope = old_scope
+                if self.break_flag:
+                    self.break_flag = False
+                    break
+            return result
+
         if not isinstance(iterable, ListValue):
-            raise TypeError(f"for循环期望列表,得到 {iterable.type}")
+            raise TypeError(f"for循环期望List或Dict,得到 {iterable.type}")
 
         for item_idx, item in enumerate(iterable.value):
             # 进入循环体作用域
