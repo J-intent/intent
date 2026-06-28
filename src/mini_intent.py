@@ -8,6 +8,9 @@ Intent语言完整解释器 v1.2
 import sys
 import os
 import re
+
+# 提升 Python 递归限制（Intent 递归函数需要更深的调用栈）
+sys.setrecursionlimit(100000)
 import json
 import math
 from dataclasses import dataclass, field
@@ -195,7 +198,8 @@ class Lexer:
         'invariant', 'pure', 'effect', 'import', 'from', 'as',
         'None', 'True', 'False', 'true', 'false', 'null',
         'and', 'or', 'not', 'in', 'is',
-        'class', 'this', 'mut', 'fn'  # 类系统 + 匿名函数
+        'class', 'this', 'mut', 'fn',  # 类系统 + 匿名函数
+        'try', 'catch', 'finally'  # 错误处理
     }
 
     # 内置类型名 - 不是关键字,只是预定义的类型标识符
@@ -492,6 +496,14 @@ class BreakStmt(ASTNode):
 class ContinueStmt(ASTNode):
     """continue语句"""
     pass
+
+@dataclass
+class TryStmt(ASTNode):
+    """try-catch语句"""
+    try_body: List[ASTNode] = field(default_factory=list)
+    catch_var: str = ""       # catch (e) 中的变量名
+    catch_body: List[ASTNode] = field(default_factory=list)
+    finally_body: List[ASTNode] = field(default_factory=list)  # 可选 finally 块
 
 @dataclass
 class ImportStmt(ASTNode):
@@ -951,6 +963,10 @@ class Parser:
         if self.match(TokenType.KEYWORD, 'def'):
             return self.parse_function_def()
 
+        # try-catch 语句
+        if self.match(TokenType.KEYWORD, 'try'):
+            return self.parse_try_stmt()
+
         # Import语句
         if self.match(TokenType.KEYWORD, 'import'):
             return self.parse_import_stmt()
@@ -1017,6 +1033,56 @@ class Parser:
 
         self.expect(TokenType.SYMBOL, ';')
         return decl
+
+    def parse_try_stmt(self) -> 'TryStmt':
+        """解析 try-catch 语句"""
+        start_token = self.expect(TokenType.KEYWORD, 'try')
+        stmt = TryStmt(line=start_token.line, column=start_token.column)
+
+        # try 块
+        self.expect(TokenType.SYMBOL, '{')
+        while not self.match(TokenType.SYMBOL, '}'):
+            s = self.parse_statement()
+            if s:
+                stmt.try_body.append(s)
+        self.expect(TokenType.SYMBOL, '}')
+
+        # 跳过换行
+        while self.match(TokenType.NEWLINE):
+            self.advance()
+
+        # catch 块 (可选)
+        if self.match(TokenType.KEYWORD, 'catch'):
+            self.advance()
+            # catch (e) 或 catch e
+            if self.match(TokenType.SYMBOL, '('):
+                self.advance()
+                stmt.catch_var = self.expect(TokenType.IDENTIFIER).value
+                self.expect(TokenType.SYMBOL, ')')
+            else:
+                stmt.catch_var = self.expect(TokenType.IDENTIFIER).value
+            self.expect(TokenType.SYMBOL, '{')
+            while not self.match(TokenType.SYMBOL, '}'):
+                s = self.parse_statement()
+                if s:
+                    stmt.catch_body.append(s)
+            self.expect(TokenType.SYMBOL, '}')
+
+            # 跳过换行
+            while self.match(TokenType.NEWLINE):
+                self.advance()
+
+        # finally 块 (可选)
+        if self.match(TokenType.KEYWORD, 'finally'):
+            self.advance()
+            self.expect(TokenType.SYMBOL, '{')
+            while not self.match(TokenType.SYMBOL, '}'):
+                s = self.parse_statement()
+                if s:
+                    stmt.finally_body.append(s)
+            self.expect(TokenType.SYMBOL, '}')
+
+        return stmt
 
     def parse_import_stmt(self) -> ImportStmt:
         """解析import语句"""
@@ -1603,7 +1669,7 @@ class Parser:
 
         elif self.match(TokenType.STRING):
             self.advance()
-            return Literal(value=token.value, literal_type='string', line=token.line, column=token.column)
+            return self._parse_string_literal(token)
 
         elif self.match(TokenType.KEYWORD, 'True') or self.match(TokenType.KEYWORD, 'true'):
             self.advance()
@@ -1659,6 +1725,68 @@ class Parser:
             self.error(token, f"表达式不完整,在第{token.line}行第{token.column}列意外换行")
         else:
             self.error(token, f"无法解析表达式,意外的token: {token.value},期望表达式")
+
+    def _parse_string_literal(self, token) -> 'Expression':
+        """解析字符串字面量,支持 ${expr} 插值"""
+        raw = token.value
+        # 检查是否有 ${...} 插值
+        if '${' not in raw:
+            return Literal(value=raw, literal_type='string', line=token.line, column=token.column)
+        
+        import re
+        # 拆分字符串: "hello ${name}!" -> ["hello ", Var(name), "!"]
+        parts = []
+        last_end = 0
+        for m in re.finditer(r'\$\{([^}]+)\}', raw):
+            # 前面的字符串部分
+            if m.start() > last_end:
+                parts.append(('str', raw[last_end:m.start()]))
+            # 插值表达式 (暂时只支持简单变量名)
+            expr_text = m.group(1).strip()
+            parts.append(('expr', expr_text))
+            last_end = m.end()
+        # 尾部字符串
+        if last_end < len(raw):
+            parts.append(('str', raw[last_end:]))
+        
+        if not parts:
+            return Literal(value=raw, literal_type='string', line=token.line, column=token.column)
+        
+        # 构建 BinaryExpr 链: part1 + str(part2) + part3 + ...
+        def make_str(s):
+            return Literal(value=s, literal_type='string', line=token.line, column=token.column)
+        
+        def make_var(name):
+            return Variable(name=name, line=token.line, column=token.column)
+        
+        # 第一个部分
+        if parts[0][0] == 'str':
+            result = make_str(parts[0][1])
+        else:
+            # 插值表达式 -> str(expr)
+            # 生成 str(expr) 调用
+            result = CallExpr(
+                func=Variable(name='str', line=token.line, column=token.column),
+                args=[make_var(parts[0][1])],
+                line=token.line, column=token.column
+            )
+        
+        # 后续部分用 + 拼接
+        for i in range(1, len(parts)):
+            if parts[i][0] == 'str':
+                right = make_str(parts[i][1])
+            else:
+                right = CallExpr(
+                    func=Variable(name='str', line=token.line, column=token.column),
+                    args=[make_var(parts[i][1])],
+                    line=token.line, column=token.column
+                )
+            result = BinaryOp(
+                op='+', left=result, right=right,
+                line=token.line, column=token.column
+            )
+        
+        return result
 
     def parse_call_expr(self, func_name: str) -> CallExpr:
         """解析函数调用"""
@@ -1880,6 +2008,15 @@ class Type:
     def can_assign_from(self, other: 'Type') -> bool:
         """检查是否可以从此类型赋值"""
         return self == other
+
+class AnyType(Type):
+    """任意类型(放宽类型检查)"""
+
+    def __init__(self):
+        super().__init__("Any")
+
+    def can_assign_from(self, other: Type) -> bool:
+        return True
 
 class IntType(Type):
     """整数类型"""
@@ -2694,6 +2831,20 @@ class Interpreter:
             'len': self._builtin_len,
             'keys': self._builtin_keys,
             'values': self._builtin_values,
+            'push': self._builtin_push,
+            'pop': self._builtin_pop,
+            'insert': self._builtin_insert,
+            'remove_at': self._builtin_remove_at,
+            'enumerate': self._builtin_enumerate,
+            'zip': self._builtin_zip,
+            'range': self._builtin_range,
+            'abs': self._builtin_abs,
+            'min': self._builtin_min,
+            'max': self._builtin_max,
+            'sum': self._builtin_sum,
+            'reversed': self._builtin_reversed,
+            'sorted': self._builtin_sorted,
+            'type_of': self._builtin_type_of,
             'range': self._builtin_range,
             'int': self._builtin_int,
             'float': self._builtin_float,
@@ -2796,6 +2947,138 @@ class Interpreter:
             raise TypeError("values() 期望1个Dict参数")
         return ListValue(list(args[0].value.values()), element_type=StringType())
 
+    def _builtin_push(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置push函数:向列表末尾添加元素"""
+        if len(args) < 2 or not isinstance(args[0], ListValue):
+            raise TypeError("push() 期望(列表, 值)")
+        args[0].value.append(args[1])
+        return IntValue(len(args[0].value))
+
+    def _builtin_pop(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置pop函数:移除并返回列表末尾元素"""
+        if len(args) != 1 or not isinstance(args[0], ListValue):
+            raise TypeError("pop() 期望1个List参数")
+        if not args[0].value:
+            raise IndexError("pop() 从空列表弹出")
+        return args[0].value.pop()
+
+    def _builtin_insert(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置insert函数:在指定位置插入元素"""
+        if len(args) != 3 or not isinstance(args[0], ListValue):
+            raise TypeError("insert() 期望(列表, 索引, 值)")
+        idx = args[1].value
+        if idx < 0:
+            idx = len(args[0].value) + idx
+        args[0].value.insert(idx, args[2])
+        return IntValue(len(args[0].value))
+
+    def _builtin_remove_at(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置remove_at函数:移除指定位置的元素"""
+        if len(args) != 2 or not isinstance(args[0], ListValue):
+            raise TypeError("remove_at() 期望(列表, 索引)")
+        idx = args[1].value
+        if idx < 0:
+            idx = len(args[0].value) + idx
+        if 0 <= idx < len(args[0].value):
+            removed = args[0].value.pop(idx)
+            return removed
+        raise IndexError(f"remove_at() 索引 {idx} 越界")
+
+    def _builtin_enumerate(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置enumerate函数:返回[(index, value), ...]"""
+        if len(args) != 1 or not isinstance(args[0], ListValue):
+            raise TypeError("enumerate() 期望1个List参数")
+        pairs = []
+        for i, v in enumerate(args[0].value):
+            pairs.append(ListValue([IntValue(i), v], AnyType()))
+        return ListValue(pairs, AnyType())
+
+    def _builtin_zip(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置zip函数:合并多个列表"""
+        if len(args) < 2:
+            raise TypeError("zip() 期望至少2个List参数")
+        for a in args:
+            if not isinstance(a, ListValue):
+                raise TypeError("zip() 参数必须是List")
+        min_len = min(len(a.value) for a in args)
+        result = []
+        for i in range(min_len):
+            row = [a.value[i] for a in args]
+            result.append(ListValue(row, AnyType()))
+        return ListValue(result, AnyType())
+
+    def _builtin_range(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置range函数:生成整数序列"""
+        if len(args) == 1:
+            start, end, step = 0, args[0].value, 1
+        elif len(args) == 2:
+            start, end, step = args[0].value, args[1].value, 1
+        elif len(args) == 3:
+            start, end, step = args[0].value, args[1].value, args[2].value
+        else:
+            raise TypeError("range() 期望1-3个Int参数")
+        result = [IntValue(i) for i in range(start, end, step)]
+        return ListValue(result, IntType())
+
+    def _builtin_abs(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置abs函数:绝对值"""
+        if len(args) != 1:
+            raise TypeError("abs() 期望1个参数")
+        v = args[0]
+        if isinstance(v, IntValue):
+            return IntValue(abs(v.value))
+        elif isinstance(v, FloatValue):
+            return FloatValue(abs(v.value))
+        raise TypeError(f"abs() 不支持类型 {v.type}")
+
+    def _builtin_min(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置min函数"""
+        if len(args) != 1 or not isinstance(args[0], ListValue):
+            raise TypeError("min() 期望1个List参数")
+        if not args[0].value:
+            raise ValueError("min() 空列表")
+        return min(args[0].value, key=lambda x: x.value)
+
+    def _builtin_max(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置max函数"""
+        if len(args) != 1 or not isinstance(args[0], ListValue):
+            raise TypeError("max() 期望1个List参数")
+        if not args[0].value:
+            raise ValueError("max() 空列表")
+        return max(args[0].value, key=lambda x: x.value)
+
+    def _builtin_sum(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置sum函数"""
+        if len(args) != 1 or not isinstance(args[0], ListValue):
+            raise TypeError("sum() 期望1个List参数")
+        total = 0
+        result_type = IntType()
+        for v in args[0].value:
+            if isinstance(v, FloatValue):
+                result_type = FloatType()
+            total += v.value
+        if result_type == FloatType():
+            return FloatValue(float(total))
+        return IntValue(int(total))
+
+    def _builtin_reversed(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置reversed函数:反转列表"""
+        if len(args) != 1 or not isinstance(args[0], ListValue):
+            raise TypeError("reversed() 期望1个List参数")
+        return ListValue(list(reversed(args[0].value)), args[0].type.element_type)
+
+    def _builtin_sorted(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置sorted函数:排序列表"""
+        if len(args) < 1 or not isinstance(args[0], ListValue):
+            raise TypeError("sorted() 期望1个List参数")
+        return ListValue(sorted(args[0].value, key=lambda x: x.value), args[0].type.element_type)
+
+    def _builtin_type_of(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置type_of函数:返回值的类型名"""
+        if len(args) != 1:
+            raise TypeError("type_of() 期望1个参数")
+        return StringValue(str(args[0].type))
+
     def _builtin_range(self, args: List[RuntimeValue]) -> RuntimeValue:
         """内置range函数"""
         if len(args) == 1:
@@ -2844,8 +3127,33 @@ class Interpreter:
         """内置str函数"""
         if len(args) != 1:
             raise TypeError(f"str() 期望1个参数,得到 {len(args)}个")
+        return StringValue(self._value_to_str(args[0]))
 
-        return StringValue(str(args[0].value))
+    def _value_to_str(self, val: RuntimeValue) -> str:
+        """将 RuntimeValue 转为可读字符串"""
+        if isinstance(val, StringValue):
+            return val.value
+        elif isinstance(val, IntValue):
+            return str(val.value)
+        elif isinstance(val, FloatValue):
+            if val.value == int(val.value):
+                return str(int(val.value)) + ".0"
+            return str(val.value)
+        elif isinstance(val, BoolValue):
+            return "true" if val.value else "false"
+        elif isinstance(val, NoneValue):
+            return "None"
+        elif isinstance(val, ListValue):
+            items = [self._value_to_str(v) for v in val.value]
+            return "[" + ", ".join(items) + "]"
+        elif isinstance(val, DictValue):
+            items = []
+            for k, v in val.value.items():
+                k_str = k if isinstance(k, str) else self._value_to_str(k)
+                items.append(f'"{k_str}": {self._value_to_str(v)}')
+            return "{" + ", ".join(items) + "}"
+        else:
+            return str(val.value)
 
     def _builtin_bool(self, args: List[RuntimeValue]) -> RuntimeValue:
         """内置bool函数"""
@@ -3415,6 +3723,9 @@ class Interpreter:
             func_val = FunctionValue(stmt, self.current_scope)
             self.current_scope.declare(stmt.name, func_val)
             return func_val
+
+        elif isinstance(stmt, TryStmt):
+            return self.execute_try_stmt(stmt)
         else:
             raise RuntimeError(f"未知语句类型: {type(stmt).__name__}")
 
@@ -3730,6 +4041,44 @@ class Interpreter:
                 self.break_flag = False
                 break
 
+        return result
+
+    def execute_try_stmt(self, stmt: 'TryStmt') -> RuntimeValue:
+        """执行 try-catch 语句"""
+        result = IntValue(0)
+        try:
+            # 执行 try 块
+            old_scope = self.current_scope
+            self.current_scope = self.current_scope.enter()
+            for body_stmt in stmt.try_body:
+                result = self.execute_statement(body_stmt)
+                if self.return_flag or self.break_flag or self.continue_flag:
+                    break
+            self.current_scope = old_scope
+        except Exception as e:
+            # 恢复作用域
+            self.current_scope = old_scope
+            # 进入 catch 块
+            self.current_scope = self.current_scope.enter()
+            # 绑定错误变量
+            err_msg = str(e)
+            # 去除错误上下文包装
+            if '\n' in err_msg:
+                err_msg = err_msg.split('\n')[0]
+            self.current_scope.declare(stmt.catch_var, StringValue(err_msg), False)
+            for body_stmt in stmt.catch_body:
+                result = self.execute_statement(body_stmt)
+                if self.return_flag or self.break_flag or self.continue_flag:
+                    break
+            self.current_scope = old_scope
+        finally:
+            # 执行 finally 块（如果有）
+            if stmt.finally_body:
+                old_scope = self.current_scope
+                self.current_scope = self.current_scope.enter()
+                for body_stmt in stmt.finally_body:
+                    self.execute_statement(body_stmt)
+                self.current_scope = old_scope
         return result
 
     def execute_match(self, expr: 'MatchExpr', context: dict = None) -> RuntimeValue:
@@ -4431,11 +4780,12 @@ class Interpreter:
             if not elements:
                 return ListValue([], IntType())
 
-            # 确定元素类型
+            # 确定元素类型（允许混合类型，回退到 Any）
             element_type = elements[0].type
             for elem in elements[1:]:
-                if not element_type.can_assign_from(elem.type):
-                    raise TypeError(f"列表元素类型不一致: {element_type} 和 {elem.type}")
+                if not element_type.can_assign_from(elem.type) and not elem.type.can_assign_from(element_type):
+                    element_type = AnyType()
+                    break
 
             return ListValue(elements, element_type)
 
