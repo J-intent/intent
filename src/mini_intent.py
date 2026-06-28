@@ -199,7 +199,8 @@ class Lexer:
         'None', 'True', 'False', 'true', 'false', 'null',
         'and', 'or', 'not', 'in', 'is',
         'class', 'this', 'mut', 'fn',  # 类系统 + 匿名函数
-        'try', 'catch', 'finally'  # 错误处理
+        'try', 'catch', 'finally',  # 错误处理
+        'assert'  # 断言
     }
 
     # 内置类型名 - 不是关键字,只是预定义的类型标识符
@@ -967,6 +968,18 @@ class Parser:
         if self.match(TokenType.KEYWORD, 'try'):
             return self.parse_try_stmt()
 
+        # assert 语句
+        if self.match(TokenType.KEYWORD, 'assert'):
+            token = self.current_token
+            self.advance()
+            cond = self.parse_expression()
+            msg = None
+            if self.match(TokenType.SYMBOL, ','):
+                self.advance()
+                msg = self.parse_expression()
+            self.expect(TokenType.SYMBOL, ';')
+            return AssertStmt(condition=cond, message=msg, line=token.line, column=token.column)
+
         # Import语句
         if self.match(TokenType.KEYWORD, 'import'):
             return self.parse_import_stmt()
@@ -1491,8 +1504,27 @@ class Parser:
         return expr
 
     def parse_expression(self) -> Expression:
-        """解析表达式 - 管道具有最低优先级"""
-        return self.parse_pipe()
+        """解析表达式 - 三元 > 管道 > 逻辑或 > ..."""
+        return self.parse_ternary()
+
+    def parse_ternary(self) -> Expression:
+        """解析三元表达式 cond ? then : else"""
+        expr = self.parse_pipe()
+        if self.match(TokenType.SYMBOL, '?'):
+            token = self.current_token
+            self.advance()
+            # 区分三元 vs TryExpr: 三元需要 ? 后面有表达式
+            if self.match(TokenType.SYMBOL, ':') or self.match(TokenType.NEWLINE) or self.match(TokenType.SYMBOL, ';'):
+                # TryExpr: result? (后缀)
+                # 回退,让 postfix 处理
+                self.pos -= 1
+                return expr
+            then_expr = self.parse_pipe()
+            self.expect(TokenType.SYMBOL, ':')
+            else_expr = self.parse_ternary()  # 递归支持嵌套三元
+            expr = TernaryExpr(condition=expr, then_expr=then_expr, else_expr=else_expr,
+                              line=token.line, column=token.column)
+        return expr
 
     def parse_pipe(self) -> Expression:
         """解析管道表达式 left |> right
@@ -1626,16 +1658,44 @@ class Parser:
                     expr = MemberAccess(obj=expr, member=member_name,
                                        line=member_token.line, column=member_token.column)
             
-            # 下标访问
+            # 下标访问 / 切片
             elif self.match(TokenType.SYMBOL, '['):
+                start_token = self.current_token
                 self.advance()
-                index_expr = self.parse_expression()
-                self.expect(TokenType.SYMBOL, ']')
-                expr = SubscriptExpr(obj=expr, index=index_expr,
-                                    line=self.current_token.line, column=self.current_token.column)
+                # 检查是否为切片 [start:end] 或 [:end] 或 [start:] 或 [start:end:step]
+                start_expr = None
+                if not self.match(TokenType.SYMBOL, ':') and not self.match(TokenType.SYMBOL, ']'):
+                    start_expr = self.parse_expression()
+                
+                if self.match(TokenType.SYMBOL, ':'):
+                    # 切片
+                    self.advance()  # 跳过 :
+                    end_expr = None
+                    if not self.match(TokenType.SYMBOL, ']') and not self.match(TokenType.SYMBOL, ':'):
+                        end_expr = self.parse_expression()
+                    
+                    step_expr = None
+                    if self.match(TokenType.SYMBOL, ':'):
+                        self.advance()
+                        if not self.match(TokenType.SYMBOL, ']'):
+                            step_expr = self.parse_expression()
+                    
+                    self.expect(TokenType.SYMBOL, ']')
+                    expr = SliceExpr(obj=expr, start=start_expr, end=end_expr, step=step_expr,
+                                    line=start_token.line, column=start_token.column)
+                else:
+                    # 普通下标
+                    self.expect(TokenType.SYMBOL, ']')
+                    expr = SubscriptExpr(obj=expr, index=start_expr,
+                                        line=start_token.line, column=start_token.column)
             
-            # ? 操作符 — Err 提前返回
+            # ? 操作符 — Err 提前返回 (仅当 ? 后面是 : 或行尾时)
             elif self.match(TokenType.SYMBOL, '?'):
+                next_tok = self.peek()
+                # 三元表达式: ? 后面有表达式,不在此处理
+                if next_tok and (next_tok.type not in (TokenType.NEWLINE, TokenType.SYMBOL, TokenType.EOF) or 
+                   (next_tok.type == TokenType.SYMBOL and next_tok.value not in (':', ';', '}', ')', ',', ']', '{'))):
+                    break  # 让 ternary 处理
                 token = self.current_token
                 self.advance()
                 expr = TryExpr(expr=expr, line=token.line, column=token.column)
@@ -1870,6 +1930,33 @@ class SubscriptExpr(Expression):
     """下标访问表达式 obj[index]"""
     obj: Expression = None
     index: Expression = None
+    line: int = 0
+    column: int = 0
+
+@dataclass
+class SliceExpr(Expression):
+    """切片表达式 obj[start:end] 或 obj[start:end:step]"""
+    obj: Expression = None
+    start: Expression = None  # None 表示省略
+    end: Expression = None
+    step: Expression = None
+    line: int = 0
+    column: int = 0
+
+@dataclass
+class TernaryExpr(Expression):
+    """三元表达式 cond ? then : else"""
+    condition: Expression = None
+    then_expr: Expression = None
+    else_expr: Expression = None
+    line: int = 0
+    column: int = 0
+
+@dataclass
+class AssertStmt(ASTNode):
+    """断言语句 assert condition, message"""
+    condition: Expression = None
+    message: Expression = None
     line: int = 0
     column: int = 0
 
@@ -2845,16 +2932,11 @@ class Interpreter:
             'reversed': self._builtin_reversed,
             'sorted': self._builtin_sorted,
             'type_of': self._builtin_type_of,
-            'range': self._builtin_range,
             'int': self._builtin_int,
             'float': self._builtin_float,
             'str': self._builtin_str,
             'bool': self._builtin_bool,
             'type': self._builtin_type,
-            'abs': self._builtin_abs,
-            'max': self._builtin_max,
-            'min': self._builtin_min,
-            'sum': self._builtin_sum,
             'Ok': self._builtin_ok,
             'Err': self._builtin_err,
             'read_file': self._builtin_read_file,
@@ -3718,6 +3800,8 @@ class Interpreter:
             return self.evaluate_expression(stmt)
         elif isinstance(stmt, ClassStmt):
             return self.execute_class_decl(stmt)
+        elif isinstance(stmt, AssertStmt):
+            return self.execute_assert(stmt)
         elif isinstance(stmt, FunctionDef):
             # 嵌套函数定义：注册到当前作用域（闭包捕获）
             func_val = FunctionValue(stmt, self.current_scope)
@@ -4080,6 +4164,17 @@ class Interpreter:
                     self.execute_statement(body_stmt)
                 self.current_scope = old_scope
         return result
+
+    def execute_assert(self, stmt: 'AssertStmt'):
+        """执行断言"""
+        cond = self.evaluate_expression(stmt.condition)
+        if not cond.value:
+            if stmt.message:
+                msg = self.evaluate_expression(stmt.message)
+                raise AssertionError(f"断言失败: {msg.value}")
+            else:
+                raise AssertionError(f"断言失败: {stmt.condition}")
+        return NoneValue()
 
     def execute_match(self, expr: 'MatchExpr', context: dict = None) -> RuntimeValue:
         """执行 match 表达式"""
@@ -4668,6 +4763,33 @@ class Interpreter:
                 return result.ok_value
             # 非 Result 类型 → 透传
             return result
+
+        elif isinstance(expr, SliceExpr):
+            obj = self.evaluate_expression(expr.obj, context)
+            start = None
+            end = None
+            step = None
+            if expr.start:
+                start = self.evaluate_expression(expr.start, context).value
+            if expr.end:
+                end = self.evaluate_expression(expr.end, context).value
+            if expr.step:
+                step = self.evaluate_expression(expr.step, context).value
+            if isinstance(obj, ListValue):
+                sliced = obj.value[start:end:step] if step is not None else obj.value[start:end]
+                return ListValue(sliced, obj.type.element_type)
+            elif isinstance(obj, StringValue):
+                s = obj.value[start:end:step] if step is not None else obj.value[start:end]
+                return StringValue(s)
+            else:
+                raise TypeError(f"不支持对 {obj.get_type()} 类型使用切片")
+
+        elif isinstance(expr, TernaryExpr):
+            cond = self.evaluate_expression(expr.condition, context)
+            if cond.value:
+                return self.evaluate_expression(expr.then_expr, context)
+            else:
+                return self.evaluate_expression(expr.else_expr, context)
 
         elif isinstance(expr, ThisExpr):
             # this 关键字 — 返回当前实例

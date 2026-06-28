@@ -105,7 +105,7 @@ class Resolver:
         from mini_intent import (
             VariableDecl, Assignment, ReturnStmt, PrintStmt,
             IfStmt, WhileStmt, ForStmt, BreakStmt, ContinueStmt,
-            ImportStmt, ExportStmt, Expression, FunctionDef, Program, ClassStmt
+            ImportStmt, ExportStmt, Expression, FunctionDef, SliceExpr, TernaryExpr, Program, ClassStmt, AssertStmt
         )
 
         if isinstance(stmt, Program):
@@ -153,6 +153,10 @@ class Resolver:
 
         elif isinstance(stmt, Expression):
             self._resolve_expr(stmt)
+        elif isinstance(stmt, AssertStmt):
+            self._resolve_expr(stmt.condition)
+            if stmt.message:
+                self._resolve_expr(stmt.message)
 
         else:
             # 未知语句类型,跳过(可能来自模块或其他扩展)
@@ -367,6 +371,15 @@ class Resolver:
 
         elif isinstance(expr, TryExpr):
             self._resolve_expr(expr.expr)
+        elif isinstance(expr, SliceExpr):
+            self._resolve_expr(expr.obj)
+            if expr.start: self._resolve_expr(expr.start)
+            if expr.end: self._resolve_expr(expr.end)
+            if expr.step: self._resolve_expr(expr.step)
+        elif isinstance(expr, TernaryExpr):
+            self._resolve_expr(expr.condition)
+            self._resolve_expr(expr.then_expr)
+            self._resolve_expr(expr.else_expr)
 
     def _resolve_pattern(self, pattern) -> None:
         """解析匹配模式"""
