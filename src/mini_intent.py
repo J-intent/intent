@@ -457,6 +457,14 @@ class Assignment(ASTNode):
     op: str = "="  # =, +=, -=, 等
 
 @dataclass
+class MemberAssignment(ASTNode):
+    """成员赋值: this.x = value 或 obj.field = value"""
+    obj: 'Expression' = None
+    member: str = ""
+    value: 'Expression' = None
+    op: str = "="  # =, +=, -=, 等
+
+@dataclass
 class ReturnStmt(ASTNode):
     """返回语句"""
     value: Optional['Expression'] = None
@@ -801,12 +809,19 @@ class Parser:
         return func
 
     def parse_parameter_list(self) -> List[Tuple[str, str]]:
-        """解析参数列表 - 支持有类型和无类型参数"""
+        """解析参数列表 - 支持有类型和无类型参数,允许 'this' 作为参数名"""
         params = []
+
+        def _read_param_name() -> str:
+            """读取参数名,允许 this 关键字"""
+            if self.match(TokenType.KEYWORD, 'this'):
+                self.advance()
+                return 'this'
+            return self.expect(TokenType.IDENTIFIER).value
 
         if not self.match(TokenType.SYMBOL, ')'):
             # 第一个参数
-            param_name = self.expect(TokenType.IDENTIFIER).value
+            param_name = _read_param_name()
             # 检查是否有类型标注 (param: Type)
             param_type = "Any"  # 默认类型
             if self.match(TokenType.SYMBOL, ':'):
@@ -818,7 +833,7 @@ class Parser:
             while self.match(TokenType.SYMBOL, ','):
                 self.advance()  # 消耗逗号
                 self._skip_newlines()
-                param_name = self.expect(TokenType.IDENTIFIER).value
+                param_name = _read_param_name()
                 # 检查是否有类型标注
                 param_type = "Any"
                 if self.match(TokenType.SYMBOL, ':'):
@@ -988,8 +1003,18 @@ class Parser:
         if self.match(TokenType.KEYWORD, 'export'):
             return self.parse_export_stmt()
 
+        # 成员赋值语句: this.x = ... 或 obj.field = ... 或 this.min.x = ... (链式)
+        if self.match(TokenType.KEYWORD, 'this') and self.peek() and self.peek().type == TokenType.SYMBOL and self.peek().value == '.':
+            # 检查是否是赋值（链式 .x.y.z = ... 或单层 .x = ...）
+            if self._is_member_assignment_chain():
+                return self.parse_member_assignment()
+        if self.match(TokenType.IDENTIFIER) and self.peek() and self.peek().type == TokenType.SYMBOL and self.peek().value == '.' and \
+           self.tokens[self.pos + 2].type == TokenType.IDENTIFIER and \
+           self.pos + 3 < len(self.tokens) and self.tokens[self.pos + 3].value in ('=', '+=', '-=', '*=', '/=', '%=', '**='):
+            return self.parse_member_assignment()
+
         # 赋值语句
-        if self.match(TokenType.IDENTIFIER) and self.peek().value in ('=', '+=', '-=', '*=', '/=', '%=', '**='):
+        if self.match(TokenType.IDENTIFIER) and self.peek().value in ('=', '+=', '-=', '*=', '/=', '%=', '**=', '//='):
             return self.parse_assignment()
 
         # 函数调用
@@ -1007,6 +1032,73 @@ class Parser:
             return expr
 
         return None
+
+    def _is_member_assignment_chain(self) -> bool:
+        """检查从当前位置开始是否是链式成员赋值 (this.x.y = ... 或 this.x = ...)"""
+        # 保存当前位置和token
+        saved_pos = self.pos
+        saved_token = self.current_token
+        self.advance()  # 跳过 this
+        if not self.match(TokenType.SYMBOL, '.'):
+            self.pos = saved_pos
+            self.current_token = saved_token
+            return False
+        self.advance()  # 跳过 .
+        # 沿着 .ident 链前进
+        while self.match(TokenType.IDENTIFIER):
+            self.advance()
+            if self.match(TokenType.SYMBOL, '.'):
+                self.advance()  # 继续链
+                continue
+            else:
+                # 链结束，检查是否是赋值操作符
+                if self.current_token and self.current_token.value in ('=', '+=', '-=', '*=', '/=', '%=', '**='):
+                    self.pos = saved_pos
+                    self.current_token = saved_token
+                    return True
+                break
+        self.pos = saved_pos
+        self.current_token = saved_token
+        return False
+
+    def parse_member_assignment(self) -> 'MemberAssignment':
+        """解析成员赋值: this.x = value 或 obj.field = value 或 this.min.x = value (链式)"""
+        start_token = self.current_token
+        
+        # 解析对象部分 (this 或 identifier)
+        if self.match(TokenType.KEYWORD, 'this'):
+            obj = Variable(name='this', line=start_token.line, column=start_token.column)
+            self.advance()
+        else:
+            obj = Variable(name=self.expect(TokenType.IDENTIFIER).value, line=start_token.line, column=start_token.column)
+        
+        self.expect(TokenType.SYMBOL, '.')
+        member = self.expect(TokenType.IDENTIFIER).value
+        
+        # 检查是否是链式: this.min.x = ... → MemberAccess(this, min) 作为 obj, x 作为 member
+        while self.match(TokenType.SYMBOL, '.'):
+            # 当前 obj.member 变成新的 obj
+            obj = MemberAccess(
+                obj=obj,
+                member=member,
+                line=start_token.line,
+                column=start_token.column
+            )
+            self.advance()  # 跳过 .
+            member = self.expect(TokenType.IDENTIFIER).value
+        
+        op_token = self.expect(TokenType.OPERATOR)
+        value = self.parse_expression()
+        self.expect(TokenType.SYMBOL, ';')
+        
+        return MemberAssignment(
+            obj=obj,
+            member=member,
+            op=op_token.value,
+            value=value,
+            line=start_token.line,
+            column=start_token.column
+        )
 
     def parse_variable_decl(self) -> VariableDecl:
         """解析变量声明"""
@@ -2480,9 +2572,9 @@ class ClassValue(RuntimeValue):
     def call(self, interpreter, args: List[RuntimeValue]) -> RuntimeValue:
         """实例化类:创建 InstanceValue,调用 init"""
         instance = InstanceValue(self)
-        init_method = self.find_method('init')
+        init_method = self.find_method('__init__') or self.find_method('init')
         if init_method:
-            # 用 interpreter 执行 init 方法
+            # 用 interpreter 执行构造方法
             interpreter._execute_method(init_method, instance, args)
         return instance
 
@@ -3786,6 +3878,8 @@ class Interpreter:
             return self.execute_variable_decl(stmt)
         elif isinstance(stmt, Assignment):
             return self.execute_assignment(stmt)
+        elif isinstance(stmt, MemberAssignment):
+            return self.execute_member_assignment(stmt)
         elif isinstance(stmt, ReturnStmt):
             return self.execute_return(stmt)
         elif isinstance(stmt, PrintStmt):
@@ -3958,6 +4052,37 @@ class Interpreter:
         elif type_name and type_name.startswith("List"):
             return ListValue([], IntType())
         return IntValue(0)
+
+    def execute_member_assignment(self, stmt: MemberAssignment) -> RuntimeValue:
+        """执行成员赋值: this.x = value 或 obj.field = value"""
+        value = self.evaluate_expression(stmt.value)
+        
+        # 求值对象
+        obj_val = self.evaluate_expression(stmt.obj)
+        
+        if not isinstance(obj_val, InstanceValue):
+            raise TypeError(f"无法对非实例类型 {obj_val.get_type()} 进行成员赋值")
+        
+        if stmt.op == "=":
+            obj_val.fields[stmt.member] = value
+        else:
+            # 复合赋值
+            old_val = obj_val.fields.get(stmt.member)
+            if old_val is None:
+                raise NameError(f"实例没有属性 '{stmt.member}'")
+            if stmt.op == "+=":
+                new_val = self._binary_op(old_val, "+", value)
+            elif stmt.op == "-=":
+                new_val = self._binary_op(old_val, "-", value)
+            elif stmt.op == "*=":
+                new_val = self._binary_op(old_val, "*", value)
+            elif stmt.op == "/=":
+                new_val = self._binary_op(old_val, "/", value)
+            else:
+                raise RuntimeError(f"不支持的成员赋值操作符: {stmt.op}")
+            obj_val.fields[stmt.member] = new_val
+        
+        return value
 
     def execute_assignment(self, stmt: Assignment) -> RuntimeValue:
         """执行赋值语句"""
@@ -4582,13 +4707,14 @@ class Interpreter:
         # 创建方法作用域
         method_scope = Scope(parent=closure)
         
-        # 绑定参数
-        for i, param in enumerate(func_def.params):
+        # 绑定参数 (跳过 this 参数, 它由执行器注入)
+        param_names = [p[0] if isinstance(p, tuple) else p for p in func_def.params]
+        non_this_params = [(i, p) for i, p in enumerate(func_def.params) if (p[0] if isinstance(p, tuple) else p) != 'this']
+        for arg_idx, (param_i, param) in enumerate(non_this_params):
             param_name = param[0] if isinstance(param, tuple) else param
-            if i < len(args):
-                method_scope.declare(param_name, args[i], False)
+            if arg_idx < len(args):
+                method_scope.declare(param_name, args[arg_idx], False)
             else:
-                # 默认值
                 method_scope.declare(param_name, self.get_default_value(None), False)
         
         # 注入 this
@@ -4746,9 +4872,16 @@ class Interpreter:
             # 管道: left |> right → right(left)
             left_val = self.evaluate_expression(expr.left, context)
 
-            # 右侧如果是函数名,直接查找函数(不经过变量求值)
+            # 右侧如果是函数名,先查作用域变量(lambda),再查 builtins 和全局函数
             if isinstance(expr.right, Variable):
                 fname = expr.right.name
+                # 先查作用域: 可能是变量绑定的 lambda
+                try:
+                    scope_val = self.current_scope.get(fname)
+                    if isinstance(scope_val, FunctionValue):
+                        return self.execute_function(scope_val, [left_val])
+                except (NameError, KeyError):
+                    pass
                 if fname in self.builtins:
                     return self.builtins[fname]([left_val])
                 if fname in self.functions:
