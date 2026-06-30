@@ -1,0 +1,59 @@
+// 枚举完整测试
+enum Direction {
+    North,
+    East,
+    South,
+    West
+}
+
+enum Priority {
+    Low,
+    Medium,
+    High,
+    Critical
+}
+
+// match 枚举
+def dir_to_string(d) {
+    match d {
+        Direction::North => "北",
+        Direction::East => "东",
+        Direction::South => "南",
+        Direction::West => "西",
+    }
+}
+
+// 优先级数值
+def pri_weight(p) {
+    match p {
+        Priority::Low => 1,
+        Priority::Medium => 2,
+        Priority::High => 3,
+        Priority::Critical => 4,
+    }
+}
+
+print(dir_to_string(Direction::North));
+print(dir_to_string(Direction::East));
+print(dir_to_string(Direction::South));
+print(dir_to_string(Direction::West));
+
+print(str(pri_weight(Priority::Low)));
+print(str(pri_weight(Priority::Critical)));
+
+// 比较
+let d = Direction::East;
+if d == Direction::East {
+    print("是东");
+} else {
+    print("不是东");
+};
+
+if d != Direction::North {
+    print("不是北");
+};
+
+let p = Priority::High;
+print(str(pri_weight(p)));
+
+print("ALL OK");

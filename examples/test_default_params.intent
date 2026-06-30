@@ -1,0 +1,32 @@
+// 默认参数测试
+def greet(name: String, greeting: String = "Hello") -> String {
+    return greeting + ", " + name + "!";
+}
+
+print(greet("World"));
+print(greet("Alice", "Hi"));
+print(greet("Bob", "Hey"));
+
+// 数字默认值
+def power(base: Float, exp: Float = 2.0) -> Float {
+    let mut result = base;
+    let mut i = 1.0;
+    while i < exp {
+        result = result * base;
+        i = i + 1.0;
+    };
+    return result;
+}
+
+print(str(power(3.0)));
+print(str(power(3.0, 4.0)));
+
+// 无类型注解默认值
+def add(a, b = 10) {
+    return a + b;
+}
+
+print(str(add(5)));
+print(str(add(5, 20)));
+
+print("ALL OK");

@@ -200,7 +200,8 @@ class Lexer:
         'and', 'or', 'not', 'in', 'is',
         'class', 'this', 'mut', 'fn',  # 类系统 + 匿名函数
         'try', 'catch', 'finally',  # 错误处理
-        'assert'  # 断言
+        'assert',  # 断言
+        'enum'  # 枚举
     }
 
     # 内置类型名 - 不是关键字,只是预定义的类型标识符
@@ -430,7 +431,7 @@ class FunctionDef(ASTNode):
     """函数定义节点"""
     name: str = ""
     type_params: List[str] = field(default_factory=list)  # 泛型参数如 ['T', 'U']
-    params: List[Tuple[str, str]] = field(default_factory=list)  # (参数名, 类型)
+    params: List[Tuple[str, str, Any]] = field(default_factory=list)  # (参数名, 类型, 默认值表达式或None)
     return_type: Optional[str] = None
     requires: List['Expression'] = field(default_factory=list)  # 前置条件
     ensures: List['Expression'] = field(default_factory=list)   # 后置条件
@@ -439,7 +440,7 @@ class FunctionDef(ASTNode):
     effects: List[str] = field(default_factory=list)
 
     def get_param_names(self) -> List[str]:
-        return [name for name, _ in self.params]
+        return [name for name, _, _ in self.params]
 
 @dataclass
 class VariableDecl(ASTNode):
@@ -697,6 +698,16 @@ class Parser:
             return False
         return True
 
+    def match_double_colon(self) -> bool:
+        """检查是否是 :: (两个连续的 : SYMBOL)"""
+        return (self.current_token.type == TokenType.SYMBOL and self.current_token.value == ':' and
+                self.peek() is not None and self.peek().type == TokenType.SYMBOL and self.peek().value == ':')
+
+    def consume_double_colon(self):
+        """消费 :: (两个连续的 : SYMBOL)"""
+        self.advance()  # 第一个 :
+        self.advance()  # 第二个 :
+
     def parse(self) -> Program:
         """解析整个程序 - 带 panic mode 错误恢复。始终返回 Program,调用者检查 self.errors"""
         program = Program()
@@ -733,6 +744,27 @@ class Parser:
                 self.synchronize()
 
         return program
+
+    def parse_enum_def(self) -> 'EnumDef':
+        """解析枚举定义: enum Direction { North, East, South, West }"""
+        token = self.expect(TokenType.KEYWORD, 'enum')
+        name = self.expect(TokenType.IDENTIFIER).value
+        self.expect(TokenType.SYMBOL, '{')
+        self._skip_newlines()
+
+        variants = []
+        if not self.match(TokenType.SYMBOL, '}'):
+            first = self.expect(TokenType.IDENTIFIER).value
+            variants.append(first)
+            while self.match(TokenType.SYMBOL, ','):
+                self.advance()
+                self._skip_newlines()
+                if not self.match(TokenType.SYMBOL, '}'):
+                    variants.append(self.expect(TokenType.IDENTIFIER).value)
+            self._skip_newlines()
+
+        self.expect(TokenType.SYMBOL, '}')
+        return EnumDef(name=name, variants=variants)
 
     def parse_function_def(self) -> FunctionDef:
         """解析函数定义"""
@@ -808,8 +840,10 @@ class Parser:
 
         return func
 
-    def parse_parameter_list(self) -> List[Tuple[str, str]]:
-        """解析参数列表 - 支持有类型和无类型参数,允许 'this' 作为参数名"""
+    def parse_parameter_list(self) -> List[Tuple[str, str, Any]]:
+        """解析参数列表 - 支持有类型/无类型参数、默认值、this作为参数名
+        返回: [(name, type, default_expr_or_None), ...]
+        """
         params = []
 
         def _read_param_name() -> str:
@@ -822,24 +856,31 @@ class Parser:
         if not self.match(TokenType.SYMBOL, ')'):
             # 第一个参数
             param_name = _read_param_name()
-            # 检查是否有类型标注 (param: Type)
-            param_type = "Any"  # 默认类型
+            param_type = "Any"
             if self.match(TokenType.SYMBOL, ':'):
-                self.advance()  # 消耗冒号
+                self.advance()
                 param_type = self._parse_type_annotation()
-            params.append((param_name, param_type))
+            # 检查默认值 (param: Type = expr)
+            default_expr = None
+            if self.match(TokenType.OPERATOR, '='):
+                self.advance()
+                default_expr = self.parse_expression()
+            params.append((param_name, param_type, default_expr))
 
             # 更多参数
             while self.match(TokenType.SYMBOL, ','):
-                self.advance()  # 消耗逗号
+                self.advance()
                 self._skip_newlines()
                 param_name = _read_param_name()
-                # 检查是否有类型标注
                 param_type = "Any"
                 if self.match(TokenType.SYMBOL, ':'):
-                    self.advance()  # 消耗冒号
+                    self.advance()
                     param_type = self._parse_type_annotation()
-                params.append((param_name, param_type))
+                default_expr = None
+                if self.match(TokenType.OPERATOR, '='):
+                    self.advance()
+                    default_expr = self.parse_expression()
+                params.append((param_name, param_type, default_expr))
 
         return params
 
@@ -978,6 +1019,10 @@ class Parser:
         # 嵌套函数定义（闭包）
         if self.match(TokenType.KEYWORD, 'def'):
             return self.parse_function_def()
+
+        # 枚举定义
+        if self.match(TokenType.KEYWORD, 'enum'):
+            return self.parse_enum_def()
 
         # try-catch 语句
         if self.match(TokenType.KEYWORD, 'try'):
@@ -1473,7 +1518,7 @@ class Parser:
             self.advance()
             return LiteralPattern(value=token.value)
 
-        # 标识符 → 变量模式 或 构造器模式 (Ok(v)/Err(e))
+        # 标识符 → 变量模式 或 构造器模式 (Ok(v)/Err(e)) 或枚举路径
         if self.match(TokenType.IDENTIFIER):
             token = self.current_token
             name = token.value
@@ -1486,8 +1531,15 @@ class Parser:
                 self.expect(TokenType.SYMBOL, ')')
                 return ConstructorPattern(constructor=name, inner=inner)
 
-            self.advance()
-            return VariablePattern(name=token.value)
+            # 枚举路径模式: Direction::North
+            # 先消费 IDENTIFIER，然后检测 ::
+            self.advance()  # 消费 Direction
+            if self.match_double_colon():
+                self.consume_double_colon()
+                variant = self.expect(TokenType.IDENTIFIER).value
+                return EnumPattern(enum_name=name, variant=variant)
+            # 不是 ::，回退到变量模式
+            return VariablePattern(name=name)
 
         self.error(self.current_token, f"不支持的匹配模式")
         return WildcardPattern()
@@ -1754,13 +1806,22 @@ class Parser:
             elif self.match(TokenType.SYMBOL, '['):
                 start_token = self.current_token
                 self.advance()
-                # 检查是否为切片 [start:end] 或 [:end] 或 [start:] 或 [start:end:step]
+                # 检查是否为切片 [start:end] 或 [:end] 或 [start:] 或 [start::step] 或 [::step]
                 start_expr = None
                 if not self.match(TokenType.SYMBOL, ':') and not self.match(TokenType.SYMBOL, ']'):
                     start_expr = self.parse_expression()
                 
-                if self.match(TokenType.SYMBOL, ':'):
-                    # 切片
+                if self.match_double_colon():
+                    # 步长切片 [start::step] 或 [::step]
+                    self.consume_double_colon()
+                    step_expr = None
+                    if not self.match(TokenType.SYMBOL, ']'):
+                        step_expr = self.parse_expression()
+                    self.expect(TokenType.SYMBOL, ']')
+                    expr = SliceExpr(obj=expr, start=start_expr, end=None, step=step_expr,
+                                    line=start_token.line, column=start_token.column)
+                elif self.match(TokenType.SYMBOL, ':'):
+                    # 切片 [start:end] 或 [start:end:step]
                     self.advance()  # 跳过 :
                     end_expr = None
                     if not self.match(TokenType.SYMBOL, ']') and not self.match(TokenType.SYMBOL, ':'):
@@ -1855,6 +1916,11 @@ class Parser:
         # 变量
         elif self.match(TokenType.IDENTIFIER):
             self.advance()
+            # 检查是否是枚举路径 Direction::North
+            if self.match_double_colon():
+                self.consume_double_colon()
+                variant_name = self.expect(TokenType.IDENTIFIER).value
+                return Variable(name=variant_name, line=token.line, column=token.column)
             return Variable(name=token.value, line=token.line, column=token.column)
 
         # 列表
@@ -2092,6 +2158,12 @@ class ConstructorPattern(MatchPattern):
     inner: Optional[MatchPattern] = None  # 内部模式 (v, e)
 
 @dataclass
+class EnumPattern(MatchPattern):
+    """枚举路径模式: Direction::North"""
+    enum_name: str = ""
+    variant: str = ""
+
+@dataclass
 class MatchCase(ASTNode):
     """match 分支: pattern [if guard] => body"""
     pattern: MatchPattern = None
@@ -2147,6 +2219,12 @@ class TryExpr(Expression):
 
 
 # ── 面向对象:类系统 ──────────────────────────────
+
+@dataclass
+class EnumDef(ASTNode):
+    """枚举声明 enum Direction { North, East, South, West }"""
+    name: str = ""
+    variants: List[str] = field(default_factory=list)  # ["North", "East", ...]
 
 @dataclass
 class ClassStmt(ASTNode):
@@ -2281,6 +2359,16 @@ class ResultType(Type):
             return (self.ok_type.can_assign_from(other.ok_type) and
                     self.err_type.can_assign_from(other.err_type))
         return False
+
+class EnumType(Type):
+    """枚举类型"""
+
+    def __init__(self, name: str, variants: List[str]):
+        super().__init__(name)
+        self.variants = variants
+
+    def can_assign_from(self, other: Type) -> bool:
+        return isinstance(other, EnumType) and other.name == self.name
 
 # ==================== 运行时值 ====================
 class RuntimeValue:
@@ -2546,6 +2634,33 @@ class FunctionValue(RuntimeValue):
 
     def copy(self):
         return FunctionValue(self.func_def, self.closure)
+
+
+@dataclass
+class EnumValue(RuntimeValue):
+    """枚举值"""
+
+    def __init__(self, enum_name: str, variant: str):
+        super().__init__(EnumType(enum_name, [variant]), variant)
+        self.enum_name = enum_name
+        self.variant = variant
+
+    def copy(self):
+        return EnumValue(self.enum_name, self.variant)
+
+    def __str__(self):
+        return f"{self.enum_name}::{self.variant}"
+
+    def __repr__(self):
+        return str(self)
+
+    def __eq__(self, other):
+        if isinstance(other, EnumValue):
+            return self.enum_name == other.enum_name and self.variant == other.variant
+        return False
+
+    def __hash__(self):
+        return hash((self.enum_name, self.variant))
 
 
 @dataclass
@@ -3900,6 +4015,8 @@ class Interpreter:
             return self.evaluate_expression(stmt)
         elif isinstance(stmt, ClassStmt):
             return self.execute_class_decl(stmt)
+        elif isinstance(stmt, EnumDef):
+            return self.execute_enum_def(stmt)
         elif isinstance(stmt, AssertStmt):
             return self.execute_assert(stmt)
         elif isinstance(stmt, FunctionDef):
@@ -4423,6 +4540,11 @@ class Interpreter:
                 return True
             return False
 
+        if isinstance(pattern, EnumPattern):
+            if not isinstance(value, EnumValue):
+                return False
+            return value.enum_name == pattern.enum_name and value.variant == pattern.variant
+
         raise MatchError(f"不支持的匹配模式: {type(pattern).__name__}")
 
     def execute_break(self) -> RuntimeValue:
@@ -4604,7 +4726,8 @@ class Interpreter:
         type_params = getattr(func_def, 'type_params', [])
         if type_params:
             # 对每个参数：统一声明的类型标注与实际类型，解出类型参数的绑定
-            for (param_name, decl_type), arg_value in zip(func_def.params, args):
+            for param_tuple, arg_value in zip(func_def.params, args):
+                param_name, decl_type = param_tuple[0], param_tuple[1]
                 if decl_type:
                     self._unify_types(decl_type, arg_value.get_type(), type_bindings)
             # 未绑定类型参数的 fallback
@@ -4612,8 +4735,8 @@ class Interpreter:
                 if tp not in type_bindings:
                     type_bindings[tp] = "Any"
             # 代入形参标注和返回类型
-            subst_params = [(name, self._subst_type(pt, type_bindings))
-                            for name, pt in func_def.params]
+            subst_params = [(name, self._subst_type(pt, type_bindings), default)
+                            for name, pt, default in func_def.params]
             subst_return = self._subst_type(func_def.return_type, type_bindings)
         else:
             subst_params = func_def.params
@@ -4626,16 +4749,29 @@ class Interpreter:
 
         # 设置参数(在验证契约之前,使参数名可用于 requires/ensures)
         # 同时进行运行时类型校验(使用泛型代入后的类型)
-        for (param_name, param_type), arg_value in zip(subst_params, args):
-            if param_type and param_type != "Any":
-                self._check_type(arg_value, param_type, f"@ 参数 '{param_name}' (函数 {func_name})")
-            self.current_scope.declare(param_name, arg_value.copy(), False)
+        num_params = len(subst_params)
+        num_args = len(args)
+        for i, (param_name, param_type, *rest) in enumerate(subst_params):
+            default_expr = rest[0] if rest else None
+            if i < num_args:
+                # 有实参：类型校验后声明
+                arg_value = args[i]
+                if param_type and param_type != "Any":
+                    self._check_type(arg_value, param_type, f"@ 参数 '{param_name}' (函数 {func_name})")
+                self.current_scope.declare(param_name, arg_value.copy(), False)
+            elif default_expr is not None:
+                # 无实参但有默认值：求值默认值表达式
+                default_val = self.evaluate_expression(default_expr)
+                self.current_scope.declare(param_name, default_val.copy(), False)
+            else:
+                # 既无实参也无默认值：报错
+                raise TypeError(f"@ 参数 '{param_name}' 缺少实参(函数 {func_name})")
 
         # 准备验证上下文(包含参数绑定)
         context = {
             'args': args,
             'variables': {name: val for name, val in self.current_scope.symbols.items()},
-            'params': {p[0]: v.copy() for p, v in zip(func_def.params, args)}
+            'params': {p[0]: v.copy() for p, v in zip(func_def.params, args) if isinstance(p, tuple)}
         }
 
         # 验证前置条件
@@ -4674,6 +4810,15 @@ class Interpreter:
 
         return result
 
+    def execute_enum_def(self, stmt: 'EnumDef') -> RuntimeValue:
+        """执行枚举定义 — 将每个变体注册为全局常量"""
+        enum_type = EnumType(stmt.name, stmt.variants)
+        for variant in stmt.variants:
+            enum_value = EnumValue(stmt.name, variant)
+            self.current_scope.declare(variant, enum_value, True)  # 常量，不可修改
+        # 返回类型对象本身（可选，可忽略）
+        return EnumValue(stmt.name, "__type__")
+
     def execute_class_decl(self, stmt: 'ClassStmt') -> RuntimeValue:
         """执行类声明 — 创建 ClassValue 并注册到作用域"""
         # 解析父类
@@ -4708,12 +4853,15 @@ class Interpreter:
         method_scope = Scope(parent=closure)
         
         # 绑定参数 (跳过 this 参数, 它由执行器注入)
-        param_names = [p[0] if isinstance(p, tuple) else p for p in func_def.params]
         non_this_params = [(i, p) for i, p in enumerate(func_def.params) if (p[0] if isinstance(p, tuple) else p) != 'this']
         for arg_idx, (param_i, param) in enumerate(non_this_params):
             param_name = param[0] if isinstance(param, tuple) else param
+            default_expr = param[2] if (isinstance(param, tuple) and len(param) > 2) else None
             if arg_idx < len(args):
                 method_scope.declare(param_name, args[arg_idx], False)
+            elif default_expr is not None:
+                default_val = self.evaluate_expression(default_expr)
+                method_scope.declare(param_name, default_val, False)
             else:
                 method_scope.declare(param_name, self.get_default_value(None), False)
         
@@ -4946,7 +5094,17 @@ class Interpreter:
             if expr.step:
                 step = self.evaluate_expression(expr.step, context).value
             if isinstance(obj, ListValue):
-                sliced = obj.value[start:end:step] if step is not None else obj.value[start:end]
+                lst = obj.value
+                # 处理步长切片
+                step_val = step if step is not None else 1
+                if step_val != 1:
+                    # 自己实现步长切片
+                    start_val = start if start is not None else (0 if step_val > 0 else len(lst)-1)
+                    end_val = end if end is not None else (len(lst) if step_val > 0 else -1)
+                    indices = range(start_val, end_val, step_val)
+                    sliced = [lst[i] for i in indices if 0 <= i < len(lst)]
+                else:
+                    sliced = lst[slice(start, end)]
                 return ListValue(sliced, obj.type.element_type)
             elif isinstance(obj, StringValue):
                 s = obj.value[start:end:step] if step is not None else obj.value[start:end]
@@ -5211,6 +5369,13 @@ class Interpreter:
                     return BoolValue(left.value == right.value)
                 elif op == '!=':
                     return BoolValue(left.value != right.value)
+
+            # Enum 比较
+            if isinstance(left, EnumValue) and isinstance(right, EnumValue):
+                if op == '==':
+                    return BoolValue(left == right)
+                elif op == '!=':
+                    return BoolValue(left != right)
 
             # None 比较
             if isinstance(left, NoneValue) and isinstance(right, NoneValue):
