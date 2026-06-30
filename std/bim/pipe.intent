@@ -44,10 +44,10 @@ class PipeSegment {
     // 轴对齐包围盒
     def bbox() -> BBox3D {
         let b = BBox3D();
-        b.create_empty();
+        b.set_empty();
         let padding = this.diameter * mm_to_m(0.5);
-        b.expand_by_point_padded(this.start, padding);
-        b.expand_by_point_padded(this.end, padding);
+        b.expand_padded(this.start, padding);
+        b.expand_padded(this.end, padding);
         return b;
     }
 

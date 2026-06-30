@@ -1,0 +1,72 @@
+// test_fittings.intent — 管件模块完整测试
+import std.bim.geometry;
+import std.bim.pipe;
+import std.bim.pipe_fittings;
+
+// ═══════════════════════════════════════════
+// 测试 1: 异径三通
+// ═══════════════════════════════════════════
+
+let center = Point3D();
+center.create(5.0, 0.0, 3.0);
+let run_dir = Vector3D();
+run_dir.create(1.0, 0.0, 0.0);
+let branch_dir = Vector3D();
+branch_dir.create(0.0, 1.0, 0.0);
+
+let tee = PipeTee();
+tee.create(center, run_dir, branch_dir, 200.0, 150.0, 10.0);
+print("Tee created: equal=" + str(tee.is_equal_tee()) + " segs=" + str(len(tee.get_segments())));
+
+// ═══════════════════════════════════════════
+// 测试 2: 同心变径
+// ═══════════════════════════════════════════
+
+let p1 = Point3D();
+p1.create(0.0, 0.0, 3.0);
+let p2 = Point3D();
+p2.create(3.0, 0.0, 3.0);
+
+let reducer = PipeReducer();
+reducer.create_concentric(p1, p2, 300.0, 200.0, 12.0);
+let r_segs = reducer.get_segments();
+print("Reducer: taper=" + str(reducer.taper_length * 1000.0) + "mm big_d=" + str(r_segs[0].diameter) + " small_d=" + str(r_segs[1].diameter));
+
+// ═══════════════════════════════════════════
+// 测试 3: 阀门
+// ═══════════════════════════════════════════
+
+let v1 = Point3D();
+v1.create(0.0, 0.0, 3.0);
+let v2 = Point3D();
+v2.create(0.3, 0.0, 3.0);
+
+let gate_valve = PipeValve();
+gate_valve.create(v1, v2, 150.0, "gate");
+print("Gate valve: len=" + str(gate_valve.length * 1000.0) + "mm");
+
+let butterfly_valve = PipeValve();
+butterfly_valve.create(v1, v2, 200.0, "butterfly");
+print("Butterfly valve: len=" + str(butterfly_valve.length * 1000.0) + "mm");
+
+// ═══════════════════════════════════════════
+// 测试 4: 管网碰撞检测
+// ═══════════════════════════════════════════
+
+let s1 = create_pipe(p1, p2, 200.0, 10.0);
+let p3 = Point3D();
+p3.create(1.0, 0.0, 3.0);
+let p4 = Point3D();
+p4.create(1.0, 2.0, 3.0);
+
+let s2 = create_pipe(p3, p4, 150.0, 8.0);
+let s3 = create_pipe(p3, p2, 100.0, 6.0);
+
+let network = [s1, s2, s3];
+check_pipe_network(network);
+
+let bb = pipe_network_bbox(network);
+let sz = bb.size();
+print("Network bbox: " + str(sz.x) + " x " + str(sz.y) + " x " + str(sz.z));
+
+print("ALL FITTINGS TEST OK");

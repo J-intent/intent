@@ -280,4 +280,26 @@ class BBox3D {
         if p.y > this.max.y { this.max.y = p.y; };
         if p.z > this.max.z { this.max.z = p.z; };
     }
+
+    // 扩展包围盒包含带padding的点
+    def expand_padded(p: Point3D, pad: Float) {
+        if p.x - pad < this.min.x { this.min.x = p.x - pad; };
+        if p.y - pad < this.min.y { this.min.y = p.y - pad; };
+        if p.z - pad < this.min.z { this.min.z = p.z - pad; };
+        if p.x + pad > this.max.x { this.max.x = p.x + pad; };
+        if p.y + pad > this.max.y { this.max.y = p.y + pad; };
+        if p.z + pad > this.max.z { this.max.z = p.z + pad; };
+    }
+
+    // 扩展包围盒合并另一个包围盒
+    def merge(other: BBox3D) {
+        this.expand(other.min);
+        this.expand(other.max);
+    }
+
+    // 空包围盒初始化（后面用expand填）
+    def set_empty() {
+        this.min.create(999999.0, 999999.0, 999999.0);
+        this.max.create(-999999.0, -999999.0, -999999.0);
+    }
 }

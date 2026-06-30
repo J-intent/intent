@@ -1,0 +1,215 @@
+// std/bim/pipe_fittings.intent — MEP 管件模块
+// 心学为体：管件 = 连接的具象化
+// 禅道为翼：每个管件纯函数变换，输入管道→输出分支
+// 马哲为用：三通/变径/阀门 = 实际施工的每一道工序
+
+import std.bim.geometry;
+import std.bim.pipe;
+import std.bim.unit;
+import std.math;
+
+// ═══════════════════════════════════════════
+// PipeTee — 三通（等径/异径）
+//
+//         主干方向 →
+//          │
+//    分支  │  (branch_dir)
+//          │
+//    ──────┼──────  主干 (main_dir)
+//          │
+//
+// center: 三通中心点
+// run_1 → run_2: 主干方向
+// branch: 分支方向
+// ═══════════════════════════════════════════
+
+class PipeTee {
+    def init() {
+        this.center = Point3D();       // 三通中心
+        this.run_dir = Vector3D();     // 主干方向
+        this.branch_dir = Vector3D();  // 分支方向
+        this.main_diameter = 0.0;      // 主管管径 (mm)
+        this.branch_diameter = 0.0;    // 支管管径 (mm) — 异径时不同
+        this.thickness = 0.0;          // 壁厚 (mm)
+        this.run_1 = PipeSegment();    // 主干段1 (中心→run_dir方向)
+        this.run_2 = PipeSegment();    // 主干段2 (中心→-run_dir方向)
+        this.branch = PipeSegment();   // 分支段
+        this.length_factor = 1.5;      // 每段长度 = 管径 × factor
+    }
+
+    def create(center: Point3D, run_dir: Vector3D, branch_dir: Vector3D,
+               main_diameter: Float, branch_diameter: Float, thickness: Float) {
+        this.center = center;
+        this.run_dir = run_dir.normalize();
+        this.branch_dir = branch_dir.normalize();
+        this.main_diameter = main_diameter;
+        this.branch_diameter = branch_diameter;
+        this.thickness = thickness;
+
+        // 主干两个方向各延申一段
+        let main_len = main_diameter * mm_to_m(this.length_factor);
+        let run_vec = this.run_dir.scale(main_len);
+        let run_neg = this.run_dir.scale(0.0 - main_len);
+
+        let p_run_1 = center.add_vector(run_vec);
+        let p_run_2 = center.add_vector(run_neg);
+        this.run_1.create(center, p_run_1, main_diameter, thickness);
+        this.run_2.create(p_run_2, center, main_diameter, thickness);
+
+        // 分支方向延申
+        let branch_len = branch_diameter * mm_to_m(this.length_factor);
+        let branch_vec = this.branch_dir.scale(branch_len);
+        let p_branch = center.add_vector(branch_vec);
+        this.branch.create(center, p_branch, branch_diameter, thickness);
+    }
+
+    def get_segments() {
+        return [this.run_1, this.run_2, this.branch];
+    }
+
+    def is_equal_tee() -> Int {
+        if abs(this.main_diameter - this.branch_diameter) < 0.01 {
+            return 1;
+        };
+        return 0;
+    }
+}
+
+// ═══════════════════════════════════════════
+// PipeReducer — 变径（同心/偏心）
+//
+//  大径 ──▷── 小径
+//  big_dia     small_dia
+//
+// start: 大径端起点
+// end: 小径端终点
+// ═══════════════════════════════════════════
+
+class PipeReducer {
+    def init() {
+        this.big_seg = PipeSegment();      // 大径段
+        this.small_seg = PipeSegment();    // 小径段
+        this.taper_length = 0.0;           // 变径过渡段长度
+        this.offset = 0.0;                 // 偏心偏移（同心=0）
+    }
+
+    // 同心变径
+    def create_concentric(start: Point3D, end: Point3D,
+                          big_diameter: Float, small_diameter: Float,
+                          thickness: Float) {
+        let dir = start.to(end).normalize();
+        let total_len = start.distance_to(end);
+        let taper = big_diameter * mm_to_m(1.0);  // 过渡段 = 1×大径
+
+        // 大径段中点
+        let big_mid = start.add_vector(dir.scale((total_len - taper) * 0.5));
+        // 小径段中点
+        let small_mid = end.add_vector(dir.scale(0.0 - (total_len - taper) * 0.5));
+
+        this.big_seg.create(start, big_mid, big_diameter, thickness);
+        this.small_seg.create(small_mid, end, small_diameter, thickness);
+        this.taper_length = taper;
+        this.offset = 0.0;
+    }
+
+    // 偏心变径（底平/顶平）
+    def create_eccentric(start: Point3D, end: Point3D,
+                         big_diameter: Float, small_diameter: Float,
+                         thickness: Float, offset_dir: Vector3D) {
+        let dir = start.to(end).normalize();
+        let total_len = start.distance_to(end);
+        let taper = big_diameter * mm_to_m(1.0);
+
+        let big_mid = start.add_vector(dir.scale((total_len - taper) * 0.5));
+        let small_mid = end.add_vector(dir.scale(0.0 - (total_len - taper) * 0.5));
+
+        this.big_seg.create(start, big_mid, big_diameter, thickness);
+        this.small_seg.create(small_mid, end, small_diameter, thickness);
+        this.taper_length = taper;
+        this.offset = (big_diameter - small_diameter) * 0.5 * 0.001;
+    }
+
+    def get_segments() {
+        return [this.big_seg, this.small_seg];
+    }
+}
+
+// ═══════════════════════════════════════════
+// PipeValve — 阀门
+// ═══════════════════════════════════════════
+
+class PipeValve {
+    def init() {
+        this.start = Point3D();
+        this.end = Point3D();
+        this.diameter = 0.0;
+        this.valve_type = "gate";     // gate/globe/check/butterfly/ball
+        this.length = 0.0;            // 阀门长度 (m)
+    }
+
+    def create(start: Point3D, end: Point3D, diameter: Float,
+               valve_type: String) {
+        this.start = start;
+        this.end = end;
+        this.diameter = diameter;
+        this.valve_type = valve_type;
+
+        // 阀门长度按类型×管径估算
+        if valve_type == "gate" { this.length = diameter * mm_to_m(0.7); };
+        if valve_type == "globe" { this.length = diameter * mm_to_m(1.5); };
+        if valve_type == "check" { this.length = diameter * mm_to_m(1.2); };
+        if valve_type == "butterfly" { this.length = diameter * mm_to_m(0.3); };
+        if valve_type == "ball" { this.length = diameter * mm_to_m(0.8); };
+    }
+
+    def get_direction() -> Vector3D {
+        return this.start.to(this.end).normalize();
+    }
+
+    def bbox() -> BBox3D {
+        let b = BBox3D();
+        b.set_empty();
+        let r = this.diameter * mm_to_m(0.75);
+        b.expand_padded(this.start, r);
+        b.expand_padded(this.end, r);
+        return b;
+    }
+}
+
+// ═══════════════════════════════════════════
+// 管网批量碰撞检测
+// ═══════════════════════════════════════════
+
+// 批量检测：返回所有碰撞对
+def check_pipe_network(segments) {
+    let mut i = 0;
+    let mut collision_count = 0;
+    while i < len(segments) {
+        let mut j = i + 1;
+        while j < len(segments) {
+            if pipes_collide(segments[i], segments[j]) == 1 {
+                print("碰撞: 管段" + str(i) + " ↔ 管段" + str(j));
+                collision_count = collision_count + 1;
+            };
+            j = j + 1;
+        };
+        i = i + 1;
+    };
+    print("总碰撞数: " + str(collision_count));
+}
+
+// ═══════════════════════════════════════════
+// 工具：提取BBox
+// ═══════════════════════════════════════════
+
+def pipe_network_bbox(segments) -> BBox3D {
+    let b = BBox3D();
+    b.set_empty();
+    let mut i = 0;
+    while i < len(segments) {
+        let seg_bbox = segments[i].bbox();
+        b.merge(seg_bbox);
+        i = i + 1;
+    };
+    return b;
+}
