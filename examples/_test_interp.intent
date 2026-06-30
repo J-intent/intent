@@ -1,4 +1,0 @@
-let x = 10;
-print("x = ${x}, x*2 = ${x * 2}, x+5 = ${x + 5}");
-let name = "World";
-print("Hello ${name}! len = ${len(name)}");
