@@ -1,0 +1,6 @@
+// quick geometry sanity
+import std.bim.geometry;
+
+let v = Vector3D();
+v.create(1.0, 2.0, 3.0);
+print("Vector3D OK");

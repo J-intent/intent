@@ -1,0 +1,349 @@
+// std/bim/pipe.intent — MEP 管道模块
+// 心学为体：管道即路径，水流即意图
+// 禅道为翼：每段管道纯函数变换，组合即管网
+// 马哲为用：翻弯/碰撞/坡度 = BIM 实践第一现场
+
+import std.bim.geometry;
+import std.bim.unit;
+import std.math;
+
+// ═══════════════════════════════════════════
+// PipeSegment — 单段直线管道
+// ═══════════════════════════════════════════
+
+class PipeSegment {
+    def init() {
+        this.start = Point3D();
+        this.end = Point3D();
+        this.diameter = 0.0;     // 管径 (mm)
+        this.thickness = 0.0;    // 壁厚 (mm)
+    }
+
+    def create(start: Point3D, end: Point3D, diameter: Float, thickness: Float) {
+        this.start = start;
+        this.end = end;
+        this.diameter = diameter;
+        this.thickness = thickness;
+    }
+
+    // 管道长度
+    def length() -> Float {
+        return this.start.distance_to(this.end);
+    }
+
+    // 管道方向（单位向量）
+    def direction() -> Vector3D {
+        return this.start.to(this.end).normalize();
+    }
+
+    // 中点
+    def mid_point() -> Point3D {
+        return this.start.midpoint(this.end);
+    }
+
+    // 轴对齐包围盒
+    def bbox() -> BBox3D {
+        let b = BBox3D();
+        b.create_empty();
+        let padding = this.diameter * mm_to_m(0.5);
+        b.expand_by_point_padded(this.start, padding);
+        b.expand_by_point_padded(this.end, padding);
+        return b;
+    }
+
+    // 内径
+    def inner_radius() -> Float {
+        return (this.diameter * 0.5 - this.thickness) * 0.001;
+    }
+
+    // 外径
+    def outer_radius() -> Float {
+        return this.diameter * 0.5 * 0.001;
+    }
+}
+
+// ═══════════════════════════════════════════
+// PipeElbow — 弯头（连接两段不同方向的管道）
+// ═══════════════════════════════════════════
+
+class PipeElbow {
+    def init() {
+        this.center = Point3D();      // 弯头中心点
+        this.radius = 0.0;            // 弯曲半径 (m)
+        this.angle = 0.0;             // 弯曲角度 (弧度)
+        this.from_dir = Vector3D();   // 来向
+        this.to_dir = Vector3D();     // 去向
+        this.diameter = 0.0;          // 管径 (mm)
+    }
+
+    // 从两个管道方向计算弯头: from_dir 到 to_dir
+    // angle: 弯曲角度，radius: 弯曲半径(默认取管径的1.5倍)
+    def create(from_dir: Vector3D, to_dir: Vector3D, diameter: Float,
+               radius: Float, center: Point3D) {
+        this.from_dir = from_dir.normalize();
+        this.to_dir = to_dir.normalize();
+        this.angle = acos(this.from_dir.dot(this.to_dir));
+        this.radius = radius;
+        this.center = center;
+        this.diameter = diameter;
+    }
+
+    // 弯头弧长
+    def arc_length() -> Float {
+        return this.radius * this.angle;
+    }
+}
+
+// ═══════════════════════════════════════════
+// PipeOffset — 管道翻弯（偏移避障）
+//
+// 场景：直管路径上遇到障碍物
+//         ↑ 上升段     → 平移段     ↓ 下降段
+//  A ─────╮            ╭──→──╮            ╭───── B
+//         ╰──↑──╯      ╰──↓──╯
+//
+// 翻弯 = 四个弯头 + 三段直管
+// 参数：偏移方向(上/下/左/右)、偏移距离、管径
+// ═══════════════════════════════════════════
+
+class PipeOffset {
+    def init() {
+        this.rise_seg = PipeSegment();    // 上升段
+        this.hori_seg = PipeSegment();    // 水平平移段
+        this.fall_seg = PipeSegment();    // 下降段
+        this.elbows = [];                 // 四个弯头
+        this.total_length = 0.0;
+    }
+
+    // 创建翻弯
+    // a_point: 起弯位置
+    // b_point: 回弯位置（原管道路径上的终点）
+    // pipe_dir: 原管道方向
+    // offset_dir: 偏移方向（通常垂直于管道方向，如向上 Vector3D.z=1）
+    // offset_dist: 偏移距离 (m)
+    // elbow_radius: 弯头半径 (m)
+    // diameter: 管径 (mm)
+    // thickness: 壁厚 (mm)
+    def create(a_point: Point3D, b_point: Point3D,
+               pipe_dir: Vector3D, offset_dir: Vector3D,
+               offset_dist: Float, elbow_radius: Float,
+               diameter: Float, thickness: Float) {
+        let dir = pipe_dir.normalize();
+        let off = offset_dir.normalize();
+
+        // ── 计算四个关键点 ──
+        // P0 = A (起弯点)
+        // P1 = A + offset_dir * offset_dist (上升后)
+        // P2 = P1 + dir * (B-A)·dir (平移后，管道方向上的投影)
+        // P3 = B (回弯点)
+
+        // A→B 向量
+        // ab = B - A 向量
+        let ab = a_point.to(b_point);
+        // A→B 在管道方向上的投影长度
+        let proj_len = ab.dot(dir);
+
+        // P0 = A
+        let p0 = a_point;
+
+        // P1 = A + off * offset_dist
+        let p1_vec = off.scale(offset_dist);
+        let p1 = p0.add_vector(p1_vec);
+
+        // P2 = P1 + dir * proj_len
+        let p2_vec = dir.scale(proj_len);
+        let p2 = p1.add_vector(p2_vec);
+
+        // P3 = B
+        let p3 = b_point;
+
+        // ── 构造三段管道 ──
+        this.rise_seg.create(p0, p1, diameter, thickness);
+        this.hori_seg.create(p1, p2, diameter, thickness);
+        this.fall_seg.create(p2, p3, diameter, thickness);
+
+        // ── 构造四个弯头 ──
+        let e1 = PipeElbow();
+        e1.create(dir, off, diameter, elbow_radius, p0);
+        let e2 = PipeElbow();
+        let neg_off = off.scale(0.0 - 1.0);
+        e2.create(off, dir, diameter, elbow_radius, p1);
+        let e3 = PipeElbow();
+        e3.create(dir, neg_off, diameter, elbow_radius, p2);
+        let e4 = PipeElbow();
+        e4.create(neg_off, dir, diameter, elbow_radius, p3);
+
+        this.elbows = [e1, e2, e3, e4];
+
+        // ── 总长度（含弯头弧长） ──
+        let t1 = this.rise_seg.length() + this.hori_seg.length() + this.fall_seg.length();
+        let t2 = e1.arc_length() + e2.arc_length() + e3.arc_length() + e4.arc_length();
+        this.total_length = t1 + t2;
+    }
+
+    // 获取翻弯后所有管道段
+    def get_segments() {
+        return [this.rise_seg, this.hori_seg, this.fall_seg];
+    }
+
+    // 获取所有弯头
+    def get_elbows() {
+        return this.elbows;
+    }
+}
+
+// ═══════════════════════════════════════════
+// 管道碰撞检测
+// ═══════════════════════════════════════════
+
+// 两段管道是否碰撞（圆柱体近似）
+def pipes_collide(a: PipeSegment, b: PipeSegment) -> Int {
+    // 简化：两个圆柱体的最短距离小于半径之和 → 碰撞
+    let min_dist = segment_distance(
+        a.start, a.end,
+        b.start, b.end
+    );
+    let radius_sum = a.outer_radius() + b.outer_radius();
+    if min_dist < radius_sum {
+        return 1;
+    };
+    return 0;
+}
+
+// 两条线段的最短距离
+def segment_distance(a1: Point3D, a2: Point3D, b1: Point3D, b2: Point3D) -> Float {
+    let d1 = a1.to(a2);
+    let d2 = b1.to(b2);
+    let r = b1.to(a1);
+    let a = d1.dot(d1);   // = |d1|^2
+    let e = d2.dot(d2);   // = |d2|^2
+    let f = d2.dot(r);
+
+    if a < 0.000001 {
+        if e < 0.000001 {
+            return a1.distance_to(b1);
+        };
+        // d1 退化为点
+        let t = clamp(f / e, 0.0, 1.0);
+        return a1.distance_to(b1.add_vector(d2.scale(t)));
+    };
+
+    if e < 0.000001 {
+        // d2 退化为点
+        let b_val = d1.dot(r);
+        let s = clamp((0.0 - b_val) / a, 0.0, 1.0);
+        return b1.distance_to(a1.add_vector(d1.scale(s)));
+    };
+
+    let b = d1.dot(r);
+    let c = d1.dot(d2);
+    let denom = a * e - c * c;
+    let mut s = 0.0;
+    let mut t = 0.0;
+
+    if denom > 0.000001 {
+        let sn = c * f - e * b;
+        s = clamp(sn / denom, 0.0, 1.0);
+        let tn = a * f - c * b;
+        t = clamp(tn / denom, 0.0, 1.0);
+    } else {
+        s = 0.0;
+        t = f / e;
+        let tn = clamp(t, 0.0, 1.0);
+        t = tn;
+    };
+
+    let p_on_a = a1.add_vector(d1.scale(s));
+    let p_on_b = b1.add_vector(d2.scale(t));
+    return p_on_a.distance_to(p_on_b);
+}
+
+// 钳制值到 [lo, hi]
+def clamp(val: Float, lo: Float, hi: Float) -> Float {
+    if val < lo { return lo; };
+    if val > hi { return hi; };
+    return val;
+}
+
+// ═══════════════════════════════════════════
+// 管道坡度计算
+// ═══════════════════════════════════════════
+
+// 计算管道的坡度 (百分比，如 0.02 = 2%)
+def pipe_slope_percent(seg: PipeSegment) -> Float {
+    let len = seg.length();
+    if len < 0.000001 {
+        return 0.0;
+    };
+    let dz = seg.end.z - seg.start.z;
+    return abs(dz) / len;
+}
+
+// 计算管道的坡度 (即 1:N，如 1:50)
+def pipe_slope_ratio(seg: PipeSegment) -> Float {
+    let slope = pipe_slope_percent(seg);
+    if slope < 0.000001 {
+        return 0.0;
+    };
+    return 1.0 / slope;
+}
+
+// ═══════════════════════════════════════════
+// 管道辅助工具函数
+// ═══════════════════════════════════════════
+
+// 创建从起点到终点的直管
+def create_pipe(start: Point3D, end: Point3D,
+                diameter: Float, thickness: Float) -> PipeSegment {
+    let seg = PipeSegment();
+    seg.create(start, end, diameter, thickness);
+    return seg;
+}
+
+// 向上翻弯（常用场景：绕过上方障碍）
+def offset_up(a: Point3D, b: Point3D, pipe_dir: Vector3D,
+              height: Float, diameter: Float, thickness: Float) -> PipeOffset {
+    let offset = PipeOffset();
+    let up = Vector3D();
+    up.create(0.0, 0.0, 1.0);
+    let elbow_r = diameter * mm_to_m(0.0015);  // 弯头半径 = 1.5×管径
+    offset.create(a, b, pipe_dir, up, height, elbow_r, diameter, thickness);
+    return offset;
+}
+
+// 侧向翻弯
+def offset_side(a: Point3D, b: Point3D, pipe_dir: Vector3D,
+                side_dir: Vector3D, distance: Float,
+                diameter: Float, thickness: Float) -> PipeOffset {
+    let offset = PipeOffset();
+    let elbow_r = diameter * mm_to_m(0.0015);
+    offset.create(a, b, pipe_dir, side_dir, distance, elbow_r, diameter, thickness);
+    return offset;
+}
+
+// ═══════════════════════════════════════════
+// 管段长度汇总
+// ═══════════════════════════════════════════
+
+// 计算翻弯总长度
+def offset_total_length(offset: PipeOffset) -> Float {
+    return offset.total_length;
+}
+
+// 计算翻弯材料清单: 返回 [总长, 上升段长, 平移段长, 下降段长]
+def offset_material_list(offset: PipeOffset) {
+    print("==== 翻弯材料清单 ====");
+    let segs = offset.get_segments();
+    let mut total = 0.0;
+    let mut i = 0;
+    let labels = ["上升段", "平移段", "下降段"];
+    while i < len(segs) {
+        let l = segs[i].length();
+        print(labels[i] + ": " + str(l * 1000.0) + " mm");
+        total = total + l;
+        i = i + 1;
+    };
+    print("直管合计: " + str(total * 1000.0) + " mm");
+    print("弯头: 4 个");
+    print("总长度(含弯头): " + str(offset.total_length * 1000.0) + " mm");
+}

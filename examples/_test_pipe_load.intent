@@ -1,0 +1,2 @@
+import std.bim.pipe;
+print("pipe module loaded");

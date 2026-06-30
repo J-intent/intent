@@ -1,0 +1,79 @@
+// test_bim_pipe.intent — MEP 管道模块测试
+import std.bim.geometry;
+import std.bim.pipe;
+
+// ═══════════════════════════════════════════
+// 测试 1: 创建简单管道段
+// ═══════════════════════════════════════════
+
+let p_start = Point3D();
+p_start.create(0.0, 0.0, 3.0);
+let p_end = Point3D();
+p_end.create(5.0, 0.0, 3.0);
+
+let pipe = create_pipe(p_start, p_end, 200.0, 10.0);
+print("管道长度: " + str(pipe.length() * 1000.0) + " mm");
+let p_dir = pipe.direction();
+print("管道方向: (" + str(p_dir.x) + ", " + str(p_dir.y) + ", " + str(p_dir.z) + ")");
+print("管径: " + str(pipe.diameter) + " mm 壁厚: " + str(pipe.thickness) + " mm");
+
+// ═══════════════════════════════════════════
+// 测试 2: 管道碰撞检测
+// ═══════════════════════════════════════════
+
+let p2_start = Point3D();
+p2_start.create(3.0, 0.1, 3.0);
+let p2_end = Point3D();
+p2_end.create(8.0, 0.1, 3.0);
+
+let pipe2 = create_pipe(p2_start, p2_end, 150.0, 8.0);
+let collides = pipes_collide(pipe, pipe2);
+print("碰撞检测(w/ 0.1m offset): " + str(collides));
+
+let p3_start = Point3D();
+p3_start.create(10.0, 0.0, 3.0);
+let p3_end = Point3D();
+p3_end.create(15.0, 0.0, 3.0);
+let pipe3 = create_pipe(p3_start, p3_end, 200.0, 10.0);
+let collides2 = pipes_collide(pipe, pipe3);
+print("碰撞检测(w/ 5m gap): " + str(collides2));
+
+// ═══════════════════════════════════════════
+// 测试 3: 翻弯 — 向上偏移 500mm
+// ═══════════════════════════════════════════
+
+let pipe_dir = Vector3D();
+pipe_dir.create(1.0, 0.0, 0.0);
+let offset = offset_up(p_start, p_end, pipe_dir, 0.5, 200.0, 10.0);
+print("翻弯总长: " + str(offset.total_length * 1000.0) + " mm");
+
+let segs = offset.get_segments();
+let rise = segs[0];
+let hori = segs[1];
+let fall = segs[2];
+print("上升段: " + str(rise.length() * 1000.0) + " mm");
+print("平移段: " + str(hori.length() * 1000.0) + " mm");
+print("下降段: " + str(fall.length() * 1000.0) + " mm");
+
+// ═══════════════════════════════════════════
+// 测试 4: 材料清单
+// ═══════════════════════════════════════════
+
+offset_material_list(offset);
+
+// ═══════════════════════════════════════════
+// 测试 5: 坡度计算
+// ═══════════════════════════════════════════
+
+let slope_pipe = create_pipe(p_start, p_end, 200.0, 10.0);
+let slope = pipe_slope_percent(slope_pipe);
+print("坡度(%): " + str(slope * 100.0));
+
+// 有坡度的管道
+let p_slope_end = Point3D();
+p_slope_end.create(10.0, 0.0, 2.8);
+let pipe_slope = create_pipe(p_start, p_slope_end, 150.0, 8.0);
+let slope2 = pipe_slope_percent(pipe_slope);
+print("坡度(%)(10m降0.2m): " + str(slope2 * 100.0));
+
+print("PIPE MODULE ALL OK");

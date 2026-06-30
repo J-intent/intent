@@ -1,0 +1,5 @@
+def main() {
+    import std.bim.pipe;
+    print("pipe import done");
+}
+main();
