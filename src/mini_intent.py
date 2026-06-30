@@ -199,7 +199,7 @@ class Lexer:
         'None', 'True', 'False', 'true', 'false', 'null',
         'and', 'or', 'not', 'in', 'is',
         'class', 'this', 'mut', 'fn',  # 类系统 + 匿名函数
-        'try', 'catch', 'finally',  # 错误处理
+        'try', 'catch', 'finally', 'defer',  # 错误处理 + 延迟执行
         'assert',  # 断言
         'enum'  # 枚举
     }
@@ -514,6 +514,13 @@ class TryStmt(ASTNode):
     catch_var: str = ""       # catch (e) 中的变量名
     catch_body: List[ASTNode] = field(default_factory=list)
     finally_body: List[ASTNode] = field(default_factory=list)  # 可选 finally 块
+
+@dataclass
+class DeferStmt(ASTNode):
+    """defer 语句 — 延迟执行,在作用域退出时执行"""
+    body: List[ASTNode] = field(default_factory=list)
+    line: int = 0
+    column: int = 0
 
 @dataclass
 class ImportStmt(ASTNode):
@@ -1027,6 +1034,19 @@ class Parser:
         # try-catch 语句
         if self.match(TokenType.KEYWORD, 'try'):
             return self.parse_try_stmt()
+
+        # defer 语句
+        if self.match(TokenType.KEYWORD, 'defer'):
+            token = self.current_token
+            self.advance()
+            def_stmt = DeferStmt(line=token.line, column=token.column)
+            self.expect(TokenType.SYMBOL, '{')
+            while not self.match(TokenType.SYMBOL, '}'):
+                s = self.parse_statement()
+                if s:
+                    def_stmt.body.append(s)
+            self.expect(TokenType.SYMBOL, '}')
+            return def_stmt
 
         # assert 语句
         if self.match(TokenType.KEYWORD, 'assert'):
@@ -2038,17 +2058,51 @@ class Parser:
         while self.match(TokenType.NEWLINE):
             self.advance()
 
-    def parse_list_expr(self) -> 'ListExpr':
-        """解析列表表达式"""
+    def parse_list_expr(self) -> 'Expression':
+        """解析列表表达式（含推导式）"""
         start_token = self.expect(TokenType.SYMBOL, '[')
-        expr = ListExpr(line=start_token.line, column=start_token.column)
-
-        if not self.match(TokenType.SYMBOL, ']'):
-            expr.elements.append(self.parse_expression())
-            while self.match(TokenType.SYMBOL, ','):
+        
+        if self.match(TokenType.SYMBOL, ']'):
+            self.advance()
+            return ListExpr(line=start_token.line, column=start_token.column)
+        
+        first = self.parse_expression()
+        
+        # 检查是否是推导式: [expr for x in items if cond]
+        if self.match(TokenType.KEYWORD, 'for'):
+            self.advance()  # 跳过 for
+            # 循环变量
+            var_name = self.expect(TokenType.IDENTIFIER).value
+            self.expect(TokenType.KEYWORD, 'in')
+            iterable = self.parse_expression()
+            
+            # 可选 if 条件
+            condition = None
+            if self.match(TokenType.KEYWORD, 'if'):
                 self.advance()
-                expr.elements.append(self.parse_expression())
-
+                condition = self.parse_expression()
+            
+            self.expect(TokenType.SYMBOL, ']')
+            
+            return ListCompExpr(
+                element=first,
+                var_name=var_name,
+                iterable=iterable,
+                condition=condition,
+                line=start_token.line,
+                column=start_token.column
+            )
+        
+        # 普通列表
+        expr = ListExpr(line=start_token.line, column=start_token.column)
+        expr.elements.append(first)
+        while self.match(TokenType.SYMBOL, ','):
+            self.advance()
+            self._skip_newlines()
+            if self.match(TokenType.SYMBOL, ']'):
+                break  # 尾逗号
+            expr.elements.append(self.parse_expression())
+        
         self.expect(TokenType.SYMBOL, ']')
         return expr
 
@@ -2083,6 +2137,14 @@ class Parser:
 class ListExpr(Expression):
     """列表表达式"""
     elements: List[Expression] = field(default_factory=list)
+
+@dataclass
+class ListCompExpr(Expression):
+    """列表推导式 [expr for x in items if cond]"""
+    element: Expression = None  # 循环体表达式
+    var_name: str = ""  # 循环变量名
+    iterable: Expression = None  # 可迭代对象
+    condition: Expression = None  # 可选 if 条件
 
 @dataclass
 class DictExpr(Expression):
@@ -2750,6 +2812,7 @@ class Scope:
         self.parent = parent
         self.symbols: Dict[str, RuntimeValue] = {}
         self.constants: set[str] = set()
+        self.defer_stack: List[List['ASTNode']] = []  # defer 语句栈
 
     def declare(self, name: str, value: RuntimeValue, is_const: bool = False, allow_redefine: bool = False):
         """声明变量"""
@@ -3073,6 +3136,15 @@ class Interpreter:
         self.source_lines: List[str] = []
         self.current_line: int = 0
         self.current_col: int = 0
+
+    def _exit_scope(self, old_scope: 'Scope'):
+        """退出当前作用域，执行 defer 栈"""
+        # 逆序执行 defer
+        while self.current_scope.defer_stack:
+            defer_body = self.current_scope.defer_stack.pop()
+            for s in defer_body:
+                self.execute_statement(s)
+        self.current_scope = old_scope
 
     def resolve(self, expr, depth: int) -> None:
         """Resolver 回调:记录表达式的变量深度
@@ -4027,6 +4099,10 @@ class Interpreter:
 
         elif isinstance(stmt, TryStmt):
             return self.execute_try_stmt(stmt)
+        elif isinstance(stmt, DeferStmt):
+            # 注册 defer 到当前作用域的 defer 栈
+            self.current_scope.defer_stack.append(stmt.body)
+            return IntValue(0)
         else:
             raise RuntimeError(f"未知语句类型: {type(stmt).__name__}")
 
@@ -4801,8 +4877,8 @@ class Interpreter:
                 pass
             del self.global_scope.symbols['result']
 
-        # 恢复作用域
-        self.current_scope = old_scope
+        # 恢复作用域（执行 defer）
+        self._exit_scope(old_scope)
 
         # 校验返回类型(使用泛型代入后的返回类型)
         if subst_return and subst_return != "Any":
@@ -4883,7 +4959,7 @@ class Interpreter:
                 if self.return_flag:
                     break
         finally:
-            self.current_scope = old_scope
+            self._exit_scope(old_scope)
             self.return_flag = old_return_flag
             self.return_value = old_return_value
         
@@ -5224,6 +5300,42 @@ class Interpreter:
                     return instance
 
             raise NameError(f"未定义的函数: {func_name or expr.func}")
+
+        elif isinstance(expr, ListCompExpr):
+            # 列表推导式 [expr for x in items if cond]
+            iterable = self.evaluate_expression(expr.iterable, context)
+            if not isinstance(iterable, ListValue):
+                raise TypeError(f"推导式期望列表,得到 {iterable.type}")
+            
+            result_elements = []
+            for item in iterable.value:
+                old_scope = self.current_scope
+                self.current_scope = self.current_scope.enter()
+                self.current_scope.declare(expr.var_name, item.copy(), False)
+                
+                # 检查 if 条件
+                if expr.condition is not None:
+                    cond_val = self.evaluate_expression(expr.condition, context)
+                    if isinstance(cond_val, BoolValue) and not cond_val.value:
+                        self.current_scope = old_scope
+                        continue
+                
+                # 求值元素表达式
+                elem_val = self.evaluate_expression(expr.element, context)
+                result_elements.append(elem_val)
+                self.current_scope = old_scope
+            
+            # 确定元素类型
+            if result_elements:
+                element_type = result_elements[0].type
+                for elem in result_elements[1:]:
+                    if not element_type.can_assign_from(elem.type) and not elem.type.can_assign_from(element_type):
+                        element_type = AnyType()
+                        break
+            else:
+                element_type = IntType()
+            
+            return ListValue(result_elements, element_type)
 
         elif isinstance(expr, ListExpr):
             elements = [self.evaluate_expression(elem, context) for elem in expr.elements]
