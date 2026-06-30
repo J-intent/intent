@@ -1,0 +1,32 @@
+// 生成器 + 管道 + 列表推导式 组合测试
+def fibonacci(n: Int) {
+    let mut a = 0;
+    let mut b = 1;
+    let mut i = 0;
+    while i < n {
+        yield a;
+        let temp = a + b;
+        a = b;
+        b = temp;
+        i = i + 1;
+    }
+}
+
+def squares(n: Int) {
+    let mut i = 0;
+    while i < n {
+        yield i * i;
+        i = i + 1;
+    }
+}
+
+// 管道使用：生成5个平方数，然后过滤偶数
+let nums = fibonacci(8);
+print("fibonacci: " + str(nums));
+
+let sq = squares(6);
+print("squares: " + str(sq));
+
+// 推导式 + yield
+let even_fibs = [x for x in nums if x % 2 == 0];
+print("even fibs: " + str(even_fibs));

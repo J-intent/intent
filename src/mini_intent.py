@@ -201,7 +201,8 @@ class Lexer:
         'class', 'this', 'mut', 'fn',  # 类系统 + 匿名函数
         'try', 'catch', 'finally', 'defer',  # 错误处理 + 延迟执行
         'assert',  # 断言
-        'enum'  # 枚举
+        'enum',  # 枚举
+        'yield'  # 生成器
     }
 
     # 内置类型名 - 不是关键字,只是预定义的类型标识符
@@ -438,6 +439,7 @@ class FunctionDef(ASTNode):
     body: List[ASTNode] = field(default_factory=list)  # 函数体语句
     is_pure: bool = False
     effects: List[str] = field(default_factory=list)
+    is_generator: bool = False  # 包含 yield 则为 True
 
     def get_param_names(self) -> List[str]:
         return [name for name, _, _ in self.params]
@@ -519,6 +521,13 @@ class TryStmt(ASTNode):
 class DeferStmt(ASTNode):
     """defer 语句 — 延迟执行,在作用域退出时执行"""
     body: List[ASTNode] = field(default_factory=list)
+    line: int = 0
+    column: int = 0
+
+@dataclass
+class YieldStmt(ASTNode):
+    """yield 语句 — 生成器产出值"""
+    value: Optional["Expression"] = None
     line: int = 0
     column: int = 0
 
@@ -845,7 +854,38 @@ class Parser:
                 func.body.append(stmt)
         self.expect(TokenType.SYMBOL, '}')
 
+        # 检测是否是生成器函数（包含 yield 语句）
+        func.is_generator = self._has_yield_in_body(func.body)
+
         return func
+
+    def _has_yield_in_body(self, body: List[ASTNode]) -> bool:
+        """递归检测函数体中是否包含 yield 语句"""
+        for stmt in body:
+            if isinstance(stmt, YieldStmt):
+                return True
+            if hasattr(stmt, 'body'):
+                if self._has_yield_in_body(stmt.body):
+                    return True
+            if hasattr(stmt, 'then_branch'):
+                if self._has_yield_in_body(stmt.then_branch):
+                    return True
+                for _, elif_body in getattr(stmt, 'elif_branches', []):
+                    if self._has_yield_in_body(elif_body):
+                        return True
+                if hasattr(stmt, 'else_branch') and stmt.else_branch:
+                    if self._has_yield_in_body(stmt.else_branch):
+                        return True
+            if hasattr(stmt, 'try_body'):
+                if self._has_yield_in_body(stmt.try_body):
+                    return True
+            if hasattr(stmt, 'catch_body'):
+                if self._has_yield_in_body(stmt.catch_body):
+                    return True
+            if hasattr(stmt, 'finally_body') and stmt.finally_body:
+                if self._has_yield_in_body(stmt.finally_body):
+                    return True
+        return False
 
     def parse_parameter_list(self) -> List[Tuple[str, str, Any]]:
         """解析参数列表 - 支持有类型/无类型参数、默认值、this作为参数名
@@ -994,6 +1034,10 @@ class Parser:
         # 返回语句
         if self.match(TokenType.KEYWORD, 'return'):
             return self.parse_return_stmt()
+
+        # 生成器 yield
+        if self.match(TokenType.KEYWORD, 'yield'):
+            return self.parse_yield_stmt()
 
         # 打印语句
         if self.match(TokenType.IDENTIFIER, 'print'):
@@ -1282,6 +1326,17 @@ class Parser:
         """解析返回语句"""
         start_token = self.expect(TokenType.KEYWORD, 'return')
         stmt = ReturnStmt(line=start_token.line, column=start_token.column)
+
+        if not self.match(TokenType.SYMBOL, ';'):
+            stmt.value = self.parse_expression()
+
+        self.expect(TokenType.SYMBOL, ';')
+        return stmt
+
+    def parse_yield_stmt(self) -> YieldStmt:
+        """解析 yield 语句 — 生成器产出值"""
+        start_token = self.expect(TokenType.KEYWORD, 'yield')
+        stmt = YieldStmt(line=start_token.line, column=start_token.column)
 
         if not self.match(TokenType.SYMBOL, ';'):
             stmt.value = self.parse_expression()
@@ -2249,6 +2304,11 @@ class MatchError(Exception):
         self.line = line
         super().__init__(message)
 
+class YieldSignal(BaseException):
+    """yield 信号 — 用于中断函数执行并产出值"""
+    def __init__(self, value: RuntimeValue):
+        self.value = value
+
 @dataclass
 class PipeExpr(Expression):
     """管道表达式 left |> right
@@ -2723,6 +2783,25 @@ class EnumValue(RuntimeValue):
 
     def __hash__(self):
         return hash((self.enum_name, self.variant))
+
+@dataclass
+class GeneratorValue(RuntimeValue):
+    """生成器值 — 可迭代的惰性序列"""
+    _gen: object = None  # Python generator object
+
+    def __init__(self, gen):
+        super().__init__(AnyType(), None)
+        self._gen = gen
+
+    def __iter__(self):
+        return self._gen
+
+    def __str__(self):
+        return "<generator>"
+
+    def copy(self):
+        # 生成器不能复制,返回自身
+        return self
 
 
 @dataclass
@@ -4103,6 +4182,8 @@ class Interpreter:
             # 注册 defer 到当前作用域的 defer 栈
             self.current_scope.defer_stack.append(stmt.body)
             return IntValue(0)
+        elif isinstance(stmt, YieldStmt):
+            return self.execute_yield(stmt)
         else:
             raise RuntimeError(f"未知语句类型: {type(stmt).__name__}")
 
@@ -4628,6 +4709,14 @@ class Interpreter:
         self.break_flag = True
         return IntValue(0)
 
+    def execute_yield(self, stmt: YieldStmt) -> RuntimeValue:
+        """执行 yield 语句 — 将值推入生成器缓冲区"""
+        value = self.evaluate_expression(stmt.value) if stmt.value else IntValue(0)
+        if not hasattr(self, '_yield_buffer') or self._yield_buffer is None:
+            raise RuntimeError("yield 只能在生成器函数中使用")
+        self._yield_buffer.append(value)
+        return value
+
     def execute_continue(self) -> RuntimeValue:
         """执行continue语句"""
         self.continue_flag = True
@@ -4858,14 +4947,26 @@ class Interpreter:
                 return IntValue(1)
 
         # 执行函数体
-
-        # 执行函数体
+        is_gen = getattr(func_def, 'is_generator', False)
         result = IntValue(0)
-        for stmt in func_def.body:
-            result = self.execute_statement(stmt)
-            if self.return_flag:
-                self.return_flag = False
-                break
+
+        if is_gen:
+            # 生成器模式：yield 将值收集到缓冲区，返回列表
+            saved_yield = getattr(self, '_yield_buffer', None)
+            self._yield_buffer = []
+            for stmt in func_def.body:
+                result = self.execute_statement(stmt)
+                if self.return_flag:
+                    self.return_flag = False
+                    break
+            result = ListValue(self._yield_buffer, AnyType())
+            self._yield_buffer = saved_yield
+        else:
+            for stmt in func_def.body:
+                result = self.execute_statement(stmt)
+                if self.return_flag:
+                    self.return_flag = False
+                    break
 
         # 验证后置条件
         func_ensures = getattr(func_def, 'ensures', [])
