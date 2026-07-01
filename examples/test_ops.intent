@@ -1,0 +1,24 @@
+class Vector {
+    def __init__(x: Float, y: Float) {
+        this.x = x;
+        this.y = y;
+    }
+
+    def __add__(other) -> Vector {
+        let nx = this.x + other.x;
+        let ny = this.y + other.y;
+        return Vector(nx, ny);
+    }
+
+    def __eq__(other) -> Bool {
+        return this.x == other.x and this.y == other.y;
+    }
+};
+
+let v1 = Vector(1.0, 2.0);
+let v2 = Vector(3.0, 4.0);
+let v3 = v1 + v2;
+print(v3.x, ",", v3.y);
+print("v1==v2 ", v1 == v2);
+print("v3==Vector(4,6) ", v3 == Vector(4.0, 6.0));
+print("OP-OVERLOAD OK");

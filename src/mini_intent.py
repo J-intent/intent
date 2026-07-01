@@ -209,14 +209,14 @@ class Lexer:
     BUILTIN_TYPES = {'Int', 'Float', 'String', 'Bool', 'List', 'Dict'}
 
     SYMBOLS = {
-        '(', ')', '{', '}', '[', ']', ',', ':', ';', '=', '.', '->', '=>',
+        '(', ')', '{', '}', '[', ']', ',', ':', ';', '=', '.', '->', '=>', '@',
         '+', '-', '*', '/', '%', '**', '//', '==', '!=', '<', '>', '<=', '>=',
         '!', '&&', '||', '&', '|', '^', '~', '<<', '>>', ':=', '++', '--',
         '+=', '-=', '*=', '/=', '%=', '**=', '//=', '&=', '|=', '^=', '<<=', '>>=',
         '|>'  # 管道操作符
     }
 
-    SINGLE_SYMBOLS = set('(){}[],:;.=+-*/%<>!&|^~')
+    SINGLE_SYMBOLS = set('(){}[],:;.=+-*/%<>!&|^~@')
 
     def __init__(self, code: str, filename: str = ""):
         self.code = code
@@ -334,7 +334,7 @@ class Lexer:
         char = self.current_char()
 
         # 先检查是否是标点符号
-        if char in '(){}[],:;.?' :
+        if char in '(){}[],:;.?@' :
             self.tokens.append(Token(TokenType.SYMBOL, char, self.line, self.column, self.filename))
             self.advance()
             return
@@ -440,6 +440,7 @@ class FunctionDef(ASTNode):
     is_pure: bool = False
     effects: List[str] = field(default_factory=list)
     is_generator: bool = False  # 包含 yield 则为 True
+    decorators: List[str] = field(default_factory=list)  # 装饰器名列表
 
     def get_param_names(self) -> List[str]:
         return [name for name, _, _ in self.params]
@@ -740,11 +741,26 @@ class Parser:
                 continue
 
             try:
+                # 收集装饰器 (如 @log, @timed)
+                decorators = []
+                while self.match(TokenType.SYMBOL, '@'):
+                    self.advance()
+                    dec_name = self.expect(TokenType.IDENTIFIER).value
+                    decorators.append(dec_name)
+                    # 跳过行尾换行
+                    while self.match(TokenType.NEWLINE):
+                        self.advance()
+
                 # 解析函数定义
                 if self.match(TokenType.KEYWORD, 'def'):
                     func = self.parse_function_def()
                     if func is not None:
+                        func.decorators = decorators
                         program.add_function(func)
+                elif decorators:
+                    # 装饰器后没有 def → 错误
+                    self.error(self.current_token, "装饰器 @ 必须紧跟函数定义")
+                    self.synchronize()
                 # 解析类声明
                 elif self.match(TokenType.KEYWORD, 'class'):
                     cls = self.parse_class_decl()
@@ -754,7 +770,11 @@ class Parser:
                 else:
                     stmt = self.parse_statement()
                     if stmt:
-                        program.add_statement(stmt)
+                        if isinstance(stmt, FunctionDef):
+                            # 带装饰器的函数(parse_statement 处理 @)
+                            program.add_function(stmt)
+                        else:
+                            program.add_statement(stmt)
             except SyntaxError:
                 # error() 已记录错误,跳至下一个同步点继续解析
                 self.synchronize()
@@ -2930,6 +2950,14 @@ class Scope:
             return self.parent.has(name)
         return False
 
+    def get_opt(self, name: str):
+        """获取变量值,不存在返回 None (不抛异常)"""
+        if name in self.symbols:
+            return self.symbols[name]
+        elif self.parent:
+            return self.parent.get_opt(name)
+        return None
+
     def enter(self) -> 'Scope':
         """进入子作用域"""
         return Scope(parent=self)
@@ -3215,6 +3243,10 @@ class Interpreter:
         self.source_lines: List[str] = []
         self.current_line: int = 0
         self.current_col: int = 0
+        # ── 枚举注册表 ──
+        self.enum_registry: Dict[str, List[str]] = {}  # enum_name → [variants]
+        # ── 导入栈 (循环依赖检测) ──
+        self._import_stack: List[str] = []
 
     def _exit_scope(self, old_scope: 'Scope'):
         """退出当前作用域，执行 defer 栈"""
@@ -4105,6 +4137,29 @@ class Interpreter:
             if module_mode:
                 self.current_scope.declare(func.name, func, False, allow_redefine=True)
 
+            # ── 应用装饰器 ──
+            if func.decorators:
+                fv = FunctionValue(func, self.current_scope)
+                for dec_name in func.decorators:
+                    dec_func = self.current_scope.get_opt(dec_name)
+                    # 作用域中没有则查解释器内部函数表
+                    if dec_func is None and dec_name in self.functions:
+                        dec_func = self.functions[dec_name]
+                    # 可能是原始 FunctionDef（scope 中存储的原始声明）
+                    if isinstance(dec_func, FunctionDef):
+                        dec_func = FunctionValue(dec_func, self.current_scope)
+                    if isinstance(dec_func, FunctionValue):
+                        # decorator(fn) → 返回包装后的 FunctionValue
+                        dec_result = self._execute_method(dec_func, None, [fv])
+                        if isinstance(dec_result, FunctionValue):
+                            fv = dec_result
+                    else:
+                        print(f"[警告] 装饰器 '{dec_name}' 未找到或不是函数")
+                # 更新函数注册
+                self.functions[func.name] = fv.func_def
+                if not module_mode:
+                    self.current_scope.declare(func.name, fv, False, allow_redefine=True)
+
         # 执行全局语句(变量声明等)
         result = IntValue(0)
         for stmt in program.statements:
@@ -4616,6 +4671,26 @@ class Interpreter:
         """执行 match 表达式"""
         match_value = self.evaluate_expression(expr.value, context)
 
+        # ── 枚举穷举性检查 ──
+        if isinstance(match_value, EnumValue):
+            covered = set()
+            has_wildcard = False
+            for case in expr.cases:
+                patterns = self._flatten_or_pattern(case.pattern)
+                for p in patterns:
+                    if isinstance(p, (WildcardPattern, VariablePattern)):
+                        has_wildcard = True
+                    elif isinstance(p, EnumPattern):
+                        if p.enum_name == match_value.enum_name:
+                            covered.add(p.variant)
+            if not has_wildcard:
+                all_variants = set(self._get_enum_variants(match_value.enum_name))
+                missing = all_variants - covered
+                if missing:
+                    raise MatchError(
+                        f"match 未穷举枚举 '{match_value.enum_name}' 的变体: {', '.join(sorted(missing))}",
+                        expr.line)
+
         for case in expr.cases:
             bindings = {}
             if self._pattern_match(case.pattern, match_value, bindings):
@@ -4704,6 +4779,20 @@ class Interpreter:
 
         raise MatchError(f"不支持的匹配模式: {type(pattern).__name__}")
 
+    def _flatten_or_pattern(self, pattern) -> list:
+        """展平或模式为叶子模式列表"""
+        if isinstance(pattern, OrPattern):
+            result = []
+            for p in pattern.patterns:
+                result.extend(self._flatten_or_pattern(p))
+            return result
+        return [pattern]
+
+    def _get_enum_variants(self, enum_name: str) -> List[str]:
+        """获取枚举的所有变体名"""
+        return self.enum_registry.get(enum_name, [])
+
+
     def execute_break(self) -> RuntimeValue:
         """执行break语句"""
         self.break_flag = True
@@ -4731,6 +4820,12 @@ class Interpreter:
         if module_name in self.modules:
             module_scope = self.modules[module_name]
         else:
+            # ── 循环依赖检测 ──
+            if module_name in self._import_stack:
+                cycle = ' → '.join(self._import_stack[self._import_stack.index(module_name):] + [module_name])
+                print(f"[警告] 检测到模块循环依赖: {cycle}")
+                return IntValue(0)
+            self._import_stack.append(module_name)
             # 查找模块文件(支持点号分隔,如 std.math → std/math.intent)
             module_file = self._find_module_file(module_name)
             if not module_file:
@@ -4769,8 +4864,11 @@ class Interpreter:
 
                 # 缓存模块
                 self.modules[module_name] = module_scope
+                # 弹出导入栈
+                self._import_stack.pop()
 
             except Exception as e:
+                self._import_stack.pop() if self._import_stack and self._import_stack[-1] == module_name else None
                 if 'old_scope' in dir():
                     self.current_scope = old_scope
                 if 'old_functions' in dir():
@@ -4990,6 +5088,8 @@ class Interpreter:
     def execute_enum_def(self, stmt: 'EnumDef') -> RuntimeValue:
         """执行枚举定义 — 将每个变体注册为全局常量"""
         enum_type = EnumType(stmt.name, stmt.variants)
+        # 注册到枚举注册表（用于穷举检查）
+        self.enum_registry[stmt.name] = stmt.variants
         for variant in stmt.variants:
             enum_value = EnumValue(stmt.name, variant)
             self.current_scope.declare(variant, enum_value, True)  # 常量，不可修改
@@ -5607,6 +5707,25 @@ class Interpreter:
             return BoolValue(left.to_bool() and right.to_bool())
         elif op == 'or':
             return BoolValue(left.to_bool() or right.to_bool())
+
+        # ── 运算符重载 (obj.__add__(other) 等) ──
+        op_to_method = {
+            '+': '__add__', '-': '__sub__', '*': '__mul__', '/': '__div__',
+            '%': '__mod__', '**': '__pow__', '//': '__floordiv__',
+            '==': '__eq__', '!=': '__ne__', '<': '__lt__',
+            '>': '__gt__', '<=': '__le__', '>=': '__ge__',
+        }
+        if op in op_to_method and isinstance(left, InstanceValue):
+            method_name = op_to_method[op]
+            method = left.get(method_name)
+            if method and isinstance(method, FunctionValue):
+                return self._execute_method(method, left, [right])
+            # 反射方法: 如果右操作数是实例且有 __radd__ 等
+            rmethod_name = '__r' + method_name[2:]
+            if isinstance(right, InstanceValue):
+                rmethod = right.get(rmethod_name)
+                if rmethod and isinstance(rmethod, FunctionValue):
+                    return self._execute_method(rmethod, right, [left])
 
         raise TypeError(f"不支持的操作: {left.type} {op} {right.type}")
 
