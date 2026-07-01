@@ -1,0 +1,13 @@
+class Vector {
+    def __init__(x: Float, y: Float) {
+        this.x = x;
+        this.y = y;
+    }
+    def __str__() -> String {
+        return "Vector(" + str(this.x) + ", " + str(this.y) + ")";
+    }
+};
+
+let v = Vector(3.0, 4.0);
+print(v);
+print("__STR__ OK");

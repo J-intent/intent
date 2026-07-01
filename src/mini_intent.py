@@ -3393,7 +3393,7 @@ class Interpreter:
 
     def _builtin_print(self, args: List[RuntimeValue]) -> RuntimeValue:
         """内置print函数"""
-        output = " ".join(str(arg) for arg in args)
+        output = " ".join(self._value_to_str(arg) for arg in args)
         print(output)
         return IntValue(0)
 
@@ -3630,6 +3630,16 @@ class Interpreter:
                 k_str = k if isinstance(k, str) else self._value_to_str(k)
                 items.append(f'"{k_str}": {self._value_to_str(v)}')
             return "{" + ", ".join(items) + "}"
+        elif isinstance(val, InstanceValue):
+            # 运算符重载: 调用 __str__() 方法
+            method = val.get('__str__')
+            if method and isinstance(method, FunctionValue):
+                result = self._execute_method(method, val, [])
+                return self._value_to_str(result)
+            elif hasattr(val, 'type'):
+                return f"<{val.type}>"
+            else:
+                return str(val.value)
         else:
             return str(val.value)
 
