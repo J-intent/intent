@@ -1,0 +1,445 @@
+// std/bim/pipe_routing.intent — 管段自动路由
+// 心学为体：路径 = 意图在空间中的投影
+// 禅道为翼：A* 寻路 + 弯头组合 = 最短可行路径
+// 马哲为用：每一步都是可施工的管段
+
+import std.bim.geometry;
+import std.bim.pipe;
+import std.bim.unit;
+import std.math;
+
+// ═══════════════════════════════════════════
+// RoutingNode — A* 节点
+// ═══════════════════════════════════════════
+
+class RoutingNode {
+    def init() {
+        this.x = 0.0;
+        this.y = 0.0;
+        this.z = 0.0;
+        this.g = 0.0;          // 起点到此的实际代价
+        this.h = 0.0;          // 此到终点的启发式估计
+        this.px = 0.0;         // 父节点坐标
+        this.py = 0.0;
+        this.pz = 0.0;
+        this.id = "";          // 节点ID = "x,y,z"
+        this.closed = 0;       // 是否已关闭
+    }
+
+    def f() -> Float {
+        return this.g + this.h;
+    }
+
+    def key(snap: Float) -> String {
+        let ix = floor((this.x + snap * 0.5) / snap);
+        let iy = floor((this.y + snap * 0.5) / snap);
+        let iz = floor((this.z + snap * 0.5) / snap);
+        let ks = str(ix) + "," + str(iy) + "," + str(iz);
+        return ks;
+    }
+
+    // 复制节点
+    def copy() -> RoutingNode {
+        let n = RoutingNode();
+        n.set(this.x, this.y, this.z, this.g, this.h, this.px, this.py, this.pz);
+        return n;
+    }
+
+    def set(x: Float, y: Float, z: Float, g: Float, h: Float, px: Float, py: Float, pz: Float) {
+        this.x = x; this.y = y; this.z = z;
+        this.g = g; this.h = h;
+        this.px = px; this.py = py; this.pz = pz;
+    }
+
+    def point() -> Point3D {
+        let p = Point3D();
+        p.create(this.x, this.y, this.z);
+        return p;
+    }
+}
+
+// ═══════════════════════════════════════════
+// 工具函数
+// ═══════════════════════════════════════════
+
+// 三维距离
+def dist_3d(x1: Float, y1: Float, z1: Float,
+             x2: Float, y2: Float, z2: Float) -> Float {
+    let dx = x1 - x2;
+    let dy = y1 - y2;
+    let dz = z1 - z2;
+    return sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// 曼哈顿距离
+def manhattan_3d(x1: Float, y1: Float, z1: Float,
+                  x2: Float, y2: Float, z2: Float) -> Float {
+    return abs(x1 - x2) + abs(y1 - y2) + abs(z1 - z2);
+}
+
+// 点是否在任一障碍物内 (带管道半径的安全余量)
+def point_collides(x: Float, y: Float, z: Float,
+                    obstacles, margin: Float) -> Int {
+    let p = Point3D();
+    p.create(x, y, z);
+    let mut i = 0;
+    while i < len(obstacles) {
+        // 用 BBox.expand_padded 做碰撞检测等效：检查点是否在扩展后的包围盒内
+        let bb = obstacles[i];
+        if p.x + margin >= bb.min.x and p.x - margin <= bb.max.x and p.y + margin >= bb.min.y and p.y - margin <= bb.max.y and p.z + margin >= bb.min.z and p.z - margin <= bb.max.z {
+            return 1;
+        };
+        i = i + 1;
+    };
+    return 0;
+}
+
+// 线段-障碍物碰撞检测
+def segment_collides(a: Point3D, b: Point3D, obstacles, margin: Float) -> Int {
+    let mut i = 0;
+    while i < len(obstacles) {
+        let bb = obstacles[i];
+        // 扩展障碍物包围盒
+        let ex_min = Point3D();
+        ex_min.create(bb.min.x - margin, bb.min.y - margin, bb.min.z - margin);
+        let ex_max = Point3D();
+        ex_max.create(bb.max.x + margin, bb.max.y + margin, bb.max.z + margin);
+        // 线段-AABB 相交测试 (简化: 采样多点)
+        let steps = 8;
+        let mut s = 0;
+        let mut hit = 0;
+        while s <= steps and hit == 0 {
+            let t = s;
+            let t_f = t;
+            let inv = steps;
+            let ratio = t_f / inv;
+            let px = a.x + (b.x - a.x) * ratio;
+            let py = a.y + (b.y - a.y) * ratio;
+            let pz = a.z + (b.z - a.z) * ratio;
+            if px >= ex_min.x and px <= ex_max.x and py >= ex_min.y and py <= ex_max.y and pz >= ex_min.z and pz <= ex_max.z {
+                hit = 1;
+            };
+            s = s + 1;
+        };
+        if hit == 1 {
+            return 1;
+        };
+        i = i + 1;
+    };
+    return 0;
+}
+
+// ═══════════════════════════════════════════
+// A* 3D 网格寻路
+// ═══════════════════════════════════════════
+
+// 六个方向 (正交)
+def directions() {
+    let dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    return dirs;
+}
+
+// 在开放列表中找 f 值最小的节点 index
+def find_best(open_list) -> Int {
+    let mut best_idx = 0;
+    let mut best_f = 999999999.0;
+    let mut i = 0;
+    while i < len(open_list) {
+        let node = open_list[i];
+        if node.f() < best_f - 0.0001 {
+            best_f = node.f();
+            best_idx = i;
+        };
+        i = i + 1;
+    };
+    return best_idx;
+}
+
+// 重建路径: 从终点回溯到起点
+def rebuild_path(nodes, end_x: Float, end_y: Float, end_z: Float,
+                  start_x: Float, start_y: Float, start_z: Float) {
+    let mut path = [];
+    let mut cx = end_x;
+    let mut cy = end_y;
+    let mut cz = end_z;
+
+    let mut steps = 0;
+    let max_steps = 10000;
+    while steps < max_steps {
+        let sp = Point3D();
+        sp.create(cx, cy, cz);
+        // 在路径开头插入 (反向构建)
+        insert(path, 0, sp);
+
+        // 到达起点
+        if abs(cx - start_x) < 0.001 and abs(cy - start_y) < 0.001 and abs(cz - start_z) < 0.001 {
+            return path;
+        };
+
+        // 查找父节点
+        let mut pi = 0;
+        let mut found_parent = 0;
+        while pi < len(nodes) {
+            let n = nodes[pi];
+            if abs(n.x - cx) < 0.001 and abs(n.y - cy) < 0.001 and abs(n.z - cz) < 0.001 {
+                cx = n.px;
+                cy = n.py;
+                cz = n.pz;
+                found_parent = 1;
+            };
+            pi = pi + 1;
+        };
+        if found_parent == 0 {
+            return path;
+        };
+        steps = steps + 1;
+    };
+    return path;
+}
+
+// ═══════════════════════════════════════════
+// 主函数: A* 管道路由
+//
+// start: Point3D 起点
+// end: Point3D 终点
+// obstacles: BBox3D 数组 (障碍物包围盒)
+// diameter: 管径 (mm)
+// grid_spacing: 网格间距 (m), 建议 = 管径×0.002 (half diameter in m)
+//
+// 返回: 路点数组 [Point3D, ...]
+// ═══════════════════════════════════════════
+
+def route_pipe(start: Point3D, end: Point3D, obstacles,
+                diameter: Float, grid_spacing: Float) {
+    let margin = diameter * mm_to_m(0.6);  // 管半径 + 安全余量
+
+    // 步骤 1: 直连检查 — 无障碍物直连最快
+    if segment_collides(start, end, obstacles, margin) == 0 {
+        let path = [start, end];
+        return path;
+    };
+
+    // 步骤 2: A* 寻路
+    let sx = start.x; let sy = start.y; let sz = start.z;
+    let ex = end.x; let ey = end.y; let ez = end.z;
+
+    // 搜索空间边界
+    let mut min_x = sx; let mut max_x = ex;
+    if ex < min_x { min_x = ex; max_x = sx; };
+    let mut min_y = sy; let mut max_y = ey;
+    if ey < min_y { min_y = ey; max_y = sy; };
+    let mut min_z = sz; let mut max_z = ez;
+    if ez < min_z { min_z = ez; max_z = sz; };
+
+    // 扩展搜索边界
+    let mut padding = dist_3d(sx, sy, sz, ex, ey, ez) * 0.5;
+    if padding < grid_spacing * 4.0 { padding = grid_spacing * 4.0; };
+    min_x = min_x - padding;
+    min_y = min_y - padding;
+    min_z = min_z - padding;
+    max_x = max_x + padding;
+    max_y = max_y + padding;
+    max_z = max_z + padding;
+
+    let gs = grid_spacing;
+
+    // 起点终点入格
+    let start_h = dist_3d(sx, sy, sz, ex, ey, ez);
+
+    let start_node = RoutingNode();
+    start_node.set(sx, sy, sz, 0.0, start_h, sx, sy, sz);
+
+    let mut open_list = [start_node];
+    let mut closed_keys = [];   // 已关闭节点 key 列表
+    let mut all_nodes = [];     // 所有展开的节点 (用于回溯)
+
+    let dirs = directions();
+    let mut found = 0;
+    let max_iter = 50000;
+    let mut iter = 0;
+
+    while len(open_list) > 0 and iter < max_iter {
+        iter = iter + 1;
+
+        // 取 f 最小的节点
+        let best_idx = find_best(open_list);
+        let current = open_list[best_idx];
+        // 从 open_list 移除 best_idx
+        remove_at(open_list, best_idx);
+
+        let ck = current.key(gs);
+        // 检查是否在 closed 中
+        let mut is_closed = 0;
+        let mut ci = 0;
+        while ci < len(closed_keys) {
+            if closed_keys[ci] == ck { is_closed = 1; };
+            ci = ci + 1;
+        };
+        if is_closed == 0 {
+            // 记录到 all_nodes 用于回溯
+            push(all_nodes, current);
+            // 标记关闭
+            push(closed_keys, ck);
+
+            // 检查是否到达终点
+            if abs(current.x - ex) < gs and abs(current.y - ey) < gs and abs(current.z - ez) < gs {
+                found = 1;
+                // 将终点加入
+                let end_node = RoutingNode();
+                end_node.set(ex, ey, ez, current.g + dist_3d(current.x, current.y, current.z, ex, ey, ez), 0.0, current.x, current.y, current.z);
+                push(all_nodes, end_node);
+            };
+            if found == 1 {
+                // 已找到
+            } else {
+                // 展开邻居
+                let mut d = 0;
+                while d < 6 {
+                    let nx = current.x + dirs[d][0] * gs;
+                    let ny = current.y + dirs[d][1] * gs;
+                    let nz = current.z + dirs[d][2] * gs;
+
+                    // 边界检查
+                    if nx >= min_x - gs and nx <= max_x + gs and ny >= min_y - gs and ny <= max_y + gs and nz >= min_z - gs and nz <= max_z + gs {
+
+                        let nk = str(floor((nx + gs * 0.5) / gs)) + "," + str(floor((ny + gs * 0.5) / gs)) + "," + str(floor((nz + gs * 0.5) / gs));
+                        // 检查 nk 是否在 closed 中
+                        let mut nk_closed = 0;
+                        let mut cj = 0;
+                        while cj < len(closed_keys) {
+                            if closed_keys[cj] == nk { nk_closed = 1; };
+                            cj = cj + 1;
+                        };
+                        if nk_closed == 0 {
+                            // 碰撞检测
+                            let step_cost = dist_3d(current.x, current.y, current.z, nx, ny, nz);
+                            if point_collides(nx, ny, nz, obstacles, margin) == 0 {
+                                let ng = current.g + step_cost;
+                                let nh = dist_3d(nx, ny, nz, ex, ey, ez);
+                                let neighbor = RoutingNode();
+                                neighbor.set(nx, ny, nz, ng, nh, current.x, current.y, current.z);
+                                push(open_list, neighbor);
+                            };
+                        };
+                    };
+                    d = d + 1;
+                };
+            };
+        };
+    };
+
+    if found == 1 {
+        let path = rebuild_path(all_nodes, ex, ey, ez, sx, sy, sz);
+        return path;
+    };
+
+    // 未找到路径 — 返回空
+    let empty_path = [];
+    return empty_path;
+}
+
+// ═══════════════════════════════════════════
+// 路径后处理: 简化 (去除共线中间点)
+// ═══════════════════════════════════════════
+
+def simplify_path(path, obstacles, margin: Float) {
+    if len(path) <= 2 {
+        return path;
+    };
+    let mut result = [path[0]];
+    let mut i = 1;
+    while i < len(path) - 1 {
+        let prev = result[len(result) - 1];
+        let next = path[i + 1];
+        // 如果从 prev 直接到 next 不碰撞，跳过当前点
+        if segment_collides(prev, next, obstacles, margin) == 0 {
+            // 跳过 path[i]
+        } else {
+            push(result, path[i]);
+        };
+        i = i + 1;
+    };
+    push(result, path[len(path) - 1]);
+    return result;
+}
+
+// ═══════════════════════════════════════════
+// 路径→管段+弯头 转换
+// ═══════════════════════════════════════════
+
+def path_to_pipes(path, diameter: Float, thickness: Float) {
+    if len(path) < 2 {
+        let empty = [];
+        return empty;
+    };
+    let mut segments = [];
+    let mut elbows = [];
+    let elbow_radius = diameter * mm_to_m(1.5);  // 弯头半径 = 1.5×管径
+
+    let mut i = 0;
+    while i < len(path) - 1 {
+        let a = path[i];
+        let b = path[i + 1];
+
+        // 创建直管段
+        let seg = create_pipe(a, b, diameter, thickness);
+        push(segments, seg);
+
+        // 如果不是最后一段，创建弯头连接到下一段
+        if i < len(path) - 2 {
+            let c = path[i + 2];
+            let dir_in = a.to(b).normalize();
+            let dir_out = b.to(c).normalize();
+
+            // 只在不共线时创建弯头
+            let dot = dir_in.dot(dir_out);
+            if dot < 0.9999 {
+                let elbow = PipeElbow();
+                elbow.create(dir_in, dir_out, diameter, elbow_radius, b);
+                push(elbows, elbow);
+            };
+        };
+        i = i + 1;
+    };
+
+    // 返回 [segments列表, elbows列表]
+    return [segments, elbows];
+}
+
+// ═══════════════════════════════════════════
+// 路由总长计算
+// ═══════════════════════════════════════════
+
+def routing_total_length(segments, elbows) -> Float {
+    let mut total = 0.0;
+    let mut i = 0;
+    while i < len(segments) {
+        total = total + segments[i].length();
+        i = i + 1;
+    };
+    let mut j = 0;
+    while j < len(elbows) {
+        total = total + elbows[j].arc_length();
+        j = j + 1;
+    };
+    return total;
+}
+
+def routing_material_list(segments, elbows) {
+    let mut straight_total = 0.0;
+    let mut i = 0;
+    while i < len(segments) {
+        straight_total = straight_total + segments[i].length();
+        i = i + 1;
+    };
+    let mut elbow_total = 0.0;
+    let mut j = 0;
+    while j < len(elbows) {
+        elbow_total = elbow_total + elbows[j].arc_length();
+        j = j + 1;
+    };
+    print("直管合计: " + str(straight_total * 1000.0) + " mm");
+    print("弯头合计: " + str(elbow_total * 1000.0) + " mm (" + str(len(elbows)) + " 个)");
+    print("管段数: " + str(len(segments)) + " 段");
+    print("总长: " + str((straight_total + elbow_total) * 1000.0) + " mm");
+}

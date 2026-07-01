@@ -1,0 +1,62 @@
+// test_routing.intent — 管段自动路由测试
+import std.bim.geometry;
+import std.bim.pipe;
+import std.bim.pipe_routing;
+import std.bim.unit;
+
+// ═══ 测试1: 直连路由 (无障碍物) ═══
+let s1 = Point3D();
+s1.create(0.0, 0.0, 3.0);
+let e1 = Point3D();
+e1.create(5.0, 0.0, 3.0);
+let no_obs = [];
+
+let path1 = route_pipe(s1, e1, no_obs, 200.0, 0.5);
+print("Test1 直连: " + str(len(path1)) + " 个路点 (期望 2)");
+
+// ═══ 测试2: 需要绕行 ═══
+let s2 = Point3D();
+s2.create(0.0, 0.0, 3.0);
+let e2 = Point3D();
+e2.create(5.0, 0.0, 3.0);
+
+// 在中间放一个障碍物
+let obs_center = Point3D();
+obs_center.create(2.5, 0.0, 3.0);
+let obs_bbox = BBox3D();
+obs_bbox.set_empty();
+// 障碍物: 从 (2.0, -1.0, 2.5) 到 (3.0, 1.0, 3.5)
+let obs_min = Point3D();
+obs_min.create(2.0, -0.5, 2.5);
+let obs_max = Point3D();
+obs_max.create(3.0, 0.5, 3.5);
+obs_bbox.create(obs_min, obs_max);
+let obstacles = [obs_bbox];
+
+let path2 = route_pipe(s2, e2, obstacles, 200.0, 0.5);
+print("Test2 绕行: " + str(len(path2)) + " 个路点");
+
+// 打印路径
+let mut k = 0;
+while k < len(path2) {
+    let p = path2[k];
+    print("  [" + str(k) + "] (" + str(p.x) + ", " + str(p.y) + ", " + str(p.z) + ")");
+    k = k + 1;
+};
+
+// ═══ 测试3: 路径简化 + 转管段 ═══
+if len(path2) >= 2 {
+    let simp = simplify_path(path2, obstacles, 200.0 * mm_to_m(0.6));
+    print("Test3 简化后: " + str(len(simp)) + " 个路点 (原 " + str(len(path2)) + " 个)");
+
+    let parts = path_to_pipes(simp, 200.0, 10.0);
+    let segs = parts[0];
+    let elbows = parts[1];
+    print("  管段: " + str(len(segs)) + " 段");
+    print("  弯头: " + str(len(elbows)) + " 个");
+    let total = routing_total_length(segs, elbows);
+    print("  总长: " + str(total * 1000.0) + " mm");
+    routing_material_list(segs, elbows);
+};
+
+print("ALL ROUTING TESTS OK");

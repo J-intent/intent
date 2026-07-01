@@ -1,0 +1,16 @@
+import std.bim.pipe_routing;
+import std.bim.geometry;
+
+let s = Point3D();
+s.create(0.0, 0.0, 3.0);
+let e = Point3D();
+e.create(5.0, 0.0, 3.0);
+let obs = [];
+
+let path = route_pipe(s, e, obs, 200.0, 0.5);
+print("Path len: " + str(len(path)));
+if len(path) >= 2 {
+    print("Start: " + str(path[0].x) + ", " + str(path[0].y) + ", " + str(path[0].z));
+    print("End: " + str(path[1].x) + ", " + str(path[1].y) + ", " + str(path[1].z));
+};
+print("DONE");
