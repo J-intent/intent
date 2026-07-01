@@ -3405,7 +3405,11 @@ class Interpreter:
         value = args[0]
         if isinstance(value, (ListValue, StringValue, DictValue)):
             return IntValue(len(value.value))
-        raise TypeError(f"len() 不支持类型 {value.type}")
+        # 运算符重载: __len__()
+        if isinstance(value, InstanceValue):
+            method = value.get('__len__')
+            if method and isinstance(method, FunctionValue):
+                return self._execute_method(method, value, [])
 
     def _builtin_keys(self, args: List[RuntimeValue]) -> RuntimeValue:
         """内置keys函数:返回字典所有键"""
@@ -4590,7 +4594,19 @@ class Interpreter:
             return result
 
         if not isinstance(iterable, ListValue):
-            raise TypeError(f"for循环期望List或Dict,得到 {iterable.type}")
+            # 运算符重载: __iter__() 返回 ListValue
+            if isinstance(iterable, InstanceValue):
+                method = iterable.get('__iter__')
+                if method and isinstance(method, FunctionValue):
+                    result = self._execute_method(method, iterable, [])
+                    if isinstance(result, ListValue):
+                        iterable = result
+                    else:
+                        raise TypeError(f"__iter__() 必须返回列表,得到 {result.get_type()}")
+                else:
+                    raise TypeError(f"for 循环期望 List/Dict/有__iter__的对象,得到 {iterable.type}")
+            else:
+                raise TypeError(f"for 循环期望 List/Dict,得到 {iterable.type}")
 
         for item_idx, item in enumerate(iterable.value):
             # 进入循环体作用域
@@ -5301,6 +5317,11 @@ class Interpreter:
                     raise IndexError(f"字符串索引 {idx} 越界")
                 return StringValue(obj.value[idx])
             else:
+                # 运算符重载: __getitem__(index)
+                if isinstance(obj, InstanceValue):
+                    method = obj.get('__getitem__')
+                    if method and isinstance(method, FunctionValue):
+                        return self._execute_method(method, obj, [index])
                 raise TypeError(f"不支持对 {obj.get_type()} 类型使用下标访问 []")
 
         elif isinstance(expr, PipeExpr):

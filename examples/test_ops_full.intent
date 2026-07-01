@@ -1,0 +1,35 @@
+// 运算符重载综合测试: __len__ + __iter__ + __getitem__ + __str__
+class MyList {
+    def __init__() {
+        let mut items = [10, 20, 30];
+        this.items = items;
+    }
+
+    def __len__() -> Int {
+        return len(this.items);
+    }
+
+    def __getitem__(idx) -> Int {
+        return this.items[idx];
+    }
+
+    def __iter__() {
+        return this.items;
+    }
+
+    def __str__() -> String {
+        return "MyList(" + str(this.items) + ")";
+    }
+};
+
+let ml = MyList();
+print("str: ", ml);
+print("len: ", len(ml));
+print("ml[1]: ", ml[1]);
+
+let mut sum = 0;
+for x in ml {
+    sum = sum + x;
+};
+print("sum: ", sum);
+print("ALL OPS OK");
