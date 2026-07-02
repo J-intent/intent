@@ -5899,6 +5899,20 @@ class Interpreter:
                 elif op == '!=':
                     return BoolValue(left != right)
 
+            # List 比较
+            if isinstance(left, ListValue) and isinstance(right, ListValue):
+                if op == '==':
+                    if len(left.value) != len(right.value):
+                        return BoolValue(False)
+                    for lv, rv in zip(left.value, right.value):
+                        eq_result = self._binary_op(lv, '==', rv)
+                        if not eq_result.value:
+                            return BoolValue(False)
+                    return BoolValue(True)
+                elif op == '!=':
+                    eq_result = self._binary_op(left, '==', right)
+                    return BoolValue(not eq_result.value)
+
             # Dict 比较
             if isinstance(left, DictValue) and isinstance(right, DictValue):
                 if op == '==':
@@ -5907,6 +5921,7 @@ class Interpreter:
                     return BoolValue(left.value != right.value)
 
             # None 比较
+            if isinstance(left, NoneValue) and isinstance(right, NoneValue):
                 if op == '==':
                     return BoolValue(True)
                 elif op == '!=':
