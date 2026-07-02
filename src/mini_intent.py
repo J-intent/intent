@@ -1866,7 +1866,7 @@ class Parser:
         return expr
 
     def parse_comparison(self) -> Expression:
-        """解析比较表达式"""
+        """解析比较表达式，支持 in / not in"""
         expr = self.parse_addition()
 
         while ((self.match(TokenType.OPERATOR) and self.current_token.value in ('==', '!=', '<', '>', '<=', '>='))
@@ -1875,6 +1875,18 @@ class Parser:
             self.advance()
             right = self.parse_addition()
             expr = BinaryOp(left=expr, op=op_token.value, right=right, line=op_token.line, column=op_token.column)
+        
+        # not in 需要特殊处理（是两个字的关键词）
+        if self.match(TokenType.KEYWORD, 'not'):
+            # 检查是否紧跟着 in
+            saved = self.current_token
+            self.advance()  # 消费 not
+            if self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'in':
+                self.advance()  # 消费 in
+                right = self.parse_addition()
+                expr = BinaryOp(left=expr, op='not in', right=right, line=saved.line, column=saved.column)
+            else:
+                self.error(saved, "'not' 后面期望 'in'（not in 操作）")
 
         return expr
 
@@ -5967,6 +5979,11 @@ class Interpreter:
             elif isinstance(right, DictValue):
                 return BoolValue(right.has_key(left))
             raise TypeError(f"'in' 操作符右侧期望列表或字典,得到 {right.type}")
+
+        elif op == 'not in':
+            # x not in list / key not in dict
+            result = self._binary_op(left, 'in', right)
+            return BoolValue(not result.value)
 
         elif op in ('==', '!=', '<', '>', '<=', '>='):
             if isinstance(left, (IntValue, FloatValue)) and isinstance(right, (IntValue, FloatValue)):
