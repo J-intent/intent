@@ -3496,6 +3496,7 @@ class Interpreter:
             'replace': self._builtin_replace,
             'to_upper': self._builtin_to_upper,
             'to_lower': self._builtin_to_lower,
+            'substr': self._builtin_substr,
             'ord': self._builtin_ord,
             'chr': self._builtin_chr,
             # sys
@@ -4208,6 +4209,22 @@ class Interpreter:
         if len(args) != 1 or not isinstance(args[0], StringValue):
             raise TypeError("to_lower() 期望1个String参数")
         return StringValue(args[0].value.lower())
+
+    def _builtin_substr(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """substr(s: String, start: Int, end: Int) → String — 取子串 s[start..end)"""
+        if len(args) != 3:
+            raise TypeError(f"substr() 期望3个参数(字符串, 起始, 结束),得到 {len(args)}个")
+        if not isinstance(args[0], StringValue):
+            raise TypeError("substr() 第1个参数必须是String")
+        start = int(args[1].value)
+        end = int(args[2].value)
+        s = args[0].value
+        n = len(s)
+        if start < 0:
+            start = n + start
+        if end < 0:
+            end = n + end
+        return StringValue(s[max(0, start):min(n, end)])
 
     # ══ sys ──
     def _builtin_version(self, args: List[RuntimeValue]) -> RuntimeValue:
