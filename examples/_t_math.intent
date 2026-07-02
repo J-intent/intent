@@ -1,0 +1,6 @@
+print("round(3.7): ", round(3.7));
+print("round(2.1): ", round(2.1));
+print("log(e): ", log(2.718281828));
+print("log(100, 10): ", log(100, 10));
+print("exp(1): ", exp(1));
+print("MATH OK");

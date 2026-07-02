@@ -3412,6 +3412,9 @@ class Interpreter:
             'pow': self._builtin_pow,
             'floor': self._builtin_floor,
             'ceil': self._builtin_ceil,
+            'round': self._builtin_round,
+            'log': self._builtin_log,
+            'exp': self._builtin_exp,
             # 三角函数
             'cos': self._builtin_cos,
             'sin': self._builtin_sin,
@@ -3972,6 +3975,29 @@ class Interpreter:
         if len(args) != 1:
             raise TypeError(f"ceil() 期望1个参数,得到 {len(args)}个")
         return IntValue(int(math.ceil(float(args[0].value))))
+
+    def _builtin_round(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """round(x: Float) — 四舍五入"""
+        if len(args) != 1:
+            raise TypeError(f"round() 期望1个参数,得到 {len(args)}个")
+        return IntValue(int(round(float(args[0].value))))
+
+    def _builtin_log(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """log(x: Float, base: Float = e) — 对数"""
+        import math
+        if len(args) < 1 or len(args) > 2:
+            raise TypeError(f"log() 期望1-2个参数,得到 {len(args)}个")
+        x = float(args[0].value)
+        if len(args) == 2:
+            return FloatValue(math.log(x, float(args[1].value)))
+        return FloatValue(math.log(x))
+
+    def _builtin_exp(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """exp(x: Float) — e^x"""
+        import math
+        if len(args) != 1:
+            raise TypeError(f"exp() 期望1个参数,得到 {len(args)}个")
+        return FloatValue(math.exp(float(args[0].value)))
 
 
     # ══ 三角函数 (math) ──
