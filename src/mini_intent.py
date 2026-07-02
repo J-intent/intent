@@ -5899,8 +5899,14 @@ class Interpreter:
                 elif op == '!=':
                     return BoolValue(left != right)
 
+            # Dict 比较
+            if isinstance(left, DictValue) and isinstance(right, DictValue):
+                if op == '==':
+                    return BoolValue(left.value == right.value)
+                elif op == '!=':
+                    return BoolValue(left.value != right.value)
+
             # None 比较
-            if isinstance(left, NoneValue) and isinstance(right, NoneValue):
                 if op == '==':
                     return BoolValue(True)
                 elif op == '!=':

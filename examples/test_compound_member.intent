@@ -1,0 +1,16 @@
+class Vec {
+    def __init__(x, y) {
+        this.x = x;
+        this.y = y;
+    }
+    def __str__() -> String {
+        return "Vec(" + str(this.x) + ", " + str(this.y) + ")";
+    }
+};
+
+let v = Vec(10, 20);
+print("init: ", v);
+v.x += 5;
+v.y *= 2;
+print("after: ", v);
+print("COMPOUND MEMBER OK");
