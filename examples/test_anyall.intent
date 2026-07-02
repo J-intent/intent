@@ -1,0 +1,12 @@
+let xs = [1, 2, 3, 4, 5];
+let has_gt3 = any([x > 3 for x in xs]);
+print("any >3: ", has_gt3);
+let all_pos = all([x > 0 for x in xs]);
+print("all >0: ", all_pos);
+let all_gt3 = all([x > 3 for x in xs]);
+print("all >3: ", all_gt3);
+let has_10 = contains(xs, 10);
+print("contains 10: ", has_10);
+let has_3 = contains(xs, 3);
+print("contains 3: ", has_3);
+print("ANY/ALL OK");

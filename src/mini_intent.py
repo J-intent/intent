@@ -3388,6 +3388,9 @@ class Interpreter:
             'sum': self._builtin_sum,
             'reversed': self._builtin_reversed,
             'sorted': self._builtin_sorted,
+            'any': self._builtin_any,
+            'all': self._builtin_all,
+            'contains': self._builtin_contains,
             'type_of': self._builtin_type_of,
             'int': self._builtin_int,
             'float': self._builtin_float,
@@ -3615,6 +3618,34 @@ class Interpreter:
         if len(args) < 1 or not isinstance(args[0], ListValue):
             raise TypeError("sorted() 期望1个List参数")
         return ListValue(sorted(args[0].value, key=lambda x: x.value), args[0].type.element_type)
+
+    def _builtin_any(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置any函数: 列表中任一为真"""
+        if len(args) != 1 or not isinstance(args[0], ListValue):
+            raise TypeError("any() 期望1个List参数")
+        for v in args[0].value:
+            if v.to_bool():
+                return BoolValue(True)
+        return BoolValue(False)
+
+    def _builtin_all(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置all函数: 列表全部为真"""
+        if len(args) != 1 or not isinstance(args[0], ListValue):
+            raise TypeError("all() 期望1个List参数")
+        for v in args[0].value:
+            if not v.to_bool():
+                return BoolValue(False)
+        return BoolValue(True)
+
+    def _builtin_contains(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置contains函数: contains(list, item) → Bool"""
+        if len(args) != 2 or not isinstance(args[0], ListValue):
+            raise TypeError("contains() 期望(List, item)")
+        target = args[1]
+        for v in args[0].value:
+            if v.value == target.value:
+                return BoolValue(True)
+        return BoolValue(False)
 
     def _builtin_type_of(self, args: List[RuntimeValue]) -> RuntimeValue:
         """内置type_of函数:返回值的类型名"""
