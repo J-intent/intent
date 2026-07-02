@@ -1,0 +1,26 @@
+let mut arr = [1, 2, 3, 4, 5];
+arr[0] = 99;
+print("arr[0]=99: ", arr);
+
+class Counter {
+    def __init__() {
+        let mut data = {"count": 0};
+        this.data = data;
+    }
+    def __getitem__(key) {
+        return this.data[key];
+    }
+    def __setitem__(key, val) {
+        this.data[key] = val;
+    }
+    def __str__() -> String {
+        return "Counter(" + str(this.data) + ")";
+    }
+};
+
+let c = Counter();
+print("c init: ", c["count"]);
+c["count"] = 5;
+print("c after: ", c["count"]);
+print(c);
+print("SUBSCRIPT ASSIGN OK");

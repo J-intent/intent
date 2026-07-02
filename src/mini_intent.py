@@ -469,6 +469,14 @@ class MemberAssignment(ASTNode):
     op: str = "="  # =, +=, -=, 等
 
 @dataclass
+class SubscriptAssignment(ASTNode):
+    """下标赋值: obj[key] = value 或 obj[key] += value"""
+    obj: 'Expression' = None
+    index: 'Expression' = None
+    value: 'Expression' = None
+    op: str = "="  # =, +=, -=, 等
+
+@dataclass
 class ReturnStmt(ASTNode):
     """返回语句"""
     value: Optional['Expression'] = None
@@ -1142,6 +1150,9 @@ class Parser:
            self.pos + 3 < len(self.tokens) and self.tokens[self.pos + 3].value in ('=', '+=', '-=', '*=', '/=', '%=', '**='):
             return self.parse_member_assignment()
 
+        # 下标赋值语句: obj[key] = value (由 parse_expression 后的表达式语句分支处理)
+        # 无需单独检测——parse_expression 返回 SubscriptExpr 后再检查赋值
+
         # 赋值语句
         if self.match(TokenType.IDENTIFIER) and self.peek().value in ('=', '+=', '-=', '*=', '/=', '%=', '**=', '//='):
             return self.parse_assignment()
@@ -1151,8 +1162,20 @@ class Parser:
             return self.parse_expression_stmt()
 
         # 表达式语句
+        saved_pos = self.pos
+        saved_token = self.current_token
         expr = self.parse_expression()
         if expr:
+            # 下标赋值检测: SubscriptExpr 后跟赋值操作符
+            if isinstance(expr, SubscriptExpr) and self.current_token and self.current_token.value in ('=', '+=', '-=', '*=', '/=', '%=', '**=', '//='):
+                op = self.current_token.value
+                self.advance()
+                value = self.parse_expression()
+                self.expect(TokenType.SYMBOL, ';')
+                return SubscriptAssignment(
+                    obj=expr.obj, index=expr.index, value=value, op=op,
+                    line=expr.line, column=expr.column
+                )
             # 跳过后续换行 → 函数体末尾的表达式允许省略分号
             while self.match(TokenType.NEWLINE):
                 self.advance()
@@ -1720,6 +1743,44 @@ class Parser:
         self.expect(TokenType.SYMBOL, '}')
 
         return stmt
+
+    def _is_subscript_assignment(self) -> bool:
+        """前瞻检查: 从当前位置往后, ] 之后是否是赋值操作符?"""
+        saved = self.pos
+        bracket_depth = 0
+        try:
+            while self.pos < len(self.tokens):
+                tok = self.tokens[self.pos]
+                if tok.value == '[':
+                    bracket_depth += 1
+                elif tok.value == ']':
+                    bracket_depth -= 1
+                    if bracket_depth == 0:
+                        # 找到匹配的 ], 检查下一个
+                        if self.pos + 1 < len(self.tokens):
+                            nxt = self.tokens[self.pos + 1].value
+                            return nxt in ('=', '+=', '-=', '*=', '/=', '%=', '**=', '//=')
+                        break
+                self.pos += 1
+            return False
+        finally:
+            self.pos = saved
+
+    def parse_subscript_assignment(self) -> 'SubscriptAssignment':
+        """解析下标赋值: obj[key] = value"""
+        start_token = self.current_token
+        obj_name = self.expect(TokenType.IDENTIFIER).value
+        obj = Variable(name=obj_name, line=start_token.line, column=start_token.column)
+        self.expect(TokenType.SYMBOL, '[')
+        index = self.parse_expression()
+        self.expect(TokenType.SYMBOL, ']')
+        op_token = self.expect(TokenType.OPERATOR)
+        value = self.parse_expression()
+        self.expect(TokenType.SYMBOL, ';')
+        return SubscriptAssignment(
+            obj=obj, index=index, value=value, op=op_token.value,
+            line=start_token.line, column=start_token.column
+        )
 
     def parse_assignment(self) -> Assignment:
         """解析赋值语句"""
@@ -4215,6 +4276,8 @@ class Interpreter:
             return self.execute_assignment(stmt)
         elif isinstance(stmt, MemberAssignment):
             return self.execute_member_assignment(stmt)
+        elif isinstance(stmt, SubscriptAssignment):
+            return self.execute_subscript_assignment(stmt)
         elif isinstance(stmt, ReturnStmt):
             return self.execute_return(stmt)
         elif isinstance(stmt, PrintStmt):
@@ -4426,6 +4489,64 @@ class Interpreter:
             obj_val.fields[stmt.member] = new_val
         
         return value
+
+    def execute_subscript_assignment(self, stmt: SubscriptAssignment) -> RuntimeValue:
+        """执行下标赋值: obj[key] = value"""
+        obj_val = self.evaluate_expression(stmt.obj)
+        index = self.evaluate_expression(stmt.index)
+        value = self.evaluate_expression(stmt.value)
+
+        # 原生类型: List 和 Dict
+        if isinstance(obj_val, ListValue):
+            idx = index.value
+            if idx < 0:
+                idx = len(obj_val.value) + idx
+            if idx < 0 or idx >= len(obj_val.value):
+                raise IndexError(f"列表索引 {idx} 越界")
+            if stmt.op == "=":
+                obj_val.value[idx] = value
+            else:
+                old_val = obj_val.value[idx]
+                if stmt.op == "+=":
+                    new_val = self._binary_op(old_val, "+", value)
+                elif stmt.op == "-=":
+                    new_val = self._binary_op(old_val, "-", value)
+                elif stmt.op == "*=":
+                    new_val = self._binary_op(old_val, "*", value)
+                elif stmt.op == "/=":
+                    new_val = self._binary_op(old_val, "/", value)
+                else:
+                    raise RuntimeError(f"不支持的下标赋值操作符: {stmt.op}")
+                obj_val.value[idx] = new_val
+            return value
+
+        if isinstance(obj_val, DictValue):
+            if stmt.op == "=":
+                obj_val.value[index.value] = value
+            else:
+                old_val = obj_val.value.get(index.value)
+                if old_val is None:
+                    raise KeyError(f"字典中没有键 '{index.value}'")
+                if stmt.op == "+=":
+                    new_val = self._binary_op(old_val, "+", value)
+                elif stmt.op == "-=":
+                    new_val = self._binary_op(old_val, "-", value)
+                elif stmt.op == "*=":
+                    new_val = self._binary_op(old_val, "*", value)
+                elif stmt.op == "/=":
+                    new_val = self._binary_op(old_val, "/", value)
+                else:
+                    raise RuntimeError(f"不支持的下标赋值操作符: {stmt.op}")
+                obj_val.value[index.value] = new_val
+            return value
+
+        # 运算符重载: __setitem__(key, value)
+        if isinstance(obj_val, InstanceValue):
+            method = obj_val.get('__setitem__')
+            if method and isinstance(method, FunctionValue):
+                return self._execute_method(method, obj_val, [index, value])
+
+        raise TypeError(f"不支持对 {obj_val.get_type()} 类型使用下标赋值 []")
 
     def execute_assignment(self, stmt: Assignment) -> RuntimeValue:
         """执行赋值语句"""
