@@ -1,0 +1,6 @@
+print("starts: ", starts_with("hello", "he"));
+print("ends: ", ends_with("hello", "lo"));
+print("replace: ", replace("hello world", "world", "intent"));
+print("upper: ", to_upper("hello"));
+print("lower: ", to_lower("HELLO"));
+print("STRING OPS OK");

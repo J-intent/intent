@@ -3433,6 +3433,11 @@ class Interpreter:
             'split': self._builtin_split,
             'join': self._builtin_join,
             'trim': self._builtin_trim,
+            'starts_with': self._builtin_starts_with,
+            'ends_with': self._builtin_ends_with,
+            'replace': self._builtin_replace,
+            'to_upper': self._builtin_to_upper,
+            'to_lower': self._builtin_to_lower,
             'ord': self._builtin_ord,
             'chr': self._builtin_chr,
             # sys
@@ -4115,6 +4120,36 @@ class Interpreter:
         if len(args) != 1:
             raise TypeError(f"chr() 期望1个参数,得到 {len(args)}个")
         return StringValue(chr(int(args[0].value)))
+
+    def _builtin_starts_with(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """starts_with(s: String, prefix: String) → Bool"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) or not isinstance(args[1], StringValue):
+            raise TypeError("starts_with() 期望2个String参数")
+        return BoolValue(args[0].value.startswith(args[1].value))
+
+    def _builtin_ends_with(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """ends_with(s: String, suffix: String) → Bool"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) or not isinstance(args[1], StringValue):
+            raise TypeError("ends_with() 期望2个String参数")
+        return BoolValue(args[0].value.endswith(args[1].value))
+
+    def _builtin_replace(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """replace(s: String, old: String, new: String) → String"""
+        if len(args) != 3 or not all(isinstance(a, StringValue) for a in args):
+            raise TypeError("replace() 期望3个String参数")
+        return StringValue(args[0].value.replace(args[1].value, args[2].value))
+
+    def _builtin_to_upper(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """to_upper(s: String) → String"""
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("to_upper() 期望1个String参数")
+        return StringValue(args[0].value.upper())
+
+    def _builtin_to_lower(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """to_lower(s: String) → String"""
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("to_lower() 期望1个String参数")
+        return StringValue(args[0].value.lower())
 
     # ══ sys ──
     def _builtin_version(self, args: List[RuntimeValue]) -> RuntimeValue:
