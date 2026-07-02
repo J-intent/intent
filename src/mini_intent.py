@@ -2242,28 +2242,53 @@ class Parser:
         self.expect(TokenType.SYMBOL, ']')
         return expr
 
-    def parse_dict_expr(self) -> 'DictExpr':
-        """解析字典表达式 {key: value, ...}"""
+    def parse_dict_expr(self) -> 'Expression':
+        """解析字典表达式 {key: value, ...} 或 字典推导式 {k: v for x in items}"""
         start_token = self.expect(TokenType.SYMBOL, '{')
-        expr = DictExpr(line=start_token.line, column=start_token.column)
 
         self._skip_newlines()
-        if not self.match(TokenType.SYMBOL, '}'):
+        
+        # 空字典
+        if self.match(TokenType.SYMBOL, '}'):
+            self.advance()
+            return DictExpr(entries=[], line=start_token.line, column=start_token.column)
+        
+        # 解析第一个 key: value
+        key = self.parse_expression()
+        self.expect(TokenType.SYMBOL, ':')
+        self._skip_newlines()
+        value = self.parse_expression()
+        
+        # 推导式检测: 如果下一个 token 是 for，则是字典推导式
+        if self.match(TokenType.KEYWORD, 'for'):
+            self.advance()
+            var_name = self.expect(TokenType.IDENTIFIER).value
+            self.expect(TokenType.KEYWORD, 'in')
+            iterable = self.parse_expression()
+            condition = None
+            if self.match(TokenType.KEYWORD, 'if'):
+                self.advance()
+                condition = self.parse_expression()
+            self._skip_newlines()
+            self.expect(TokenType.SYMBOL, '}')
+            return DictCompExpr(
+                key_expr=key, value_expr=value,
+                var_name=var_name, iterable=iterable, condition=condition,
+                line=start_token.line, column=start_token.column
+            )
+        
+        # 普通字典
+        expr = DictExpr(entries=[(key, value)], line=start_token.line, column=start_token.column)
+        while self.match(TokenType.SYMBOL, ','):
+            self.advance()
+            self._skip_newlines()
+            if self.match(TokenType.SYMBOL, '}'):
+                break  # trailing comma
             key = self.parse_expression()
             self.expect(TokenType.SYMBOL, ':')
             self._skip_newlines()
             value = self.parse_expression()
             expr.entries.append((key, value))
-            while self.match(TokenType.SYMBOL, ','):
-                self.advance()
-                self._skip_newlines()
-                if self.match(TokenType.SYMBOL, '}'):
-                    break  # trailing comma
-                key = self.parse_expression()
-                self.expect(TokenType.SYMBOL, ':')
-                self._skip_newlines()
-                value = self.parse_expression()
-                expr.entries.append((key, value))
 
         self._skip_newlines()
         self.expect(TokenType.SYMBOL, '}')
@@ -2280,6 +2305,15 @@ class ListCompExpr(Expression):
     element: Expression = None  # 循环体表达式
     var_name: str = ""  # 循环变量名
     iterable: Expression = None  # 可迭代对象
+    condition: Expression = None  # 可选 if 条件
+
+@dataclass
+class DictCompExpr(Expression):
+    """字典推导式 {k: v for x in items if cond}"""
+    key_expr: Expression = None
+    value_expr: Expression = None
+    var_name: str = ""
+    iterable: Expression = None
     condition: Expression = None  # 可选 if 条件
 
 @dataclass
@@ -5781,6 +5815,31 @@ class Interpreter:
                 element_type = IntType()
             
             return ListValue(result_elements, element_type)
+
+        elif isinstance(expr, DictCompExpr):
+            # 字典推导式 {k: v for x in items if cond}
+            iterable = self.evaluate_expression(expr.iterable, context)
+            if not isinstance(iterable, ListValue):
+                raise TypeError(f"推导式期望列表,得到 {iterable.type}")
+            
+            entries = {}
+            for item in iterable.value:
+                old_scope = self.current_scope
+                self.current_scope = self.current_scope.enter()
+                self.current_scope.declare(expr.var_name, item.copy(), False)
+                
+                if expr.condition is not None:
+                    cond_val = self.evaluate_expression(expr.condition, context)
+                    if isinstance(cond_val, BoolValue) and not cond_val.value:
+                        self.current_scope = old_scope
+                        continue
+                
+                key_val = self.evaluate_expression(expr.key_expr, context)
+                value_val = self.evaluate_expression(expr.value_expr, context)
+                entries[key_val] = value_val
+                self.current_scope = old_scope
+            
+            return DictValue(entries, StringType(), AnyType())
 
         elif isinstance(expr, ListExpr):
             elements = [self.evaluate_expression(elem, context) for elem in expr.elements]
