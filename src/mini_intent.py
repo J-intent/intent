@@ -1869,7 +1869,8 @@ class Parser:
         """解析比较表达式"""
         expr = self.parse_addition()
 
-        while self.match(TokenType.OPERATOR) and self.current_token.value in ('==', '!=', '<', '>', '<=', '>='):
+        while ((self.match(TokenType.OPERATOR) and self.current_token.value in ('==', '!=', '<', '>', '<=', '>='))
+               or (self.match(TokenType.KEYWORD, 'in'))):
             op_token = self.current_token
             self.advance()
             right = self.parse_addition()
@@ -2778,6 +2779,17 @@ class DictValue(RuntimeValue):
 
     def set(self, key, value: RuntimeValue):
         self.value[key] = value
+
+    def has_key(self, key) -> bool:
+        """检查 key 是否在字典中"""
+        raw_key = key
+        if isinstance(key, (StringValue, IntValue, FloatValue, BoolValue)):
+            raw_key = key.value
+        for k, v in self.value.items():
+            if (isinstance(k, (StringValue, IntValue, FloatValue, BoolValue))
+                    and k.value == raw_key):
+                return True
+        return False
 
     def to_bool(self) -> bool:
         return len(self.value) > 0
@@ -5944,6 +5956,18 @@ class Interpreter:
                     return FloatValue(float(result))
 
         # 比较运算
+        elif op == 'in':
+            # x in list / key in dict
+            if isinstance(right, ListValue):
+                for elem in right.value:
+                    eq_result = self._binary_op(left, '==', elem)
+                    if eq_result.value:
+                        return BoolValue(True)
+                return BoolValue(False)
+            elif isinstance(right, DictValue):
+                return BoolValue(right.has_key(left))
+            raise TypeError(f"'in' 操作符右侧期望列表或字典,得到 {right.type}")
+
         elif op in ('==', '!=', '<', '>', '<=', '>='):
             if isinstance(left, (IntValue, FloatValue)) and isinstance(right, (IntValue, FloatValue)):
                 left_val = left.value
