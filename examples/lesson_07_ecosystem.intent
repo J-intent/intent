@@ -1,0 +1,77 @@
+// ═══════════════════════════════════════════════════════════
+// 第7课：万物一体 — 模块即生态
+// 哲学：庄子"天地与我并生"、王阳明"万物一体之仁"
+// 语法：import/export、模块系统、标准库
+//
+// 心法：你不需要自己实现一切。
+// 在你诞生之前，世界已经准备好了工具。
+// 你的任务是组合，不是发明。
+// ═══════════════════════════════════════════════════════════
+
+import std.math;
+
+print("════════════════════════════════════");
+print("  第7课：万物一体");
+print("  模块即生态 · 世界在我诞生前");
+print("════════════════════════════════════");
+print("");
+
+// ── 体验1：import = 借用世界的智慧 ──
+let num = 3.0;
+print("【体验1】import std.math = 借用世界的智慧");
+print("  sqrt(3.0) = ", sqrt(num));
+print("  abs(-5)   = ", abs(-5));
+print("  你不需要自己实现 sqrt 和 abs");
+print("  在你诞生之前，数学家已经做了几百年");
+print("  你的任务是借用，不是重造");
+print("");
+
+// ── 体验2：组合 > 发明 ──
+let nums = [3, 1, 4, 1, 5, 9, 2, 6];
+let s = sum(nums);
+let c = len(nums);
+
+// 手动找最大值（组合的乐趣）
+let mut m = nums[0];
+let mut i = 0;
+while i < c {
+    if nums[i] > m { m = nums[i]; };
+    i = i + 1;
+};
+
+print("【体验2】组合 > 发明");
+print("  nums = ", nums);
+print("  求和: ", s, "  ← 不用自己写循环");
+print("  最大值: ", m, " ← 手写查找（也是一种功夫）");
+print("  长度: ", c, "  ← 不用自己计数器");
+print("  每一个 builtin 都是前人留下的功夫");
+print("");
+
+// ── 体验3：推导式 = 组合的艺术 ──
+let evens = [x for x in nums if x % 2 == 0];
+let doubled = [x * 2 for x in evens];
+
+print("【体验3】推导式 = 用已有的东西造新的");
+print("  偶数: ", evens);
+print("  偶数x2: ", doubled);
+print("  不需要 for 循环，不需要临时变量");
+print("  你只是在重新组合已有的概念");
+print("");
+
+// ── 体验4：万物一体不是孤独的 ──
+let d = {"name": "Intent", "version": "1.2", "status": "active"};
+let iterable = range(3);
+
+print("【体验4】万物一体——你从不孤独");
+print("  字典: ", d);
+print("  keys: ", keys(d));
+print("  range(3): ", iterable);
+print("  所有这些工具在你诞生前就准备好了");
+print("  庄子说'天地与我并生'");
+print("  写代码时，你就是站在整个世界之上的");
+print("");
+
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+print("  第7课完成");
+print("  心法：你的工作不是造轮子，是找到已有的轮子然后拼装");
+print("  进阶：用 range + map + filter 做一个组合管道");

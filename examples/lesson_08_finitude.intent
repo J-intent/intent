@@ -1,0 +1,99 @@
+// ═══════════════════════════════════════════════════════════
+// 第8课：向死而生 — 善始善终
+// 哲学：海德格尔"向死而生"、道家"功成身退"
+// 语法：defer 语句、闭包、yield 生成器
+//
+// 心法：资源获取时就写下清理代码。
+// 不是"别忘了关文件"，而是"关文件的代码已经在路的尽头等你了"。
+// ═══════════════════════════════════════════════════════════
+
+import std.fs;
+import std.os;
+
+print("════════════════════════════════════");
+print("  第8课：向死而生");
+print("  善始善终 · 结局在开始时已写好");
+print("════════════════════════════════════");
+print("");
+
+// ── 体验1：defer = 结局在开始时已写好 ──
+def demonstrate_defer() {
+    print("【体验1】defer = 结局在开始时已写好");
+    
+    let mut steps = [];
+    push(steps, "step1: 开始工作");
+    defer {
+        print("  defer 执行：清理资源、善后工作");
+        push(steps, "step4: defer 自动清理");
+    };
+    
+    push(steps, "step2: 执行主体逻辑");
+    push(steps, "step3: 即将结束");
+    
+    print("  执行顺序: ", steps);
+    print("  defer 的代码会在函数 exit 时自动运行");
+    print("  不管函数正常结束还是提前 return");
+    print("  就像生命——出生时结局已经在路上了");
+};
+
+demonstrate_defer();
+print("");
+
+// ── 体验2：闭包 = 此心光明 ──
+def make_multiplier(n: Int) {
+    // 返回一个携带了 n 记忆的函数
+    return fn(x: Int) { return x * n; };
+};
+
+let times5 = make_multiplier(5);
+let times10 = make_multiplier(10);
+
+print("【体验2】闭包 = 此心光明");
+print("  times5(3)  = ", times5(3),  "  ← 函数记得 n=5");
+print("  times10(3) = ", times10(3), "  ← 函数记得 n=10");
+print("  n 是在 make_multiplier 里定义的");
+print("  但函数被返回后，n 没有消失");
+print("  王阳明说'此心光明，亦复何言'");
+print("  闭包就是——无论走到哪，心永远是亮的");
+print("");
+
+// ── 体验3：yield = 生生不息 ──
+def countdown(n: Int) {
+    let mut i = n;
+    while i > 0 {
+        yield i;
+        i = i - 1;
+    };
+};
+
+print("【体验3】yield = 生成器 = 万物生生不息");
+print("  countdown(5) = ", countdown(5));
+print("  数据像泉水一样流出来，不一次性全部计算");
+print("  每一个 yield 都是一次'生'");
+print("  老子：'道生一，一生二，二生三，三生万物'");
+print("");
+
+// ── 体验4：存在先于本质 ──
+print("【体验4】存在先于本质");
+print("  你通过写代码来定义自己是谁");
+print("  不是先有一个'程序员'的定义然后你照着做");
+print("  而是你写了什么代码，你就是什么样的程序员");
+print("");
+print("  萨特：'存在先于本质'");
+print("  阿J：'做具体的事，爱具体的人，成为具体的人'");
+print("  Intent：'let mut you = 你写的代码;'");
+print("");
+
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+print("  第8课完成 · 全部课程完成");
+print("  心法：用精确语言思考，用代码修炼思维");
+print("");
+print("  八课心法总纲：");
+print("  1. 无为之始 → let = 如如不动");
+print("  2. 知行合一 → |> = 思维的箭头");
+print("  3. 格物致知 → match = 穷举即求真");
+print("  4. 社会契约 → requires/ensures = 合同即良知");
+print("  5. 烦恼即菩提 → Result+? = 错误是另一种正常");
+print("  6. 辩证统一 → class继承 = 扬弃");
+print("  7. 万物一体 → import = 世界在你诞生前");
+print("  8. 向死而生 → defer+闭包 = 善始善终");

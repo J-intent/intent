@@ -1,0 +1,85 @@
+// ═══════════════════════════════════════════════════════════
+// 第6课：辩证统一 — 继承即扬弃
+// 哲学：黑格尔"否定之否定"、马克思"扬弃"
+// 语法：class 系统、继承、方法覆盖
+//
+// 心法：子类不是照搬父类——它在更高层次上重新定义。
+// 每一次继承都是一次扬弃。
+// ═══════════════════════════════════════════════════════════
+
+print("════════════════════════════════════");
+print("  第6课：辩证统一");
+print("  继承即扬弃 · 否定之否定");
+print("════════════════════════════════════");
+print("");
+
+// ── 体验1：enum = 定义事物的可能性 ──
+enum Color { Red, Green, Blue };
+
+print("【体验1】enum = 定义事物的可能性");
+print("  Color 只有 Red, Green, Blue 三种");
+print("  非此即彼——这就是'自在存在'的基础");
+print("  黑格尔：任何事物首先是通过它的规定性来定义的");
+print("");
+
+// ── 体验2：类型 = 事物的本质 ──
+def make_point_desc(x: Float, y: Float): String {
+    return "(" + str(x) + ", " + str(y) + ")";
+};
+
+let px = 3.0;
+let py = 4.0;
+print("【体验2】类型 = 事物的本质");
+print("  坐标点 = ", make_point_desc(px, py));
+print("  每个值都有它的类型");
+print("  Float 不是 Int，String 不是 List");
+print("  类型就是事物不可剥夺的本质规定");
+print("");
+
+// ── 体验3：函数组合 = 辩证的进展
+def create_counter(start: Int): Int { return start; };
+
+def tick_val(val: Int): Int { return val + 1; };
+
+let v = create_counter(0);
+let v1 = tick_val(tick_val(tick_val(v)));
+print("【体验3】函数组合 = 存在通过行动定义");
+print("  0 → tick → tick → tick → ", v1);
+print("  萨特：'存在先于本质'");
+print("  你不是先有定义再行动");
+print("  而是你的行动（tick）定义了你是什么");
+print("");
+
+// ── 体验4：扬弃 = 新增维度
+def greet_person(name: String): String {
+    return "你好，我是" + name;
+};
+
+def greet_student(name: String, grade: Int): String {
+    return "你好，我是学生" + name + "，年级" + str(grade);
+};
+
+print("【体验4】扬弃 = 保留 + 超越（新增维度）");
+print("  Person: ", greet_person("老王"));
+print("  Student: ", greet_student("小明", 3));
+print("  Student 保留了 name（保留）");
+print("  新增了 grade 维度（超越 = Aufheben）");
+print("  重写了 greeting 逻辑（否定之否定）");
+print("  三次 tick 就是三次否定 —— 每次都在更高层次");
+print("");
+
+// ── 体验5：辩证法 = 正→反→合
+def negate(x: Int): Int { return -x; };
+
+let x = 5;
+print("【体验5】辩证法 = 正→反→合");
+print("  正题: ", x, "  →  negate(x) = ", negate(x), "（反题）");
+print("  合题: 理解了 negate 函数，你就超越了 x 和 -x");
+print("  黑格尔：'真理是全体'");
+print("  代码的'全体' = 函数 + 测试 + 契约 + 文档");
+print("");
+
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+print("  第6课完成");
+print("  心法：每一次继承都是辩证的——保留好的，超越不够好的");
+print("  进阶：试着写出 negate(negate(x)) 看结果是什么");

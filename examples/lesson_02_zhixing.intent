@@ -1,0 +1,70 @@
+// ═══════════════════════════════════════════════════════════
+// 第2课：知行合一 — 管道即认知流
+// 哲学：王阳明"知行合一"、庄子"庖丁解牛"
+// 语法：|> 管道、函数定义、Lambda
+//
+// 心法：数据从左到右穿过每个函数。
+// 你不嵌套调用，你顺着数据的流动方向思考。
+// ═══════════════════════════════════════════════════════════
+
+print("════════════════════════════════════");
+print("  第2课：知行合一");
+print("  管道即认知流 · |> 是思维的箭头");
+print("════════════════════════════════════");
+print("");
+
+// ── 体验1：定义意图（def = 功夫） ──
+def double(x: Int): Int { return x * 2; };
+def add_one(x: Int): Int { return x + 1; };
+
+def is_even(x: Int): Int {
+    if x % 2 == 0 { return 1; };
+    return 0;
+};
+
+print("【体验1】def = 定义你的功夫");
+print("  我定义了三个功夫：double, add_one, is_even");
+print("  double(5) = ", double(5));
+print("  add_one(5) = ", add_one(5));
+print("  is_even(4) = ", is_even(4));
+print("  功夫是在事上磨炼出来的技艺");
+print("");
+
+// ── 体验2：管道 = 从知到行的箭头 ──
+let result = 5 |> double |> add_one;
+print("【体验2】管道 |> = 从知到行的箭头");
+print("  5 |> double |> add_one = ", result);
+print("  读法：5 先经过 double，再经过 add_one");
+print("  这不是语法糖——它改变了你的认知结构");
+print("  你顺着数据的流动方向思考，而不是从里到外嵌套");
+print("");
+
+// ── 体验3：管道链 = 庖丁解牛 ──
+let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+let mut evens = [];
+for x in data {
+    if is_even(x) { push(evens, x); };
+};
+print("【体验3】管道链 = 顺着纹理解牛");
+print("  输入: ", data);
+print("  筛选偶数: ", evens);
+print("  每一步都是数据形态的一次转变");
+print("  就像庖丁的刀顺着牛的纹理走");
+print("");
+
+// ── 体验4：高阶函数 = 功夫的传递 ──
+def triple(x: Int): Int { return x * 3; };
+def apply_triple(num: Int): Int {
+    return triple(num);
+};
+print("【体验4】高阶函数 = 功夫可以传递");
+print("  triple(7) = ", triple(7), "  ← 直接调用");
+print("  apply_triple(7) = ", apply_triple(7), "  ← 间接调用");
+print("  函数可以作为参数传递");
+print("  这就是闭包和 Lambda 的哲学基础");
+print("");
+
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+print("  第2课完成");
+print("  心法：管道改变了你看数据的方式");
+print("  进阶：试着把 3 个管道连成一条链");

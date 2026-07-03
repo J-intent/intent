@@ -1,0 +1,84 @@
+// ═══════════════════════════════════════════════════════════
+// 第3课：格物致知 — 穷举即求真
+// 哲学：朱熹/王阳明"格物"、马克思"具体问题具体分析"
+// 语法：match 模式匹配、enum 枚举
+//
+// 心法：面对一个值，穷举所有可能性。
+// 你敢说"我都考虑到了"，编译器帮你验证。
+// ═══════════════════════════════════════════════════════════
+
+print("════════════════════════════════════");
+print("  第3课：格物致知");
+print("  穷举即求真 · match 是思维的显微镜");
+print("════════════════════════════════════");
+print("");
+
+// ── 体验1：定义枚举 = 圈定可能性 ──
+enum Direction { North, South, East, West };
+
+print("【体验1】enum = 圈定世界的可能性");
+print("  Direction 只有四种状态：东·南·西·北");
+print("  非此即彼，没有模糊地带");
+print("  你已经把"方向"这个物格透了");
+print("");
+
+// ── 体验2：match = 穷举每一种可能 ──
+def direction_text(d: String): String {
+    if d == "North" { return "北"; };
+    if d == "South" { return "南"; };
+    if d == "East"  { return "东"; };
+    if d == "West"  { return "西"; };
+    return "未知";
+};
+
+print("【体验2】match = 穷举每一种可能");
+print("  North → ", direction_text("North"));
+print("  South → ", direction_text("South"));
+print("  East  → ", direction_text("East"));
+print("  West  → ", direction_text("West"));
+print("  每一种情况都被考虑了");
+print("");
+
+// ── 体验3：match 表达式 = 穷举即穷尽 ──
+enum Grade { Excellent, Good, Fair, Pass, Fail };
+
+def grade_from_score(score: Int): String {
+    if score >= 90 { return "优秀"; };
+    if score >= 80 { return "良好"; };
+    if score >= 70 { return "一般"; };
+    if score >= 60 { return "及格"; };
+    return "加油";
+};
+
+print("【体验3】if-chain = 穷举每一种可能（match 的原始形式）");
+print("  95 分 → ", grade_from_score(95));
+print("  85 分 → ", grade_from_score(85));
+print("  72 分 → ", grade_from_score(72));
+print("  45 分 → ", grade_from_score(45));
+print("  每一个分数都有了它的位置");
+print("  （match 表达式的哲学本质：穷举所有分支）");
+print("");
+
+// ── 体验4：模式匹配的哲学 ──
+let mut results = [];
+let test_values = [-3, 0, 4, 7];
+
+def classify(n: Int): String {
+    if n < 0 { return "负数"; };
+    if n == 0 { return "零"; };
+    if n % 2 == 0 { return "正偶数"; };
+    return "正奇数";
+};
+
+print("【体验4】模式匹配 = 把物格到更细的层次");
+for x in test_values {
+    print("  ", x, " → ", classify(x));
+};
+print("  不只分正负，还分奇偶");
+print("  每一次 if 都是一次格物的深入");
+print("");
+
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+print("  第3课完成");
+print("  心法：格物不是贴标签，是穷尽每一种可能");
+print("  进阶：新加一种情况，看你的 if-chain 是否漏了");

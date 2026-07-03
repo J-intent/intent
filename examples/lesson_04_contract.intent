@@ -1,0 +1,75 @@
+// ═══════════════════════════════════════════════════════════
+// 第4课：社会契约 — 合同即良知
+// 哲学：马克思"人是社会关系的总和"、王阳明"致良知"
+// 语法：requires / ensures 契约系统
+//
+// 心法：进门前签合同，出门前验货。
+// 代码间的信任建立在可验证的条款上。
+// ═══════════════════════════════════════════════════════════
+
+print("════════════════════════════════════");
+print("  第4课：社会契约");
+print("  requires = 合同 · ensures = 验货");
+print("════════════════════════════════════");
+print("");
+
+// ── 体验1：没有契约的世界 ──
+def unsafe_divide(a: Float, b: Float): Float {
+    return a / b;
+};
+
+print("【体验1】没有契约的世界 = 盲信");
+print("  我定义了一个 unsafe_divide，没有任何约束");
+print("  调用者不知道 b 能不能为 0");
+print("  我也保证不了结果是否正确");
+print("  3.0 / 2.0 = ", unsafe_divide(3.0, 2.0));
+print("");
+
+// ── 体验2：契约 = 书面合同 ──
+def safe_divide(a: Float, b: Float): Float
+    requires b != 0.0
+    ensures result * b == a
+{
+    return a / b;
+};
+
+print("【体验2】契约 = 书面合同");
+print("  requires b != 0   ← 进门前签：我要求除数非零");
+print("  ensures r*b == a  ← 出门前验：我保证结果可逆");
+print("  这不是注释——它在运行时真的会检查");
+print("  如果你说谎，系统会告诉你");
+print("");
+
+// ── 体验3：函数间的社会关系 ──
+def is_positive(x: Float): Int
+    requires true
+    ensures result == 1 or result == 0
+{
+    if x > 0.0 { return 1; };
+    return 0;
+};
+
+print("【体验3】人是社会关系的总和");
+print("  is_positive 的契约声明了：");
+print("  - 前置条件：无条件（谁都可以调用我）");
+print("  - 后置条件：我只返回 0 或 1");
+print("  别的函数调用 is_positive 时可以信任这个保证");
+print("  就像你可以信任一个签了合同的人");
+print("");
+
+// ── 体验4：契约就是良知 ──
+let a = 10.0;
+let b = 2.0;
+let r = safe_divide(a, b);
+print("【体验4】契约就是良知");
+print("  ", a, " / ", b, " = ", r);
+print("  验证：", r, " * ", b, " == ", a, " ? ", r * b == a);
+print("  良知不是感觉，是可验证的条件");
+print("  王阳明说'致良知'——把良知推到每个事物上");
+print("  契约系统就是代码里的'致良知'");
+print("");
+
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+print("  第4课完成");
+print("  心法：信任建立在可验证的条款上，不是感觉上");
+print("  进阶：给 safe_divide 加更多约束试试");
