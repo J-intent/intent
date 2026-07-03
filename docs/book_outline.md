@@ -8,6 +8,8 @@
 
 ## 前言：代码是思维的镜子
 
+> 📖 完整章节：[第1章](./chapter_01_wuwei.md) · [第2章](./chapter_02_zhixing.md) · [第3章](./chapter_03_gewu.md) · [第4章](./chapter_04_contract.md) · [第5章](./chapter_05_bodhi.md) · [第6章](./chapter_06_dialectic.md) · [第7章](./chapter_07_ecosystem.md) · [第8章](./chapter_08_finitude.md)
+
 ### 为什么编程能教哲学？
 
 当你写 `let x = 10` 时，你在做一个哲学断言："x 是 10"。当你写 `let mut x = 10` 时，你在宣告："我承认我在改变世界"。编程语言的每一个语法设计都不是中立的——它携带了一套世界观。
