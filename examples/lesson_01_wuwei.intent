@@ -19,7 +19,7 @@ let pi = 3.14159;
 let flag = true;
 let items = [1, 2, 3, 4, 5];
 
-print("【体验1】类型推断：我不标注类型，系统全知道");
+print("体验1：类型推断——我不标注类型，系统全知道");
 print("  name  = ", name,   "  ← 没写 String，但它是 String");
 print("  pi    = ", pi,     "  ← 没写 Float，但它是 Float");
 print("  flag  = ", flag,   "  ← 没写 Bool，但它是 Bool");
@@ -28,30 +28,31 @@ print("");
 
 // ── 体验2：默认不可变，如如不动 ──
 let x = 10;
-print("【体验2】let = 如如不动");
+print("体验2：let = 如如不动");
 print("  let x = ", x, "  ← 这个值不会变");
 print("  试试改成 let mut x = 10，你就能改了");
 print("");
 
-// ── 体验3：显式可变，承认改变 ──
+// ── 体验3：let mut = 改变世界 ──
 let mut counter = 0;
-counter = counter + 1;
-counter = counter + 2;
-print("【体验3】let mut = 承认我在改变世界");
+counter = 1;
+counter = 2;
+counter = 3;
+print("体验3：let mut = 承认我在改变世界");
 print("  let mut counter 从 0 变成了 ", counter);
 print("  每一个 mut 都是一声宣言：我承认，我在改变");
 print("");
 
-// ── 体验4：万物皆表达式 ──
+// ── 体验4：一切皆表达式 ──
 let result = 3 + 4 * 5;
-print("【体验4】一切皆表达式");
+print("体验4：一切皆表达式");
 print("  3 + 4 * 5 = ", result);
-print("  没有"语句"和"表达式"的二分");
+print("  没有语句和表达式的二分");
 print("  你写的每一个东西都在生成一个值");
 print("  就像你的每一个念头都在生成一个存在状态");
 print("");
 
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+print("----------------------------");
 print("  第1课完成");
-print("  心法：先确定"是什么"，再决定"怎么变"");
+print("  心法：先确定是什么，再决定怎么变");
 print("  进阶：试试把 let 全改成 let mut，看看感觉有何不同");

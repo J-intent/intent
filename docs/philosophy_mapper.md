@@ -59,11 +59,12 @@ let result = data
 
 ```intent
 // match 是你"格"一个值的穷举方式
+// 注：range 模式(90..100)尚未实现，暂用 if 守卫表达范围条件
 let grade = match score {
-    90..100 => "A",   // 这种情况
-    80..89  => "B",   // 那种情况
-    70..79  => "C",   // 必须覆盖
-    _       => "F",   // 最后兜底
+    n if n >= 90 => "A",   // 这种情况
+    n if n >= 80 => "B",   // 那种情况
+    n if n >= 70 => "C",   // 必须覆盖
+    _            => "F",   // 最后兜底
 };
 
 // 每一种可能性都是"一个物"
@@ -105,7 +106,7 @@ def divide(a: Float, b: Float): Float
 | Intent 语法 | 哲学概念 | 思维体验 |
 |------------|---------|---------|
 | `class A { this.x = x; }` | 黑格尔"自在的存在" | 类定义了事物的**本质属性**。`this` 是事物认识自身的方式 |
-| `class B : A { ... }` | 马克思"扬弃" | 继承不是照搬——子类**扬弃**父类，保留有用部分、超越局限部分 |
+| `class B < A { ... }` | 马克思"扬弃" | 继承不是照搬——子类**扬弃**父类，保留有用部分、超越局限部分 |
 | `方法覆盖` | 黑格尔"否定之否定" | 子类覆盖父类方法，不是删除，是在更高层次上**重新定义** |
 | `枚举 enum` | 禅宗"不二法门" | 一个东西只能是几种状态之一。非此即彼，没有模糊地带 |
 
@@ -115,15 +116,16 @@ def divide(a: Float, b: Float): Float
 enum ShapeType { Circle, Square, Triangle };
 
 class Shape {
-    def area(): Float { return 0.0; };  // 父类：抽象定义
-};
+    def area(): Float { return 0.0; }  // 父类：抽象定义
+}
 
-class Circle : Shape {
-    def area(): Float { return pi * r * r; };  // 子类：具体的否定
-};
+class Circle < Shape {
+    def area(): Float { return pi * r * r; }  // 子类：具体的否定
+}
 // Circle 扬弃了 Shape——保留了"有面积"这个属性
 // 但用具体的计算公式取代了父类的抽象返回
 ```
+> 注：继承用尖括号 `<`；类体内方法定义后不加分号（详见 spec.md 3.6）
 
 ---
 

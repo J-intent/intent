@@ -1,0 +1,47 @@
+// with 语句回归测试(P1.1) — 块级资源管理, 向死而生的块级特化
+
+class Resource {
+    def init(name: String) {
+        this.name = name;
+        this.closed = false;
+    }
+    def use(): String {
+        return this.name;
+    }
+    def close() {
+        this.closed = true;
+    }
+}
+
+def test_with_basic() {
+    with Resource("db") as r {
+        assert r.use() == "db", "with 块内资源可用";
+    };
+};
+
+def test_with_auto_close() {
+    // 块退出时 close 自动调用 — 清理代码在出生时就写好了
+    let mut observed = 0;
+    with Resource("file") as r {
+        assert r.closed == false, "块内未关闭";
+    };
+    // r 作用域已退出, 用一个新实例验证 close 语义
+    let res = Resource("x");
+    with res {
+        observed = 1;
+    };
+    assert res.closed == true, "块退出自动 close";
+    assert observed == 1, "块体已执行";
+};
+
+def test_with_return_inside() {
+    let mut log = 0;
+    def worker(): Int {
+        with Resource("r") as r {
+            return 42;   // return 也应触发 close
+        };
+        return 0;
+    };
+    let v = worker();
+    assert v == 42, "with 块内 return 正常返回值";
+};

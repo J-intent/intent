@@ -3,14 +3,6 @@
 // 禅道为翼：验证时心无杂念，只看条件本身
 // 马哲为用：提供检验真理的实践工具
 
-// ══ 运行时断言（标准库层面的手动补充） ══
-def assert(condition: Bool, message: String) -> Bool {
-    if (condition == false) {
-        print("[契约断言失败] ", message);
-        return false;
-    }
-    return true;
-}
 
 // ══ 前置条件辅助 ══
 // 正数检查
@@ -50,7 +42,3 @@ def ensure_result_positive(result: Int) -> Bool {
     return result >= 0;
 }
 
-// ══ 统计计数器 → 用于测试契约覆盖率 ══
-def mut contracts_checked() -> Int {
-    return 0;
-}

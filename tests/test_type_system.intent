@@ -1,0 +1,53 @@
+// 类型系统回归测试(P1.3a) — 类型别名与 Union
+
+type Meters = Float;
+type Name = String;
+
+def test_type_alias_ok() {
+    // 别名透明: Meters 就是 Float
+    let h: Meters = 1.75;
+    assert h > 1.0, "别名标注接受 Float 值";
+    let n: Name = "阿J";
+    assert n == "阿J", "别名标注接受 String 值";
+};
+
+def test_type_alias_violation() {
+    // 别名不放松校验 — 同义词不是新类型
+    let mut caught = 0;
+    try {
+        let bad: Meters = "not a number";
+    } catch e: TypeError {
+        caught = 1;
+    };
+    assert caught == 1, "别名违反仍报 TypeError";
+};
+
+def test_union_ok() {
+    // Union: 一个东西的多种存在形态
+    let a: Int | String = 42;
+    let b: Int | String = "text";
+    assert type_of(a) == "Int", "Union 第一成员";
+    assert type_of(b) == "String", "Union 第二成员";
+};
+
+def test_union_violation() {
+    let mut caught = 0;
+    try {
+        // Bool 不属于 Int|String 任一成员(Int 标注接受 Float 是刻意的数值互通)
+        let bad: Int | String = true;
+    } catch e: TypeError {
+        caught = 1;
+    };
+    assert caught == 1, "Union 之外的成员被拒绝";
+};
+
+def test_int_accepts_float() {
+    // 设计规则: Int 标注接受 Float 值(数值互通, Python 式宽松)
+    let x: Int = 3.14;
+    assert x > 3.0, "Int 标注接受 Float";
+};
+
+def test_type_keyword_not_broken() {
+    // type 是软关键字: type(x) 内置函数调用不受影响
+    assert type_of(42) == "Int", "type() 函数仍可用";
+};

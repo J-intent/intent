@@ -1,0 +1,25 @@
+// 契约回归测试 — requires/ensures 满足路径
+def test_requires_pass() {
+    def safe_div(a: Int, b: Int): Int requires b != 0 {
+        return a / b;
+    };
+    assert safe_div(10, 2) == 5, "requires 满足时正常执行";
+};
+
+def test_ensures_pass() {
+    def double(x: Int): Int ensures result == x * 2 {
+        return x * 2;
+    };
+    assert double(21) == 42, "ensures 承诺兑现";
+};
+
+def test_multi_requires() {
+    def clamp(n: Int, lo: Int, hi: Int): Int
+        requires lo <= hi
+        requires n >= lo
+        requires n <= hi
+    {
+        return n;
+    };
+    assert clamp(5, 1, 10) == 5, "多条 requires 同时满足";
+};

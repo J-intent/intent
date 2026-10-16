@@ -1,0 +1,66 @@
+// 异常层级回归测试(P1.4) — catch 按类型分流, 错误作为一等值
+
+def test_catch_typed_contract() {
+    // 契约违反有专属类型, 可被定向捕获
+    def divide(a: Int, b: Int): Int requires b != 0 { return a / b; };
+    let mut caught_type = "";
+    try {
+        let x = divide(10, 0);
+    } catch e: ContractError {
+        caught_type = e.type;
+    };
+    assert caught_type == "ContractError", "catch 按类型捕获契约违反";
+};
+
+def test_catch_typed_index() {
+    let data = [1, 2, 3];
+    let mut msg = "";
+    try {
+        let x = data[99];
+    } catch e: IndexError {
+        msg = e.message;
+    };
+    assert msg != "", "IndexError 被捕获且带消息";
+};
+
+def test_catch_type_mismatch_propagates() {
+    // 类型不匹配 → 异常继续传播, 不被这个 catch 吃掉
+    let data = [1, 2, 3];
+    let mut wrong = 0;
+    try {
+        try {
+            let x = data[99];
+        } catch e: ContractError {
+            wrong = 1;   // 不该进来
+        };
+    } catch e: IndexError {
+        wrong = 2;       // 内层不匹配, 外层接住
+    };
+    assert wrong == 2, "类型不匹配的异常继续传播";
+};
+
+def test_catch_untyped_still_works() {
+    // 无类型 catch 保持全捕获(兼容旧行为)
+    let data = [1, 2, 3];
+    let mut ok = 0;
+    try {
+        let x = data[99];
+    } catch e {
+        ok = 1;
+    };
+    assert ok == 1, "无类型 catch 全捕获";
+};
+
+def test_error_message_and_stack() {
+    let data = [1, 2, 3];
+    let mut msg = "";
+    let mut depth = 0;
+    try {
+        let x = data[99];
+    } catch e {
+        msg = e.message;
+        depth = len(e.stack);
+    };
+    assert msg != "", "e.message 可用";
+    assert depth > 0, "e.stack 含调用链";
+};

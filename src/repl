@@ -5,7 +5,20 @@ Intent语言交互式REPL
 
 import sys
 import os
-import readline  # 用于命令行历史记录
+try:
+    import readline  # 用于命令行历史记录
+except ImportError:
+    class DummyReadline:
+        @staticmethod
+        def parse_and_bind(*args, **kwargs):
+            pass
+        @staticmethod
+        def set_completer(*args, **kwargs):
+            pass
+        @staticmethod
+        def add_history(*args, **kwargs):
+            pass
+    readline = DummyReadline()
 from typing import Optional, List, Dict, Any
 
 # 导入已有的解释器

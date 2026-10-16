@@ -1,0 +1,11 @@
+// mathkit — 测试用本地依赖包(模拟 lib 安装的第三方模块)
+export double;
+export triple;
+
+def double(x: Int): Int {
+    return x * 2;
+};
+
+def triple(x: Int): Int {
+    return x * 3;
+};

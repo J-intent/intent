@@ -1,0 +1,35 @@
+// 函数回归测试 — 闭包/递归/默认参数/高阶
+def test_closure() {
+    def make_adder(n: Int) {
+        return fn(x: Int) { return x + n; };
+    };
+    let add5 = make_adder(5);
+    assert add5(10) == 15, "闭包携带诞生环境";
+};
+
+def test_recursion() {
+    def fact(n: Int): Int {
+        if n <= 1 { return 1; };
+        return n * fact(n - 1);
+    };
+    assert fact(5) == 120, "递归阶乘";
+};
+
+def test_default_param() {
+    def greet(name: String, greeting: String = "你好") {
+        return greeting + ", " + name;
+    };
+    assert greet("J") == "你好, J", "默认参数";
+    assert greet("J", "Hi") == "Hi, J", "显式实参覆盖默认值";
+};
+
+def test_higher_order() {
+    let double = fn(x) { return x * 2; };
+    assert double(21) == 42, "Lambda 求值";
+    let nums = [1, 2, 3];
+    let mut total = 0;
+    for n in nums {
+        total = total + double(n);
+    };
+    assert total == 12, "Lambda 作高阶调用";
+};

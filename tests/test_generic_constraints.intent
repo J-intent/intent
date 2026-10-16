@@ -1,0 +1,33 @@
+// 泛型约束回归测试(P1.3b) — T: Comparable
+
+def max_of<T: Comparable>(a: T, b: T): T {
+    if a > b { return a; };
+    return b;
+};
+
+def test_constraint_satisfied() {
+    assert max_of(3, 7) == 7, "Int 满足 Comparable";
+    assert max_of(2.5, 1.5) == 2.5, "Float 满足 Comparable";
+    assert max_of("apple", "banana") == "banana", "String 满足 Comparable";
+};
+
+def test_constraint_violation_is_contract_error() {
+    // 约束违反走契约错误通道 — 不是普通 TypeError, 是「类型参数的合同违约」
+    let mut caught = 0;
+    try {
+        let r = max_of(Ok(1), Ok(2));
+    } catch e: ContractError {
+        caught = 1;
+    };
+    assert caught == 1, "Result 不满足 Comparable → ContractError";
+};
+
+def identity<T>(x: T): T {
+    return x;
+};
+
+def test_no_constraint_still_works() {
+    // 无约束泛型不受影响
+    assert identity(42) == 42, "无约束泛型 Int";
+    assert identity("hi") == "hi", "无约束泛型 String";
+};

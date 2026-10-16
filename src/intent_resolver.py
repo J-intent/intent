@@ -266,6 +266,11 @@ class Resolver:
         self._resolve_block(stmt.body)
 
     def _resolve_for(self, stmt) -> None:
+        # iterable 在循环作用域之外求值 — 与 execute_for 的执行时机一致;
+        # 若放在 _begin_scope 之后, iterable 变量会被标成循环体深度,
+        # 执行时 get_at 多跳一层 → 普通变量 NameError(range() 因内置
+        # fallback 不暴露此 bug)
+        self._resolve_expr(stmt.iterable)
         self._begin_scope()
         if stmt.vars:
             for vname in stmt.vars:
@@ -274,7 +279,6 @@ class Resolver:
         elif stmt.var:
             self._declare(stmt.var)
             self._define(stmt.var)
-        self._resolve_expr(stmt.iterable)
         # 循环体不额外开作用域 - item 和循环体在同一作用域
         for s in stmt.body:
             self._resolve_stmt(s)

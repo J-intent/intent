@@ -1,0 +1,36 @@
+// 集合回归测试 — list/dict/运算符/推导式
+def test_list_eq() {
+    let a = [1, 2, 3];
+    let b = [1, 2, 3];
+    let c = [4, 5, 6];
+    assert a == b, "列表相等";
+    assert a != c, "列表不等";
+};
+
+def test_in_operator() {
+    let list = [10, 20, 30];
+    assert 20 in list, "in 命中";
+    assert 99 not in list, "not in 未命中";
+};
+
+def test_dict_eq() {
+    let a = {"x": 1, "y": 2};
+    let b = {"x": 1, "y": 2};
+    let c = {"x": 1, "y": 3};
+    assert a == b, "字典相等";
+    assert a != c, "字典不等";
+};
+
+def test_dict_comprehension() {
+    let nums = [1, 2, 3, 4, 5];
+    let squares = {x: x * x for x in nums if x > 2};
+    assert len(squares) == 3, "带过滤的字典推导式";
+    assert squares[3] == 9, "推导式结果正确";
+};
+
+def test_index_and_slice() {
+    let nums = [1, 2, 3, 4, 5];
+    assert nums[0] == 1, "索引读取";
+    let head = nums[:2];
+    assert len(head) == 2, "切片";
+};

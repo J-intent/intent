@@ -1,0 +1,17 @@
+// 管道回归测试 — |> 知行合一
+def double(x: Int): Int { return x * 2; };
+def inc(x: Int): Int { return x + 1; };
+
+def test_pipe_basic() {
+    let r = 5 |> double |> inc;
+    assert r == 11, "管道从左到右";
+};
+
+def test_pipe_chain() {
+    let nums = [1, 2, 3];
+    let mut total = 0;
+    for n in nums {
+        total = total + (n |> double);
+    };
+    assert total == 12, "管道在循环中";
+};

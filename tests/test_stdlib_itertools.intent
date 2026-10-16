@@ -1,0 +1,52 @@
+// 标准库回归测试(P3.1a) — std/itertools
+
+import std.itertools;
+
+def test_chain() {
+    let r = std.itertools.chain([1, 2], [10, 20]);
+    assert r == [1, 2, 10, 20], "chain 拼接";
+};
+
+def test_zip_longest() {
+    let r = std.itertools.zip_longest([1, 2], [10, 20, 30], 0);
+    assert len(r) == 3, "zip_longest 补足长度";
+    assert r[2] == [0, 30], "zip_longest 短方补 fill";
+};
+
+def test_cycle() {
+    let r = std.itertools.cycle([1, 2], 3);
+    assert r == [1, 2, 1, 2, 1, 2], "cycle 循环往复";
+};
+
+def test_enumerate() {
+    let r = std.itertools.enumerate(["a", "b"]);
+    assert r[0] == [0, "a"], "enumerate 物各有其位";
+    assert r[1][1] == "b", "enumerate 值";
+};
+
+def test_flatten() {
+    let r = std.itertools.flatten([[1, 2], [3], [4, 5]]);
+    assert r == [1, 2, 3, 4, 5], "flatten 化繁为简";
+};
+
+def test_unique() {
+    let r = std.itertools.unique([1, 2, 2, 3, 1, 3]);
+    assert r == [1, 2, 3], "unique 去重保序";
+};
+
+def test_chunk() {
+    let r = std.itertools.chunk([1, 2, 3, 4, 5], 2);
+    assert len(r) == 3, "chunk 分而治之";
+    assert r[2] == [5], "chunk 尾块";
+};
+
+def test_groupby() {
+    let r = std.itertools.groupby([1, 2, 3, 4, 5, 6], fn(x) { return (x % 2 == 0) ? "偶" : "奇"; });
+    assert r["奇"] == [1, 3, 5], "groupby 物以类聚(奇)";
+    assert r["偶"] == [2, 4, 6], "groupby 物以类聚(偶)";
+};
+
+def test_count_where() {
+    let n = std.itertools.count_where([1, 2, 3, 4, 5], fn(x) { return x > 2; });
+    assert n == 3, "count_where 数一数";
+};

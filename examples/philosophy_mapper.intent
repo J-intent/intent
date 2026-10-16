@@ -1,0 +1,105 @@
+// ═══════════════════════════════════════════════════════════
+// 哲学映射器 — 将 Intent 语法映射到哲学概念
+// 用法: python3 src/mini_intent.py examples/philosophy_mapper.intent <file>
+// ═══════════════════════════════════════════════════════════
+import std.fs;
+import std.os;
+import std.str;
+
+// ── 语法→哲学映射表 ──
+def map_construct(token: String): String {
+    return match token {
+        "let" => "心即理：声明即存在，如如不动",
+        "let mut" => "改变世界：显式宣告可变性",
+        "|>" => "知行合一：数据从左到右=从知到行",
+        "=>" => "格物致知：穷举每一种可能",
+        "match" => "具体问题具体分析：穷尽所有情况",
+        "Result" => "烦恼即菩提：错误是另一种正常值",
+        "?" => "平常心：错误自然传播，不恐慌",
+        "class" => "自在存在：定义事物的本质",
+        ":" => "扬弃：子类超越父类",
+        "requires" => "实事求是：进入函数前签合同",
+        "ensures" => "致良知：离开函数后验货",
+        "defer" => "向死而生：清理在出生时就准备好了",
+        "fn" => "此心光明：函数携带诞生时的环境记忆",
+        "." => "万物一体：世界在你诞生前就准备好了",
+        "def" => "定义意图：把你的意图精确地告诉世界",
+        "import" => "天地一体：借用世界的智慧",
+        "export" => "社会关系：你的存在取决于你暴露了什么",
+        "for" => "循环往复：在重复中发现规律",
+        "enum" => "不二法门：非此即彼，没有模糊地带",
+        "try" => "接受不确定：尝试可能失败的事",
+        "catch" => "转烦恼为菩提：把错误转化为经验",
+        _ => "代码即意图：存在先于本质"
+    };
+};
+
+// ── 扫描文件中的哲学概念 ──
+def scan_philosophy(filepath: String) {
+    let content = read_file(filepath);
+    let lines = split(content, "\n");
+    
+    print("═══════════════════════════════════════════");
+    print("  Intent 哲学映射器");
+    print("  文件: ", filepath);
+    print("═══════════════════════════════════════════");
+    print("");
+    
+    let mut findings = {};
+    let mut line_num = 0;
+    
+    for line in lines {
+        line_num = line_num + 1;
+        let trimmed = trim(line);
+        
+        // 跳过空行和注释
+        if len(trimmed) == 0 { continue; };
+        if substr(trimmed, 0, 2) == "//" { continue; };
+        
+        // 检查每个关键词
+        let keywords = ["|>", "=>", "let mut", "let ", "match", "requires",
+            "ensures", "defer", "class ", "fn(", "def ", "import ",
+            "export ", "Result", "enum ", "try " , "catch", "for ", "this."];
+        
+        let mut i = 0;
+        while i < len(keywords) {
+            let kw = keywords[i];
+            if contains(trimmed, kw) {
+                // 首字大写 → 可能是类型名，跳过
+                let first_char = substr(kw, 0, 1);
+                let philosophy = map_construct(kw);
+                
+                print("  L", line_num, " | ", kw, " → ", philosophy);
+                print("      ", substr(trimmed, 0, 80));
+                print("");
+                
+                let count = findings[kw];
+                if count == 0 {
+                    findings[kw] = 1;
+                } else {
+                    findings[kw] = count + 1;
+                };
+            };
+            i = i + 1;
+        };
+    };
+    
+    print("───────────────────────────────────────────");
+    print("  哲学概念统计");
+    print("───────────────────────────────────────────");
+    for kw in keys(findings) {
+        print("  ", kw, ": ", findings[kw], " 次");
+    };
+    print("");
+    print("═══════════════════════════════════════════");
+    print("  你的代码是一篇哲学论文");
+    print("═══════════════════════════════════════════");
+};
+
+// ── 主入口 ──
+if len(args()) > 0 {
+    scan_philosophy(args()[0]);
+} else {
+    print("用法: intent philosophy_mapper.intent <文件路径>");
+    print("示例: intent philosophy_mapper.intent examples/hello.intent");
+};

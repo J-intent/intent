@@ -1,0 +1,103 @@
+// std/collections.intent — 容器数据类型模块(P3.1b)
+// 心学为体：容器是心的外延 — 你如何组织物, 决定了物如何呈现
+// 禅道为翼：后进先出与先进先出, 各有其时序之道
+// 马哲为用：具体的数据结构解决具体的问题
+
+export counter, most_common, Stack, Queue;
+
+// ══ 计数 ══
+
+// counter — 数一数每个元素出现几次(存在的密度)
+def counter(lst) {
+    let mut out = {};
+    for x in lst {
+        if out.has_key(x) {
+            out[x] = out[x] + 1;
+        } else {
+            out[x] = 1;
+        }
+    }
+    return out;
+}
+
+// most_common — 出现最多的前 n 个(键, 次数)对
+def most_common(cnt, n: Int) {
+    let mut pairs = [];
+    for k in keys(cnt) {
+        pairs = pairs + [[k, cnt[k]]];
+    }
+    // 简单选择排序(按次数降序) — 数据量小, 清晰优先
+    let mut out = [];
+    let mut rest = pairs;
+    let mut i = 0;
+    while i < n and len(rest) > 0 {
+        let mut best = 0;
+        let mut j = 1;
+        while j < len(rest) {
+            if rest[j][1] > rest[best][1] {
+                best = j;
+            }
+            j = j + 1;
+        }
+        out = out + [rest[best]];
+        rest = rest[0:best] + rest[best + 1:];
+        i = i + 1;
+    }
+    return out;
+}
+
+// ══ 栈 — 后进先出 ══
+
+class Stack {
+    def init() {
+        this.items = [];
+    }
+    def push(x) {
+        this.items = this.items + [x];
+    }
+    def pop() {
+        let n = len(this.items);
+        if n == 0 { return Err("栈为空"); }
+        let top = this.items[n - 1];
+        this.items = this.items[0:n - 1];
+        return Ok(top);
+    }
+    def peek() {
+        let n = len(this.items);
+        if n == 0 { return Err("栈为空"); }
+        return Ok(this.items[n - 1]);
+    }
+    def size() -> Int {
+        return len(this.items);
+    }
+    def is_empty() -> Bool {
+        return len(this.items) == 0;
+    }
+}
+
+// ══ 队列 — 先进先出 ══
+
+class Queue {
+    def init() {
+        this.items = [];
+    }
+    def enqueue(x) {
+        this.items = this.items + [x];
+    }
+    def dequeue() {
+        if len(this.items) == 0 { return Err("队列为空"); }
+        let head = this.items[0];
+        this.items = this.items[1:];
+        return Ok(head);
+    }
+    def peek() {
+        if len(this.items) == 0 { return Err("队列为空"); }
+        return Ok(this.items[0]);
+    }
+    def size() -> Int {
+        return len(this.items);
+    }
+    def is_empty() -> Bool {
+        return len(this.items) == 0;
+    }
+}

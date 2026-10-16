@@ -1,0 +1,30 @@
+// 标准库回归测试 — import/std 模块/内置函数
+import std.str;
+
+def test_str_module() {
+    assert length("hello") == 5, "std.str.length";
+    assert to_upper("abc") == "ABC", "std.str.to_upper";
+    assert starts_with("hello", "he"), "std.str.starts_with";
+    assert contains("hello", "ell"), "std.str.contains";
+};
+
+def test_builtin_str() {
+    assert substr("hello world", 0, 5) == "hello", "substr 前半";
+    assert substr("hello world", 6, 11) == "world", "substr 后半";
+    assert "hi" * 3 == "hihihi", "字符串重复";
+    assert "ab" + "cd" == "abcd", "字符串拼接";
+};
+
+def test_builtin_math() {
+    assert abs(-5) == 5, "abs";
+    assert sqrt(16) == 4.0, "sqrt";
+    assert max(3, 7) == 7, "max";
+    assert min(3, 7) == 3, "min";
+};
+
+def test_builtin_list() {
+    let nums = [3, 1, 2];
+    assert sum(nums) == 6, "sum";
+    assert len(sorted(nums)) == 3, "sorted";
+    assert 2 in nums, "contains";
+};

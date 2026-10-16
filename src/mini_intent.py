@@ -5,9 +5,12 @@ Intent语言完整解释器 v1.2
 目标:让代码清晰地表达意图
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import re
+import time
 
 # 提升 Python 递归限制（Intent 递归函数需要更深的调用栈）
 sys.setrecursionlimit(100000)
@@ -39,12 +42,12 @@ except ImportError:
             def add_history(*args, **kwargs):
                 pass
         readline = DummyReadline()
-        if sys.platform == "win32":
-            print("提示: 可以安装 pyreadline3 以获得更好的命令行体验")
-            print("安装命令: pip install pyreadline3")
+        if sys.platform == "win32" and sys.stderr.isatty():
+            print("提示: 可以安装 pyreadline3 以获得更好的命令行体验", file=sys.stderr)
+            print("安装命令: pip install pyreadline3", file=sys.stderr)
 
 # ==================== 常量定义 ====================
-VERSION = "1.2.0"
+VERSION = "2.1.0"
 PHILOSOPHY_SLOGAN = "心学为体,禅道为翼,马哲为用"
 
 # ==================== 哲学翻译器 ====================
@@ -173,6 +176,7 @@ class TokenType(Enum):
     OPERATOR = "OPERATOR"
     EOF = "EOF"
     NEWLINE = "NEWLINE"
+    COMMENT = "COMMENT"
 
 @dataclass
 class Token:
@@ -182,6 +186,7 @@ class Token:
     line: int
     column: int
     filename: str = ""
+    is_fstring: bool = False   # P2.2: f"..." 前缀标记(formatter 还原前缀)
 
     def __str__(self):
         return f"{self.type.name}:{repr(self.value)}@{self.line}:{self.column}"
@@ -200,6 +205,8 @@ class Lexer:
         'and', 'or', 'not', 'in', 'is',
         'class', 'this', 'mut', 'fn',  # 类系统 + 匿名函数
         'try', 'catch', 'finally', 'defer',  # 错误处理 + 延迟执行
+        'with',  # 块级资源管理(P1.1)
+        'export',  # 显式模块导出(P2.1)
         'assert',  # 断言
         'enum',  # 枚举
         'yield'  # 生成器
@@ -218,9 +225,10 @@ class Lexer:
 
     SINGLE_SYMBOLS = set('(){}[],:;.=+-*/%<>!&|^~@')
 
-    def __init__(self, code: str, filename: str = ""):
+    def __init__(self, code: str, filename: str = "", keep_comments: bool = False):
         self.code = code
         self.filename = filename
+        self.keep_comments = keep_comments  # formatter 专用: 注释也产 token
         self.pos = 0
         self.line = 1
         self.column = 1
@@ -253,6 +261,26 @@ class Lexer:
         while self.current_char() and self.current_char() in ' \t\r':
             self.advance()
 
+    def read_comment(self):
+        """读取注释并产 COMMENT token(formatter 专用)"""
+        start_line, start_col = self.line, self.column
+        start_pos = self.pos
+        if self.current_char() == '#':
+            while self.current_char() and self.current_char() != '\n':
+                self.advance()
+        elif self.current_char() == '/' and self.peek_char() == '/':
+            while self.current_char() and self.current_char() != '\n':
+                self.advance()
+        elif self.current_char() == '/' and self.peek_char() == '*':
+            self.advance(2)
+            while (self.current_char() and
+                   not (self.current_char() == '*' and self.peek_char() == '/')):
+                self.advance()
+            if self.current_char() == '*':
+                self.advance(2)
+        value = self.code[start_pos:self.pos].rstrip()
+        self.tokens.append(Token(TokenType.COMMENT, value, start_line, start_col, self.filename))
+
     def skip_comment(self):
         """跳过注释"""
         if self.current_char() == '#':
@@ -270,8 +298,25 @@ class Lexer:
                 self.advance(2)  # 跳过*/
 
     def read_string(self):
-        """读取字符串字面量"""
+        """读取字符串字面量 — 支持三引号多行字符串(P1.2)"""
         quote = self.current_char()
+        # 三引号多行字符串: """...""" 或 '''...'''
+        if self.code[self.pos:self.pos + 3] == quote * 3:
+            self.advance(3)  # 跳过开头的三引号
+            start_pos = self.pos
+            while self.current_char():
+                if self.code[self.pos:self.pos + 3] == quote * 3:
+                    break
+                self.advance()
+            if not self.current_char():
+                raise SyntaxError(f"未结束的多行字符串,行 {self.line}")
+            value = self.code[start_pos:self.pos]
+            tok = Token(TokenType.STRING, value, self.line, self.column, self.filename)
+            tok.is_fstring = getattr(self, '_pending_fstring', False)
+            self._pending_fstring = False
+            self.tokens.append(tok)
+            self.advance(3)  # 跳过结尾的三引号
+            return
         start_pos = self.pos
         self.advance()  # 跳过开头的引号
 
@@ -284,7 +329,10 @@ class Lexer:
             raise SyntaxError(f"未结束的字符串,行 {self.line}")
 
         value = self.code[start_pos + 1:self.pos]
-        self.tokens.append(Token(TokenType.STRING, value, self.line, self.column, self.filename))
+        tok = Token(TokenType.STRING, value, self.line, self.column, self.filename)
+        tok.is_fstring = getattr(self, '_pending_fstring', False)
+        self._pending_fstring = False
+        self.tokens.append(tok)
         self.advance()  # 跳过结尾的引号
 
     def read_number(self):
@@ -320,6 +368,13 @@ class Lexer:
             self.advance()
 
         value = self.code[start_pos:self.pos]
+
+        # f 前缀字符串(P1.2): f"..." 显式插值字符串(行为与普通字符串一致,
+        # 插值 ${} 本就内置; f 是意图的显式宣告 — 模板与数据在同一行相见)
+        if value == 'f' and self.current_char() == '"':
+            self._pending_fstring = True
+            self.read_string()
+            return
 
         # 判断是否是关键字
         if value in self.KEYWORDS:
@@ -359,10 +414,13 @@ class Lexer:
                 self.skip_whitespace()
                 continue
 
-            # 跳过注释
+            # 注释: 默认跳过; keep_comments 模式产 COMMENT token(formatter 保留注释)
             if (self.current_char() == '#' or
                 (self.current_char() == '/' and self.peek_char() in ['/', '*'])):
-                self.skip_comment()
+                if self.keep_comments:
+                    self.read_comment()
+                else:
+                    self.skip_comment()
                 continue
 
             # 处理换行
@@ -432,6 +490,7 @@ class FunctionDef(ASTNode):
     """函数定义节点"""
     name: str = ""
     type_params: List[str] = field(default_factory=list)  # 泛型参数如 ['T', 'U']
+    type_param_constraints: Dict[str, str] = field(default_factory=dict)  # P1.3b: {'T': 'Comparable'}
     params: List[Tuple[str, str, Any]] = field(default_factory=list)  # (参数名, 类型, 默认值表达式或None)
     return_type: Optional[str] = None
     requires: List['Expression'] = field(default_factory=list)  # 前置条件
@@ -525,6 +584,7 @@ class TryStmt(ASTNode):
     catch_var: str = ""       # catch (e) 中的变量名
     catch_body: List[ASTNode] = field(default_factory=list)
     finally_body: List[ASTNode] = field(default_factory=list)  # 可选 finally 块
+    catch_types: List[str] = field(default_factory=list)  # P1.4: catch e: ContractError(空=全部)
 
 @dataclass
 class DeferStmt(ASTNode):
@@ -534,9 +594,36 @@ class DeferStmt(ASTNode):
     column: int = 0
 
 @dataclass
+class WithStmt(ASTNode):
+    """with 语句 — 块级资源管理(P1.1)
+
+    获取资源与释放资源在同一对花括号内对称出现 —
+    defer 的函数级特化: 清理代码在出生时就写好了。
+    块退出时, 资源若提供 close 方法则自动调用。
+    """
+    resource: Optional["Expression"] = None
+    var_name: str = ""
+    body: List[ASTNode] = field(default_factory=list)
+    line: int = 0
+    column: int = 0
+
+@dataclass
+class TypeAliasStmt(ASTNode):
+    """类型别名(P1.3a): type Meters = Float; type Shape = Circle | Square;
+
+    别名是透明的同义词; Union 是「不二法门」的推广 —
+    一个东西的多种存在形态, 任一成员合法即通过。
+    """
+    name: str = ""
+    aliased_type: str = ""
+    line: int = 0
+    column: int = 0
+
+@dataclass
 class YieldStmt(ASTNode):
     """yield 语句 — 生成器产出值"""
     value: Optional["Expression"] = None
+    from_expr: Optional["Expression"] = None  # P1.5: yield from expr 委派转发
     line: int = 0
     column: int = 0
 
@@ -818,13 +905,21 @@ class Parser:
         # 函数名
         func.name = self.expect(TokenType.IDENTIFIER).value
 
-        # 泛型参数: identity<T>(x: T) -> T
+        # 泛型参数: identity<T>(x: T) -> T; 约束(P1.3b): max_of<T: Comparable>
         if self.match(TokenType.OPERATOR, '<'):
             self.advance()
-            func.type_params.append(self.expect(TokenType.IDENTIFIER).value)
+            tp_name = self.expect(TokenType.IDENTIFIER).value
+            func.type_params.append(tp_name)
+            if self.match(TokenType.SYMBOL, ':'):
+                self.advance()
+                func.type_param_constraints[tp_name] = self.expect(TokenType.IDENTIFIER).value
             while self.match(TokenType.SYMBOL, ','):
                 self.advance()
-                func.type_params.append(self.expect(TokenType.IDENTIFIER).value)
+                tp_name = self.expect(TokenType.IDENTIFIER).value
+                func.type_params.append(tp_name)
+                if self.match(TokenType.SYMBOL, ':'):
+                    self.advance()
+                    func.type_param_constraints[tp_name] = self.expect(TokenType.IDENTIFIER).value
             self.expect(TokenType.OPERATOR, '>')
 
         # 参数列表
@@ -1107,6 +1202,21 @@ class Parser:
         if self.match(TokenType.KEYWORD, 'try'):
             return self.parse_try_stmt()
 
+        # with 语句(P1.1): with expr [as name] { body }
+        if self.match(TokenType.KEYWORD, 'with'):
+            return self.parse_with_stmt()
+
+        # 类型别名(P1.3a): type Name = TypeExpr; — type 是软关键字,
+        # 只在「type IDENT =」模式出现时生效, 否则回退(如 type(x) 内置函数调用)
+        if self.match(TokenType.IDENTIFIER, 'type'):
+            saved_pos = self.pos
+            self.advance()
+            if (self.match(TokenType.IDENTIFIER)
+                    and self.peek().type == TokenType.OPERATOR
+                    and self.peek().value == '='):
+                return self.parse_type_alias()
+            self.pos = saved_pos
+
         # defer 语句
         if self.match(TokenType.KEYWORD, 'defer'):
             token = self.current_token
@@ -1136,7 +1246,7 @@ class Parser:
         if self.match(TokenType.KEYWORD, 'import'):
             return self.parse_import_stmt()
 
-        # Export语句
+        # Export语句: export name1, name2; — 显式声明模块边界(P2.1)
         if self.match(TokenType.KEYWORD, 'export'):
             return self.parse_export_stmt()
 
@@ -1291,6 +1401,52 @@ class Parser:
         self.expect(TokenType.SYMBOL, ';')
         return decl
 
+    def parse_export_stmt(self) -> ExportStmt:
+        """解析 export 语句(P2.1): export name1, name2;
+
+        显式声明模块边界 — 你是社会关系的总和,
+        暴露给外部才成为真实存在。
+        """
+        start_token = self.expect(TokenType.KEYWORD, 'export')
+        stmt = ExportStmt(line=start_token.line, column=start_token.column)
+        stmt.exports.append(self.expect(TokenType.IDENTIFIER).value)
+        while self.match(TokenType.SYMBOL, ','):
+            self.advance()
+            stmt.exports.append(self.expect(TokenType.IDENTIFIER).value)
+        self.expect(TokenType.SYMBOL, ';')
+        return stmt
+
+    def parse_type_alias(self) -> 'TypeAliasStmt':
+        """解析类型别名(P1.3a): type Name = TypeExpr;
+
+        调用时 current token 已是别名名(软关键字分支已跳过 type)。
+        """
+        start_token = self.current_token
+        name = self.expect(TokenType.IDENTIFIER).value
+        self.expect(TokenType.OPERATOR, '=')
+        aliased = self._parse_type_annotation()
+        self.expect(TokenType.SYMBOL, ';')
+        return TypeAliasStmt(name=name, aliased_type=aliased,
+                             line=start_token.line, column=start_token.column)
+
+    def parse_with_stmt(self) -> 'WithStmt':
+        """解析 with 语句(P1.1): with expr [as name] { body }"""
+        start_token = self.expect(TokenType.KEYWORD, 'with')
+        stmt = WithStmt(line=start_token.line, column=start_token.column)
+        stmt.resource = self.parse_expression()
+        if self.match(TokenType.KEYWORD, 'as'):
+            self.advance()
+            stmt.var_name = self.expect(TokenType.IDENTIFIER).value
+        self.expect(TokenType.SYMBOL, '{')
+        while not self.match(TokenType.SYMBOL, '}'):
+            s = self.parse_statement()
+            if s:
+                stmt.body.append(s)
+        self.expect(TokenType.SYMBOL, '}')
+        if self.match(TokenType.SYMBOL, ';'):
+            self.advance()
+        return stmt
+
     def parse_try_stmt(self) -> 'TryStmt':
         """解析 try-catch 语句"""
         start_token = self.expect(TokenType.KEYWORD, 'try')
@@ -1318,6 +1474,10 @@ class Parser:
                 self.expect(TokenType.SYMBOL, ')')
             else:
                 stmt.catch_var = self.expect(TokenType.IDENTIFIER).value
+            # P1.4: 可选类型过滤 catch e: ContractError
+            if self.match(TokenType.SYMBOL, ':'):
+                self.advance()
+                stmt.catch_types.append(self.expect(TokenType.IDENTIFIER).value)
             self.expect(TokenType.SYMBOL, '{')
             while not self.match(TokenType.SYMBOL, '}'):
                 s = self.parse_statement()
@@ -1377,9 +1537,16 @@ class Parser:
         return stmt
 
     def parse_yield_stmt(self) -> YieldStmt:
-        """解析 yield 语句 — 生成器产出值"""
+        """解析 yield 语句 — 生成器产出值; yield from expr 委派转发(P1.5)"""
         start_token = self.expect(TokenType.KEYWORD, 'yield')
         stmt = YieldStmt(line=start_token.line, column=start_token.column)
+
+        # yield from expr — 把可迭代对象的产出逐个转发
+        if self.match(TokenType.KEYWORD, 'from'):
+            self.advance()
+            stmt.from_expr = self.parse_expression()
+            self.expect(TokenType.SYMBOL, ';')
+            return stmt
 
         if not self.match(TokenType.SYMBOL, ';'):
             stmt.value = self.parse_expression()
@@ -1446,7 +1613,7 @@ class Parser:
 
         return stmt
 
-    def parse_if_expr(self) -> IfExpr:
+    def parse_if_expr(self) -> "IfExpr":
         """解析 if 表达式 - else 是必须的,因为表达式必须总有值"""
         start_token = self.current_token  # 'if' keyword
         self.advance()  # 消耗 if
@@ -1671,8 +1838,16 @@ class Parser:
         return OrPattern(patterns=patterns)
 
     def _parse_type_annotation(self) -> str:
-        """解析类型标注: Int | List[Int] | Dict[String, Int] | Result[Int, String]"""
+        """解析类型标注: Int | List[Int] | Dict[String, Int] | Result[Int, String] | A | B"""
         base = self.expect(TokenType.IDENTIFIER).value
+
+        # Union 类型(P1.3a): A | B — 不二法门的推广
+        if self.match(TokenType.OPERATOR, '|'):
+            parts = [base]
+            while self.match(TokenType.OPERATOR, '|'):
+                self.advance()
+                parts.append(self._parse_type_annotation())
+            return " | ".join(parts)
 
         # 泛型参数 (支持 <> 和 [])
         if self.match(TokenType.OPERATOR, '<') or self.match(TokenType.SYMBOL, '['):
@@ -1813,8 +1988,13 @@ class Parser:
         if self.match(TokenType.SYMBOL, '?'):
             token = self.current_token
             self.advance()
-            # 区分三元 vs TryExpr: 三元需要 ? 后面有表达式
-            if self.match(TokenType.SYMBOL, ':') or self.match(TokenType.NEWLINE) or self.match(TokenType.SYMBOL, ';'):
+            # 区分三元 vs TryExpr: 三元需要 ? 后面有表达式;
+            # ? 后是 : / 行尾 / ; / ) 或二元运算符(== != < > 等)时,
+            # 这是后缀 TryExpr(result?), 回退让 postfix 处理
+            if (self.match(TokenType.SYMBOL, ':') or self.match(TokenType.NEWLINE)
+                    or self.match(TokenType.SYMBOL, ';')
+                    or self.match(TokenType.SYMBOL, ')')
+                    or self.match(TokenType.OPERATOR)):
                 # TryExpr: result? (后缀)
                 # 回退,让 postfix 处理
                 self.pos -= 1
@@ -2011,12 +2191,20 @@ class Parser:
                     expr = SubscriptExpr(obj=expr, index=start_expr,
                                         line=start_token.line, column=start_token.column)
             
-            # ? 操作符 — Err 提前返回 (仅当 ? 后面是 : 或行尾时)
+            # ? 操作符 — Err 提前返回(后缀 TryExpr) vs 三元表达式 cond ? a : b
             elif self.match(TokenType.SYMBOL, '?'):
                 next_tok = self.peek()
-                # 三元表达式: ? 后面有表达式,不在此处理
-                if next_tok and (next_tok.type not in (TokenType.NEWLINE, TokenType.SYMBOL, TokenType.EOF) or 
-                   (next_tok.type == TokenType.SYMBOL and next_tok.value not in (':', ';', '}', ')', ',', ']', '{'))):
+                # ? 后是「表达式起始」才是三元(让 ternary 处理);
+                # 否则(== != < > ; ) , ] 行尾…)是后缀 TryExpr, 在此直接消费 —
+                # 早先的 break 设计会让 ? 遗留在 token 流中被 panic mode 吞掉
+                is_expr_start = (
+                    next_tok is None or
+                    next_tok.type in (TokenType.IDENTIFIER, TokenType.STRING,
+                                      TokenType.NUMBER, TokenType.KEYWORD) or
+                    (next_tok.type == TokenType.SYMBOL
+                     and next_tok.value in ('(', '[', '{', '-', '!'))
+                )
+                if is_expr_start:
                     break  # 让 ternary 处理
                 token = self.current_token
                 self.advance()
@@ -2437,6 +2625,52 @@ class YieldSignal(BaseException):
     def __init__(self, value: RuntimeValue):
         self.value = value
 
+# ── Intent 错误体系（P0.1：调用栈与错误诊断） ──────────
+
+class IntentError(Exception):
+    """Intent 错误基类 — 携带源码位置与调用栈快照
+
+    所有穿过解释器边界的错误最终包装为 IntentError,
+    使 CLI 能渲染: 错误消息 + 源码行高亮 + Intent 调用链。
+    """
+    def __init__(self, message: str, line: Optional[int] = None,
+                 column: Optional[int] = None, stack: Optional[list] = None,
+                 filename: Optional[str] = None):
+        super().__init__(message)
+        self.message = message
+        self.line = line
+        self.column = column
+        self.stack = stack if stack is not None else []
+        self.filename = filename
+
+class ContractViolation(IntentError):
+    """契约违反 — Intent 的身份证错误
+
+    requires 未满足(进门被拒)或 ensures 未兑现(出门验货失败)。
+    区别于普通运行时错误: 它携带违约条款、期望与实际值,
+    因为契约是代码间的社会关系,违约必须指名道姓。
+    """
+    def __init__(self, message: str, clause: str = "",
+                 expected: str = "", actual: str = "", **kwargs):
+        super().__init__(message, **kwargs)
+        self.clause = clause        # "requires" | "ensures"
+        self.expected = expected
+        self.actual = actual
+
+class CallFrame:
+    """调用栈帧 — 记录一次函数调用的发生处"""
+    __slots__ = ('name', 'line', 'column', 'filename')
+
+    def __init__(self, name: str, line: int = 0, column: int = 0, filename: str = ""):
+        self.name = name
+        self.line = line
+        self.column = column
+        self.filename = filename
+
+    def __repr__(self):
+        loc = f"{self.filename}:{self.line}" if self.filename else f"line {self.line}"
+        return f"{self.name} ({loc})"
+
 @dataclass
 class PipeExpr(Expression):
     """管道表达式 left |> right
@@ -2643,20 +2877,31 @@ class RuntimeValue:
         return bool(self.value)
 
     def copy(self) -> 'RuntimeValue':
-        """创建副本 - 修复:返回正确的子类类型"""
-        # 根据类型返回正确的子类实例
-        if isinstance(self, IntValue):
-            return IntValue(self.value)
-        elif isinstance(self, FloatValue):
-            return FloatValue(self.value)
-        elif isinstance(self, StringValue):
-            return StringValue(self.value)
-        elif isinstance(self, BoolValue):
-            return BoolValue(self.value)
-        elif isinstance(self, ListValue):
-            return ListValue(self.value.copy() if self.value else [])
-        else:
-            return RuntimeValue(self.type, self.value)
+        """创建副本 — 保持子类形态
+
+        P3.1 修复: 原实现只覆盖标量与 List, DictValue 等落入 else
+        退化为 RuntimeValue 基类 — 参数绑定(arg_value.copy())后
+        isinstance(x, DictValue) 全判 False, dict 传参即崩。
+        标量/List/Dict 深拷贝; 实例/函数/类保持引用语义;
+        Result/Error 委托各自 copy。
+        """
+        if isinstance(self, (IntValue, FloatValue, StringValue, BoolValue)):
+            return type(self)(self.value)
+        if isinstance(self, NoneValue):
+            return NoneValue()
+        if isinstance(self, ListValue):
+            return ListValue([v.copy() for v in self.value], self.type)
+        if isinstance(self, DictValue):
+            new_entries = {k: (v.copy() if isinstance(v, RuntimeValue) else v)
+                           for k, v in self.value.items()}
+            key_t = self.type.key_type if isinstance(self.type, DictType) else None
+            val_t = self.type.value_type if isinstance(self.type, DictType) else None
+            return DictValue(new_entries, key_t, val_t)
+        if isinstance(self, (InstanceValue, FunctionValue, ClassValue)):
+            return self  # 对象/函数/类是引用语义
+        if isinstance(self, (ResultValue, ErrorValue)):
+            return self.copy()  # 委托各自实现
+        return RuntimeValue(self.type, self.value)
 
 class IntValue(RuntimeValue):
     """整数值"""
@@ -2756,6 +3001,50 @@ class NoneValue(RuntimeValue):
     def to_bool(self) -> bool:
         return False
 
+# ── P1.4: Intent 异常层级(错误作为一等值被捕获) ──────────
+
+# Python 异常名 → Intent 异常类型名
+PY_TO_INTENT_EXC = {
+    'ContractViolation': 'ContractError',
+    'AssertionError': 'AssertError',
+    'ValueError': 'ValueError',
+    'TypeError': 'TypeError',
+    'IndexError': 'IndexError',
+    'KeyError': 'KeyError',
+    'ZeroDivisionError': 'ZeroDivisionError',
+    'NameError': 'NameError',
+    'RuntimeError': 'RuntimeError',
+    'SyntaxError': 'SyntaxError',
+    'ImportError': 'ImportError',
+}
+
+@dataclass
+class ErrorValue(RuntimeValue):
+    """Intent 异常值 — 烦恼即菩提: 错误被捕获为一等值
+
+    成员: .type(异常类型名) .message(消息) .stack(Intent 调用链)
+    catch 可按类型分流: catch e: ContractError { ... }
+    """
+    err_type: str = "RuntimeError"
+    message: str = ""
+    stack: List['RuntimeValue'] = field(default_factory=list)
+
+    def __init__(self, err_type: str = "RuntimeError", message: str = "",
+                 stack=None):
+        super().__init__(StringType(), message)
+        self.err_type = err_type
+        self.message = message
+        self.stack = stack if stack is not None else []
+
+    def __str__(self):
+        return f"{self.err_type}: {self.message}"
+
+    def __repr__(self):
+        return str(self)
+
+    def copy(self) -> 'ErrorValue':
+        return ErrorValue(self.err_type, self.message, list(self.stack))
+
 class DictValue(RuntimeValue):
     """字典值 - 键值对集合"""
 
@@ -2776,32 +3065,28 @@ class DictValue(RuntimeValue):
     def __repr__(self):
         return str(self)
 
-    def get(self, key) -> RuntimeValue:
-        val = self.value.get(key)
-        if val is not None:
-            return val
-        # 松散匹配：如果 raw value 跟 dict key 的 RuntimeValue.value 相等
-        raw_key = key
+    @staticmethod
+    def _norm_key(key):
+        """键规范化(P3.1): RuntimeValue → Python 标量
+
+        dict 的 key 统一为 Python 标量形态; 所有入口(get/set/has_key)
+        先过这一层, 消除「读用 str 写用 RuntimeValue」的形态分裂。
+        """
         if isinstance(key, (StringValue, IntValue, FloatValue, BoolValue)):
-            raw_key = key.value
-        for k, v in self.value.items():
-            if (isinstance(k, (StringValue, IntValue, FloatValue, BoolValue))
-                    and k.value == raw_key):
-                return v
+            return key.value
+        if isinstance(key, RuntimeValue):
+            return getattr(key, 'value', None)
+        return key
+
+    def get(self, key) -> RuntimeValue:
+        return self.value.get(self._norm_key(key))
 
     def set(self, key, value: RuntimeValue):
-        self.value[key] = value
+        self.value[self._norm_key(key)] = value
 
     def has_key(self, key) -> bool:
         """检查 key 是否在字典中"""
-        raw_key = key
-        if isinstance(key, (StringValue, IntValue, FloatValue, BoolValue)):
-            raw_key = key.value
-        for k, v in self.value.items():
-            if (isinstance(k, (StringValue, IntValue, FloatValue, BoolValue))
-                    and k.value == raw_key):
-                return True
-        return False
+        return self._norm_key(key) in self.value
 
     def to_bool(self) -> bool:
         return len(self.value) > 0
@@ -3185,8 +3470,9 @@ class Module:
     def __init__(self, name: str, filepath: str = ""):
         self.name = name
         self.filepath = filepath
-        self.exports = {}  # 导出的符号
-        self.symbols = {}  # 模块内所有符号
+        self.symbols = {}      # 模块内所有符号
+        self.exports = {}      # 导出给外部的符号
+        self.explicit_exports = set()  # P2.1: export 语句显式声明的名字
         self.is_loaded = False
         self.dependencies = set()  # 依赖的模块
 
@@ -3310,15 +3596,19 @@ class ModuleSystem:
                 # 执行模块代码
                 self.interpreter.execute_program(ast)
 
-                # 收集模块中的所有符号(暂时全部导出)
+                # 收集模块中的所有符号
                 for name, value in module_scope.symbols.items():
                     module.add_symbol(name, value)
-                    module.add_export(name, value)
+                    # 显式 export 声明存在时, 只导出声明过的名字(P2.1);
+                    # 无声明则维持全量导出(兼容旧模块)
+                    if not module.explicit_exports or name in module.explicit_exports:
+                        module.add_export(name, value)
 
                 # 也收集函数定义
                 for name, func_def in self.interpreter.functions.items():
                     if name not in ['main']:
-                        module.add_export(name, func_def)
+                        if not module.explicit_exports or name in module.explicit_exports:
+                            module.add_export(name, func_def)
 
             finally:
                 # 恢复作用域和模块
@@ -3341,6 +3631,14 @@ class Interpreter:
     def __init__(self):
         self.global_scope = Scope()
         self.contract_verifier = ContractVerifier(self)
+        # ── P0.1: Intent 级调用栈 ──
+        # 每个 CallFrame 记录一次函数调用的发生处(函数名/行/列/文件)
+        self.call_stack: list = []
+        self.current_filename: str = ""
+        # ── P0.4: 命令行参数(args() 内置读取) ──
+        self.cli_args: list = []
+        # ── P1.3a: 类型别名表(透明同义词) ──
+        self.type_aliases: Dict[str, str] = {}
         self.current_scope = self.global_scope
         self.functions: Dict[str, FunctionDef] = {}
         self.builtins = self._setup_builtins()
@@ -3431,6 +3729,8 @@ class Interpreter:
         return {
             'print': self._builtin_print,
             'len': self._builtin_len,
+            'assert': self._builtin_assert,
+            'args': self._builtin_args,
             'keys': self._builtin_keys,
             'values': self._builtin_values,
             'push': self._builtin_push,
@@ -3528,6 +3828,24 @@ class Interpreter:
         print(output)
         return IntValue(0)
 
+    def _builtin_args(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置args函数 — 命令行参数列表(程序与世界的接口)"""
+        return ListValue([StringValue(a) for a in self.cli_args], StringType())
+
+    def _builtin_assert(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """内置assert函数 — 测试框架的基石
+
+        断言失败时抛出 AssertionError(带消息),
+        经 execute_statement 包装层附加源码位置,顶层渲染显示调用链。
+        """
+        if len(args) != 2:
+            raise TypeError("assert() 期望2个参数(condition, message)")
+        cond, msg = args[0], args[1]
+        msg_str = self._value_to_str(msg)
+        if isinstance(cond, BoolValue) and cond.value:
+            return cond
+        raise AssertionError(msg_str)
+
     def _builtin_len(self, args: List[RuntimeValue]) -> RuntimeValue:
         """内置len函数"""
         if len(args) != 1:
@@ -3548,10 +3866,17 @@ class Interpreter:
             raise TypeError("keys() 期望1个Dict参数")
         keys_list = []
         for k in args[0].value.keys():
-            if isinstance(k, str):
+            # 键已规范化为 Python 标量(P3.1) — 包回 RuntimeValue
+            if isinstance(k, bool):
+                keys_list.append(BoolValue(k))
+            elif isinstance(k, str):
                 keys_list.append(StringValue(k))
+            elif isinstance(k, int):
+                keys_list.append(IntValue(k))
+            elif isinstance(k, float):
+                keys_list.append(FloatValue(k))
             else:
-                keys_list.append(k)
+                keys_list.append(RuntimeValue(AnyType(), k))
         return ListValue(keys_list, element_type=StringType())
 
     def _builtin_values(self, args: List[RuntimeValue]) -> RuntimeValue:
@@ -3790,8 +4115,12 @@ class Interpreter:
         elif isinstance(val, DictValue):
             items = []
             for k, v in val.value.items():
-                k_str = k if isinstance(k, str) else self._value_to_str(k)
-                items.append(f'"{k_str}": {self._value_to_str(v)}')
+                # 键已规范化为 Python 标量(P3.1); 字符串键带引号, 数值键原样
+                if isinstance(k, str):
+                    k_repr = f'"{k}"'
+                else:
+                    k_repr = str(k)
+                items.append(f"{k_repr}: {self._value_to_str(v)}")
             return "{" + ", ".join(items) + "}"
         elif isinstance(val, InstanceValue):
             # 运算符重载: 调用 __str__() 方法
@@ -4372,6 +4701,10 @@ class Interpreter:
         # ── 语义分析遍(Resolver)──
         self._run_resolver(program)
 
+        # 顶层入口: 重置调用栈(模块加载不清栈,保留外层调用链)
+        if not module_mode:
+            self.call_stack = []
+
         # 注册所有函数
         for func in program.functions.values():
             self.functions[func.name] = func
@@ -4424,7 +4757,7 @@ class Interpreter:
         self._track_node(stmt)
         try:
             return self._execute_statement_safe(stmt)
-        except (NameError, ValueError, TypeError, RuntimeError, IndexError, KeyError, ZeroDivisionError) as e:
+        except (NameError, ValueError, TypeError, RuntimeError, IndexError, KeyError, ZeroDivisionError, AssertionError) as e:
             msg = str(e)
             # 防止多层嵌套调用重复包装（如 main→bad() 在每层 execute_statement 都触发）
             if '   at line' in msg:
@@ -4477,6 +4810,17 @@ class Interpreter:
 
         elif isinstance(stmt, TryStmt):
             return self.execute_try_stmt(stmt)
+        elif isinstance(stmt, WithStmt):
+            return self.execute_with_stmt(stmt)
+        elif isinstance(stmt, TypeAliasStmt):
+            return self.execute_type_alias(stmt)
+        elif isinstance(stmt, ExportStmt):
+            # 显式导出声明(P2.1): 记录到当前模块的导出名单
+            current_module = getattr(self, 'current_module', None)
+            if current_module is not None:
+                for name in stmt.exports:
+                    current_module.explicit_exports.add(name)
+            return IntValue(0)
         elif isinstance(stmt, DeferStmt):
             # 注册 defer 到当前作用域的 defer 栈
             self.current_scope.defer_stack.append(stmt.body)
@@ -4601,6 +4945,22 @@ class Interpreter:
         """运行时类型校验 - 不匹配时抛出 TypeError"""
         if type_name == "Any":
             return
+        # 别名解析(P1.3a): 别名是透明的同义词, 递归解析到底层类型
+        seen = set()
+        while type_name in self.type_aliases and type_name not in seen:
+            seen.add(type_name)
+            type_name = self.type_aliases[type_name]
+        # Union 校验: 任一成员合法即通过(不二法门的推广)
+        if ' | ' in type_name:
+            members = [m.strip() for m in type_name.split('|')]
+            for m in members:
+                try:
+                    self._check_type(value, m, context)
+                    return
+                except TypeError:
+                    continue
+            actual = value.get_type().name
+            raise TypeError(f"类型不匹配{context}: 期望 {type_name},但得到 {actual}")
         expected = self._type_from_name(type_name)
         if expected is None:
             return  # 未知类型,宽容处理
@@ -4932,6 +5292,69 @@ class Interpreter:
 
         return result
 
+    def _check_constraint(self, type_name: str, constraint: str) -> bool:
+        """泛型约束检查(P1.3b) — 内置能力约束
+
+        Comparable: 支持排序比较的类型(心即理: 能比较才配进入比较的函数)
+        Numeric:    数值类型
+        未知约束宽容放行(与 _check_type 对未知类型的策略一致)
+        """
+        if constraint == 'Any':
+            return True
+        if constraint == 'Comparable':
+            return type_name in ('Int', 'Float', 'String', 'Bool')
+        if constraint == 'Numeric':
+            return type_name in ('Int', 'Float')
+        return True
+
+    def _make_error_value(self, e: Exception) -> 'ErrorValue':
+        """把 Python/Intent 异常包装为 Intent 异常值(P1.4)
+
+        类型名经 PY_TO_INTENT_EXC 映射(ContractViolation→ContractError),
+        消息取首行(去除 _error_context 的多行位置信息),
+        栈取异常穿帧快照(顶层则为当前调用栈)。
+        """
+        py_type = type(e).__name__
+        intent_type = PY_TO_INTENT_EXC.get(py_type, py_type)
+        msg = str(e)
+        if '\n' in msg:
+            msg = msg.split('\n')[0]
+        stack = getattr(e, '_intent_stack', None) or self.call_stack
+        stack_vals = [StringValue(repr(fr)) for fr in stack]
+        return ErrorValue(intent_type, msg, stack_vals)
+
+    def execute_type_alias(self, stmt: 'TypeAliasStmt') -> RuntimeValue:
+        """执行类型别名定义(P1.3a) — 注册透明同义词"""
+        self.type_aliases[stmt.name] = stmt.aliased_type
+        return IntValue(0)
+
+    def execute_with_stmt(self, stmt: 'WithStmt') -> RuntimeValue:
+        """执行 with 语句(P1.1) — 块级资源管理
+
+        获取资源 → 绑定 as 名 → 执行块 → finally 释放:
+        资源若提供 close 方法则自动调用。获取与释放在同一对
+        花括号内对称出现 — defer 的块级特化。
+        """
+        resource = self.evaluate_expression(stmt.resource)
+        old_scope = self.current_scope
+        self.current_scope = self.current_scope.enter()
+        if stmt.var_name:
+            self.current_scope.declare(stmt.var_name, resource, False)
+        result = IntValue(0)
+        try:
+            for body_stmt in stmt.body:
+                result = self.execute_statement(body_stmt)
+                if self.return_flag or self.break_flag or self.continue_flag:
+                    break
+        finally:
+            # 释放: 实例提供 close 方法则调用 — 清理在等待中
+            if isinstance(resource, InstanceValue):
+                close_method = resource.klass.find_method('close')
+                if close_method is not None:
+                    self._execute_method(close_method, resource, [])
+            self.current_scope = old_scope
+        return result
+
     def execute_try_stmt(self, stmt: 'TryStmt') -> RuntimeValue:
         """执行 try-catch 语句"""
         result = IntValue(0)
@@ -4947,14 +5370,15 @@ class Interpreter:
         except Exception as e:
             # 恢复作用域
             self.current_scope = old_scope
+            # P1.4: 包装为 Intent 异常值(错误作为一等值)
+            err_val = self._make_error_value(e)
+            # 类型过滤: catch_types 非空且不匹配 → 继续传播
+            if stmt.catch_types and err_val.err_type not in stmt.catch_types:
+                raise
             # 进入 catch 块
             self.current_scope = self.current_scope.enter()
-            # 绑定错误变量
-            err_msg = str(e)
-            # 去除错误上下文包装
-            if '\n' in err_msg:
-                err_msg = err_msg.split('\n')[0]
-            self.current_scope.declare(stmt.catch_var, StringValue(err_msg), False)
+            # 绑定错误变量(ErrorValue: .type/.message/.stack)
+            self.current_scope.declare(stmt.catch_var, err_val, False)
             for body_stmt in stmt.catch_body:
                 result = self.execute_statement(body_stmt)
                 if self.return_flag or self.break_flag or self.continue_flag:
@@ -5113,7 +5537,24 @@ class Interpreter:
         return IntValue(0)
 
     def execute_yield(self, stmt: YieldStmt) -> RuntimeValue:
-        """执行 yield 语句 — 将值推入生成器缓冲区"""
+        """执行 yield 语句 — 将值推入生成器缓冲区
+
+        yield from expr(P1.5): 委派转发 — 可迭代对象的每个元素
+        逐个推入当前生成器缓冲区(组合先于发明)。
+        """
+        if getattr(stmt, 'from_expr', None) is not None:
+            if not hasattr(self, '_yield_buffer') or self._yield_buffer is None:
+                raise RuntimeError("yield from 只能在生成器函数中使用")
+            src = self.evaluate_expression(stmt.from_expr)
+            if isinstance(src, ListValue):
+                items = list(src.value)
+            elif isinstance(src, DictValue):
+                items = [StringValue(k) if not isinstance(k, str) else k for k in src.value.keys()]
+            else:
+                raise TypeError(f"yield from 期望列表或字典,得到 {src.type}")
+            for item in items:
+                self._yield_buffer.append(item)
+            return ListValue(items, AnyType())
         value = self.evaluate_expression(stmt.value) if stmt.value else IntValue(0)
         if not hasattr(self, '_yield_buffer') or self._yield_buffer is None:
             raise RuntimeError("yield 只能在生成器函数中使用")
@@ -5268,18 +5709,47 @@ class Interpreter:
                 unique_paths.append(np)
 
         for base in unique_paths:
-            # 尝试 base/std/math.intent
+            # 尝试 base/std/math.intent(扁平模块)
             candidate = os.path.join(base, path_parts + '.intent')
             if os.path.exists(candidate):
                 return candidate
-            # 尝试 base/std/math/__init__.intent
+            # 尝试 base/std/math/__init__.intent(目录包)
             candidate_init = os.path.join(base, path_parts, '__init__.intent')
             if os.path.exists(candidate_init):
                 return candidate_init
+            # 尝试 base/std/math/math.intent(P2.1 npm 风格: 包目录内含同名主文件)
+            candidate_named = os.path.join(base, path_parts,
+                                           path_parts.split(os.sep)[-1] + '.intent')
+            if os.path.exists(candidate_named):
+                return candidate_named
 
         return None
 
     def execute_function(self, func, args: List[RuntimeValue],
+                          closure_scope: Optional[Scope] = None) -> RuntimeValue:
+        """执行函数(带调用栈跟踪) — 委托 _execute_function_inner"""
+        fd = func.func_def if isinstance(func, FunctionValue) else func
+        frame_name = getattr(fd, 'name', '<lambda>')
+        # 调用发生处的行号;顶层调用(如 main)无发生行,用函数定义行兜底
+        frame_line = self.current_line or getattr(fd, 'line', 0) or 0
+        frame = CallFrame(frame_name, frame_line, self.current_col,
+                          self.current_filename)
+        self.call_stack.append(frame)
+        try:
+            return self._execute_function_inner(func, args, closure_scope)
+        except Exception as e:
+            # 异常首次穿过本帧时,把完整调用链快照挂到异常上 —
+            # 传到顶层时 finally 已弹栈,只有此刻看得见全链
+            if not getattr(e, '_intent_stack', None):
+                try:
+                    e._intent_stack = list(self.call_stack)
+                except Exception:
+                    pass
+            raise
+        finally:
+            self.call_stack.pop()
+
+    def _execute_function_inner(self, func, args: List[RuntimeValue],
                           closure_scope: Optional[Scope] = None) -> RuntimeValue:
         """执行函数 - 支持闭包和泛型类型推断
 
@@ -5311,6 +5781,18 @@ class Interpreter:
             for tp in type_params:
                 if tp not in type_bindings:
                     type_bindings[tp] = "Any"
+            # 泛型约束检查(P1.3b): 约束违反走契约错误通道 —
+            # 「类型参数的要求」与 requires 同性质: 不满足即拒之门外
+            constraints = getattr(func_def, 'type_param_constraints', {})
+            for tp, constraint in constraints.items():
+                bound_type = type_bindings.get(tp, "Any")
+                if not self._check_constraint(bound_type, constraint):
+                    raise ContractViolation(
+                        f"泛型约束违约: 类型参数 {tp} 要求 {constraint},但得到 {bound_type}",
+                        clause=f"constraint {constraint}",
+                        expected=constraint, actual=bound_type,
+                        line=self.current_line, column=self.current_col,
+                        stack=list(self.call_stack), filename=self.current_filename)
             # 代入形参标注和返回类型
             subst_params = [(name, self._subst_type(pt, type_bindings), default)
                             for name, pt, default in func_def.params]
@@ -5356,7 +5838,14 @@ class Interpreter:
         if func_requires:
             if not self.contract_verifier.verify_requires(func_requires, context):
                 self.current_scope = old_scope
-                return IntValue(1)
+                errs = self.contract_verifier.get_errors()
+                first = errs[0] if errs else "前置条件未满足"
+                raise ContractViolation(
+                    f"契约违约(requires): {first} — 函数 {func_name} 拒绝执行",
+                    clause="requires",
+                    expected=first,
+                    line=self.current_line, column=self.current_col,
+                    stack=list(self.call_stack), filename=self.current_filename)
 
         # 执行函数体
         is_gen = getattr(func_def, 'is_generator', False)
@@ -5386,8 +5875,16 @@ class Interpreter:
             # 将 result 放入全局作用域,使 ensures 表达式的 result 可解析
             self.global_scope.symbols['result'] = result
             if not self.contract_verifier.verify_ensures(func_ensures, result, context):
-                # 静默失败,不抛异常 — 契约违反记录在 error_messages 中
-                pass
+                errs = self.contract_verifier.get_errors()
+                first = errs[0] if errs else "后置条件未满足"
+                del self.global_scope.symbols['result']
+                self._exit_scope(old_scope)
+                raise ContractViolation(
+                    f"契约违约(ensures): {first} — 函数 {func_name} 未兑现承诺",
+                    clause="ensures",
+                    expected=first,
+                    line=self.current_line, column=self.current_col,
+                    stack=list(self.call_stack), filename=self.current_filename)
             del self.global_scope.symbols['result']
 
         # 恢复作用域（执行 defer）
@@ -5436,6 +5933,27 @@ class Interpreter:
         return class_value
     
     def _execute_method(self, method: FunctionValue, instance: 'InstanceValue', args: List[RuntimeValue]):
+        """在实例上下文中执行方法(带调用栈跟踪) — 委托 _execute_method_inner"""
+        fd = method.func_def
+        class_name = getattr(getattr(instance, 'class_value', None), 'name', '')
+        frame_name = f"{class_name}.{getattr(fd, 'name', '<method>')}" if class_name \
+            else getattr(fd, 'name', '<method>')
+        frame = CallFrame(frame_name, self.current_line, self.current_col,
+                          self.current_filename)
+        self.call_stack.append(frame)
+        try:
+            return self._execute_method_inner(method, instance, args)
+        except Exception as e:
+            if not getattr(e, '_intent_stack', None):
+                try:
+                    e._intent_stack = list(self.call_stack)
+                except Exception:
+                    pass
+            raise
+        finally:
+            self.call_stack.pop()
+
+    def _execute_method_inner(self, method: FunctionValue, instance: 'InstanceValue', args: List[RuntimeValue]):
         """在实例上下文中执行方法"""
         func_def = method.func_def
         closure = method.closure
@@ -5547,6 +6065,35 @@ class Interpreter:
                     return method
                 raise NameError(f"实例没有属性 '{expr.member}'")
 
+            # ErrorValue 成员访问(P1.4): e.type / e.message / e.stack
+            if isinstance(obj_value, ErrorValue):
+                if expr.member == 'type':
+                    return StringValue(obj_value.err_type)
+                if expr.member == 'message':
+                    return StringValue(obj_value.message)
+                if expr.member == 'stack':
+                    return ListValue(list(obj_value.stack), StringType())
+                raise NameError(f"异常值没有成员 '{expr.member}'")
+
+            # ResultValue 成员访问 — Ok/Err 是平等的两种值,Result 有自己的结构
+            if isinstance(obj_value, ResultValue):
+                if expr.member == 'is_ok':
+                    return BoolValue(obj_value.is_ok)
+                if expr.member == 'ok_value':
+                    if obj_value.ok_value is not None:
+                        return obj_value.ok_value
+                    raise NameError("对 Err 访问 ok_value")
+                if expr.member == 'err_value':
+                    if obj_value.err_value is not None:
+                        return obj_value.err_value
+                    raise NameError("对 Ok 访问 err_value")
+                raise NameError(f"Result 没有成员 '{expr.member}'")
+
+            # DictValue 成员(P3.1): 字典没有属性成员, 方法走 CallExpr 路由 —
+            # 提前拒绝, 防止落入模块 fallback 把 dict 当模块名
+            if isinstance(obj_value, DictValue):
+                raise NameError(f"字典没有成员 '{expr.member}'(方法调用: d.has_key(k)/d.keys()/d.values())")
+
             # 如果obj_value是模块引用,获取模块导出
             if hasattr(obj_value, 'module_ref'):
                 module = obj_value.module_ref
@@ -5572,8 +6119,8 @@ class Interpreter:
             except NameError:
                 pass
 
-            # 尝试在模块中查找
-            if hasattr(obj_value, 'value'):
+            # 尝试在模块中查找(仅当值是字符串 — 防止 dict/list 等被误当模块名)
+            if hasattr(obj_value, 'value') and isinstance(obj_value.value, str):
                 module_name = obj_value.value
                 if hasattr(self, 'module_system') and module_name in self.module_system.modules:
                     module = self.module_system.modules[module_name]
@@ -5765,6 +6312,21 @@ class Interpreter:
 
             # 2️⃣ 处理MemberAccess作为函数的情况 (如 std.math.add(x, y) 或 p.method())
             if isinstance(expr.func, MemberAccess):
+                # ResultValue 方法调用: r.unwrap() — Err 上 unwrap 即违约,抛错
+                recv = self.evaluate_expression(expr.func.obj, context)
+                if isinstance(recv, ResultValue) and expr.func.member == 'unwrap':
+                    return recv.unwrap()
+                # DictValue 方法调用(P3.1): d.has_key(k) / d.keys() / d.values()
+                if isinstance(recv, DictValue):
+                    m = expr.func.member
+                    args = [self.evaluate_expression(arg, context) for arg in expr.args]
+                    if m == 'has_key' and len(args) == 1:
+                        return BoolValue(recv.has_key(args[0]))
+                    if m == 'keys' and not args:
+                        return self._builtin_keys([recv])
+                    if m == 'values' and not args:
+                        return self._builtin_values([recv])
+                    raise NameError(f"字典没有方法 '{m}'(可用: has_key/keys/values)")
                 # 先求值 MemberAccess 链，获取实际函数/方法
                 func_val = self.evaluate_expression(expr.func, context)
                 args = [self.evaluate_expression(arg, context) for arg in expr.args]
@@ -5877,7 +6439,7 @@ class Interpreter:
                 
                 key_val = self.evaluate_expression(expr.key_expr, context)
                 value_val = self.evaluate_expression(expr.value_expr, context)
-                entries[key_val] = value_val
+                entries[DictValue._norm_key(key_val)] = value_val
                 self.current_scope = old_scope
             
             return DictValue(entries, StringType(), AnyType())
@@ -5986,7 +6548,7 @@ class Interpreter:
 
         # 比较运算
         elif op == 'in':
-            # x in list / key in dict
+            # x in list / key in dict / sub in string
             if isinstance(right, ListValue):
                 for elem in right.value:
                     eq_result = self._binary_op(left, '==', elem)
@@ -5995,7 +6557,12 @@ class Interpreter:
                 return BoolValue(False)
             elif isinstance(right, DictValue):
                 return BoolValue(right.has_key(left))
-            raise TypeError(f"'in' 操作符右侧期望列表或字典,得到 {right.type}")
+            elif isinstance(right, StringValue):
+                # 子串归属 — 一物是否在他物之中(格物的基本操作)
+                if not isinstance(left, StringValue):
+                    raise TypeError(f"'in' 对字符串期望 String 左侧,得到 {left.type}")
+                return BoolValue(left.value in right.value)
+            raise TypeError(f"'in' 操作符右侧期望列表、字典或字符串,得到 {right.type}")
 
         elif op == 'not in':
             # x not in list / key not in dict
@@ -6068,9 +6635,20 @@ class Interpreter:
             # Dict 比较
             if isinstance(left, DictValue) and isinstance(right, DictValue):
                 if op == '==':
-                    return BoolValue(left.value == right.value)
+                    if len(left.value) != len(right.value):
+                        return BoolValue(False)
+                    for k, lv in left.value.items():
+                        # 键集合一致 + 值逐项递归比较(与 List 比较同策略,
+                        # 避免 RuntimeValue dataclass 空字段 eq 的身份比较陷阱)
+                        if k not in right.value:
+                            return BoolValue(False)
+                        eq_result = self._binary_op(lv, '==', right.value[k])
+                        if not eq_result.value:
+                            return BoolValue(False)
+                    return BoolValue(True)
                 elif op == '!=':
-                    return BoolValue(left.value != right.value)
+                    eq_result = self._binary_op(left, '==', right)
+                    return BoolValue(not eq_result.value)
 
             # None 比较
             if isinstance(left, NoneValue) and isinstance(right, NoneValue):
@@ -6425,6 +7003,28 @@ def main():
     )
 
     parser.add_argument('filename', nargs='?', help='Intent源文件')
+    parser.add_argument('-c', '--code', default=None,
+                        help='直接执行代码串(对齐 python -c)')
+    parser.add_argument('--version', action='store_true', help='显示版本号')
+    parser.add_argument('--check', action='store_true',
+                        help='只解析不执行: 语法干净退出0, 有错误退出2(CI/lint 前置)')
+    parser.add_argument('--emit', nargs=2, metavar=('KIND', 'FILE'),
+                        help='将词法/语法结果写入文件: --emit tokens out.txt | --emit ast out.txt')
+    parser.add_argument('--install', nargs='?', const='__BATCH__', default=None,
+                        metavar='URL',
+                        help='安装依赖: 带 URL 装单个; 不带按 intent.toml 的 [deps] 批量装')
+    parser.add_argument('--fmt', default=None, metavar='FILE',
+                        help='格式化 Intent 文件, 结果输出到 stdout')
+    parser.add_argument('--lint', default=None, metavar='FILE',
+                        help='静态检查: let 重赋值/空 catch/无契约导出/未用 import')
+    parser.add_argument('--compile', default=None, metavar='FILE',
+                        help='M10: 编译 Intent 文件为字节码(可加 --run-vm 直接执行)')
+    parser.add_argument('--run-vm', action='store_true',
+                        help='M10: 编译后用栈式 VM 执行(与 --compile 搭配)')
+    parser.add_argument('--doc', default=None, metavar='FILE',
+                        help='从源码生成 markdown 模块文档(签名/契约/注释)')
+    parser.add_argument('--test', nargs='?', const='tests', default=None,
+                        help='运行测试: 不带参数默认 tests/ 目录, 也可指定文件或目录')
     parser.add_argument('-p', '--philosophy', action='store_true', help='显示哲学视角')
     parser.add_argument('-m', '--mapping', default='philosophy/mapping.json', help='哲学映射文件路径')
     parser.add_argument('-d', '--demo', action='store_true', help='运行演示程序')
@@ -6432,13 +7032,110 @@ def main():
     parser.add_argument('-t', '--tokens', action='store_true', help='显示词法分析结果')
     parser.add_argument('-a', '--ast', action='store_true', help='显示语法分析结果')
 
-    args = parser.parse_args()
+    # parse_known_args: 源文件之后的额外参数透传给 Intent 程序(args() 读取)
+    args, extra = parser.parse_known_args()
 
     # 创建翻译器
     translator = PhilosophyTranslator(args.mapping)
 
     # 创建解释器
     interpreter = Interpreter()
+
+    # --version: 只报版本
+    if args.version:
+        print(f"Intent v{VERSION} ({PHILOSOPHY_SLOGAN})")
+        return
+
+    # --install: 依赖安装(P2.1)
+    if args.install is not None:
+        sys.exit(run_install(None if args.install == '__BATCH__' else args.install))
+
+    # --fmt: 格式化(P2.2)
+    if args.fmt:
+        sys.exit(run_format(args.fmt))
+
+    # --lint: 静态检查(P2.3)
+    if args.lint:
+        sys.exit(run_lint(args.lint))
+
+    # --doc: 生成模块文档(P2.4)
+    if args.doc:
+        sys.exit(run_doc(args.doc))
+
+    # --compile: 字节码编译(M10)
+    if args.compile:
+        try:
+            with open(args.compile, 'r', encoding='utf-8') as f:
+                code = f.read()
+        except FileNotFoundError:
+            print(f"❌ 找不到文件: {args.compile}")
+            sys.exit(2)
+        lexer = Lexer(code, args.compile)
+        tokens = lexer.tokenize()
+        parser = Parser(tokens, code)
+        program = parser.parse()
+        if parser.errors:
+            print(f"❌ 语法错误, 无法编译: {parser.errors[0]}")
+            sys.exit(2)
+        from intent_bytecode import compile_program, VM
+        try:
+            emitter = compile_program(program)
+        except NotImplementedError as e:
+            print(f"❌ 编译失败(特性未覆盖, 属 M11 范围): {e}", file=sys.stderr)
+            sys.exit(2)
+        # 编译元信息走 stderr — stdout 只留程序输出, 与解释器 stdout 可直接对照
+        print(f"⚙️  字节码编译完成: {args.compile} → {len(emitter.code)} 条指令, "
+              f"{len(emitter.functions)} 个函数", file=sys.stderr)
+        if args.run_vm:
+            vm = VM(emitter, interpreter._builtin_print)
+            vm.run()
+        sys.exit(0)
+
+    # P2.1: intent.toml 存在时, 项目 lib 与全局库加入搜索路径
+    manifest = load_project_manifest()
+    if manifest is not None:
+        lib_dir = os.path.abspath('lib')
+        if lib_dir not in interpreter.module_search_paths:
+            interpreter.module_search_paths.append(lib_dir)
+    global_lib = os.path.join(os.path.expanduser('~'), '.intent', 'lib')
+    if os.path.isdir(global_lib) and global_lib not in interpreter.module_search_paths:
+        interpreter.module_search_paths.append(global_lib)
+
+    # 代码来源: -c 优先, 其次 filename; 都没有则后续走 demo/help 分支
+    code = None
+    code_name = "<-c>"
+    if args.code is not None:
+        code = args.code
+    elif args.filename and args.filename != '-':
+        try:
+            with open(args.filename, 'r', encoding='utf-8') as f:
+                code = f.read()
+            code_name = args.filename
+            interpreter.current_filename = args.filename
+            file_dir = os.path.dirname(os.path.abspath(args.filename))
+            interpreter.add_module_search_path(file_dir)
+            # P0.4: 源文件名之后的命令行参数交给 args() — 程序与世界的接口
+            if extra:
+                interpreter.cli_args = extra
+        except FileNotFoundError:
+            print(f"错误: 找不到文件 {args.filename}")
+            sys.exit(2)
+
+    # --check: 只解析不执行(治宽松模式假通过, CI 用)
+    if args.check:
+        check_code(code or "", code_name)
+        return
+
+    # --emit: tokens/ast 写入文件
+    if args.emit:
+        emit_kind, emit_path = args.emit
+        emit_analysis(code or "", emit_kind, emit_path, code_name)
+        return
+
+    # -c 直接执行(无需文件)
+    if args.code is not None:
+        run_code(code, interpreter, args)
+        return
 
     # 启动REPL
     if args.repl:
@@ -6475,8 +7172,8 @@ def main():
         print("x 不大于 5");
     }
 
-    // 循环
-    let i = 1;
+    # 循环
+    let mut i = 1;
     while (i <= 3) {
         print("循环计数:", i);
         i = i + 1;
@@ -6496,25 +7193,18 @@ def main():
         run_code(demo_code, interpreter, args)
         return
 
-    # 检查文件参数
-    if not args.filename and not args.repl and not args.demo:
+    # P0.2: 测试模式
+    if args.test:
+        run_tests(args.test)
+        return
+
+    # 无代码来源且无 demo: 打印帮助
+    if code is None and not args.demo:
         parser.print_help()
         return
 
-    # 读取文件
-    try:
-        with open(args.filename, 'r', encoding='utf-8') as f:
-            code = f.read()
-        # 设置当前文件目录,用于模块搜索
-        file_dir = os.path.dirname(os.path.abspath(args.filename))
-        interpreter.add_module_search_path(file_dir)
-    except FileNotFoundError:
-        print(f"错误: 找不到文件 {args.filename}")
-        print("提示: 请确保文件存在,或使用 --demo 运行演示程序")
-        return
-
     # 显示哲学视角
-    if args.philosophy:
+    if args.philosophy and code:
         print("🧘 哲学视角代码:")
         print("=" * 60)
         print(translator.translate_code(code, "display"))
@@ -6523,7 +7213,74 @@ def main():
         print("-" * 40)
 
     # 运行代码
-    run_code(code, interpreter, args)
+    if code is not None:
+        run_code(code, interpreter, args)
+
+def wrap_intent_error(e: Exception, interpreter: 'Interpreter') -> IntentError:
+    """把任意异常包装为带源码位置与调用栈的 IntentError
+
+    解释器内部各处 raise 的是 Python 原生异常(TypeError/IndexError...),
+    在顶层统一包装,补上出错位置与 Intent 调用链 — 不逐处修改 raise 点。
+    """
+    if isinstance(e, IntentError):
+        if not e.stack:
+            # 异常穿帧时已快照的栈,优先于顶层已弹空的 call_stack
+            e.stack = getattr(e, '_intent_stack', None) or list(interpreter.call_stack)
+        if e.line is None:
+            e.line = interpreter.current_line
+            e.column = interpreter.current_col
+            e.filename = interpreter.current_filename
+        return e
+    is_syntax = isinstance(e, SyntaxError)
+    ie = IntentError(
+        str(e),
+        line=getattr(e, 'lineno', None) or interpreter.current_line or None,
+        column=getattr(e, 'offset', None) or interpreter.current_col or None,
+        stack=getattr(e, '_intent_stack', None) or list(interpreter.call_stack),
+        filename=interpreter.current_filename)
+    ie.py_type = type(e).__name__
+    ie.is_syntax = is_syntax
+    return ie
+
+def render_intent_error(e: IntentError, interpreter: 'Interpreter') -> str:
+    """渲染 Intent 错误: 消息 + 源码行高亮 + 调用链(从外到内)"""
+    out = []
+    # 1. 错误头 — 契约违反是身份证错误,必须第一个被看见
+    if isinstance(e, ContractViolation):
+        head = "❌ 契约违反"
+    elif getattr(e, 'is_syntax', False):
+        head = "❌ 语法错误"
+    else:
+        head = "❌ 运行时错误"
+    py_type = getattr(e, 'py_type', None)
+    type_note = f" [{py_type}]" if py_type else ""
+    out.append(f"{head}: {e.message}{type_note}")
+
+    # 2. 源码位置 + 出错行片段 + 光标
+    # 注: execute_statement 的旧包装层可能已在消息里附加过位置,检测到则不重复
+    has_inline_pos = '   at line' in (e.message or '')
+    if e.line and not has_inline_pos:
+        fname = e.filename or "<stdin>"
+        out.append(f"   at {fname}:{e.line}:{e.column or 1}")
+        src_lines = interpreter.source_lines
+        if src_lines and 0 < e.line <= len(src_lines):
+            src = src_lines[e.line - 1].rstrip('\n')
+            gutter = " " * (len(str(e.line)) + 3)
+            out.append(f"   {e.line} | {src}")
+            col = e.column or 1
+            out.append(f"{gutter}{' ' * (col - 1)}^")
+
+    # 3. Intent 调用链 — 从外到内,看清错误穿过哪些函数
+    if e.stack:
+        out.append("   调用链(从外到内):")
+        for fr in e.stack:
+            out.append(f"     {fr}")
+
+    # 4. 契约违反的专属提示
+    if isinstance(e, ContractViolation):
+        out.append("   提示: 契约是函数与调用者之间的合同 — 检查实参是否满足")
+        out.append("         requires,或函数实现是否兑现了 ensures 的承诺")
+    return "\n".join(out)
 
 def run_code(code: str, interpreter: Interpreter, args):
     """运行Intent代码"""
@@ -6578,6 +7335,8 @@ def run_code(code: str, interpreter: Interpreter, args):
                 print(f"    • {err}")
             print()
 
+        # P0.1: 提供源码行,供错误渲染显示出错行片段
+        interpreter._set_source(code)
         result = interpreter.execute_program(ast)
 
         if parser.errors:
@@ -6587,18 +7346,734 @@ def run_code(code: str, interpreter: Interpreter, args):
         if result is not None and not (isinstance(result.value, int) and result.value == 0):
             print(f"返回值: {result}")
 
-    except SyntaxError as e:
-        print(f"❌ 语法错误: {e}")
-    except RuntimeError as e:
-        print(f"❌ 运行时错误: {e}")
     except Exception as e:
-        print(f"❌ 未知错误: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
+        err = wrap_intent_error(e, interpreter)
+        print()
+        print(render_intent_error(err, interpreter))
+        sys.exit(1)
+
+# ==================== P0.4 CLI 辅助 ====================
+
+# ==================== P0.4 CLI 辅助 ====================
+
+# ── P2.1 包管理 V0.1(本地优先, 无版本求解器) ──────────
+
+def load_project_manifest(path: str = "intent.toml") -> Optional[dict]:
+    """读取项目清单 intent.toml(P2.1)
+
+    格式:
+      [project]
+      name = "myproj"
+      version = "0.1.0"
+      [deps]
+      mylib = { git = "https://github.com/x/mylib.git" }
+      utils = "../utils"        # 本地路径依赖
+
+    返回 None 表示无清单文件。tomllib 不可用时抛清晰错误。
+    """
+    if not os.path.isfile(path):
+        return None
+    try:
+        import tomllib
+    except ImportError:
+        raise RuntimeError("解析 intent.toml 需要 Python 3.11+ 的 tomllib 模块")
+    with open(path, 'rb') as f:
+        data = tomllib.load(f)
+    manifest = {
+        'name': data.get('project', {}).get('name', ''),
+        'version': data.get('project', {}).get('version', '0.0.0'),
+        'deps': {},
+        'raw': data,
+    }
+    for dep_name, spec in data.get('deps', {}).items():
+        if isinstance(spec, dict):
+            manifest['deps'][dep_name] = spec.get('git') or spec.get('path') or ''
+        else:
+            manifest['deps'][dep_name] = str(spec)
+    return manifest
+
+def _dep_dir_name(dep_name: str, source: str) -> str:
+    """从依赖名/源推导本地目录名"""
+    if source.startswith(('http://', 'https://', 'git@')):
+        base = source.rstrip('/').split('/')[-1]
+        if base.endswith('.git'):
+            base = base[:-4]
+        return base or dep_name
+    return dep_name
+
+def install_dependency(dep_name: str, source: str, lib_dir: str = "lib") -> bool:
+    """安装单个依赖(P2.1) — git clone 或本地路径复制
+
+    刻意不做版本求解: 冲突了直接报错让人工裁决 —
+    连接贵在简单可信, 版本求解器是复杂性瘟疫。
+    """
+    import subprocess
+    target = os.path.join(lib_dir, _dep_dir_name(dep_name, source))
+    if source.startswith(('http://', 'https://', 'git@')):
+        if os.path.isdir(os.path.join(target, '.git')):
+            print(f"  ⬇️  更新 {dep_name} ({source})")
+            r = subprocess.run(['git', '-C', target, 'pull', '--ff-only'],
+                               capture_output=True, text=True)
+            return r.returncode == 0
+        print(f"  📦 克隆 {dep_name} ({source})")
+        os.makedirs(lib_dir, exist_ok=True)
+        r = subprocess.run(['git', 'clone', '--depth', '1', source, target],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"  ❌ 克隆失败: {r.stderr.strip()}")
+        return r.returncode == 0
+    # 本地路径依赖: 符号链接或目录复制
+    src_path = os.path.abspath(source)
+    if not os.path.isdir(src_path):
+        print(f"  ❌ 本地依赖不存在: {src_path}")
+        return False
+    os.makedirs(lib_dir, exist_ok=True)
+    import shutil
+    if os.path.isdir(target):
+        shutil.rmtree(target)
+    shutil.copytree(src_path, target, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+    print(f"  📦 复制 {dep_name} ({source})")
+    return True
+
+def run_install(source: Optional[str] = None, manifest_path: str = "intent.toml") -> int:
+    """--install: 安装依赖(P2.1)
+
+    带 URL: 安装单个; 不带: 按 intent.toml 的 [deps] 批量安装。
+    """
+    if source:
+        ok = install_dependency(_dep_dir_name('dep', source), source)
+        print("✅ 安装完成" if ok else "❌ 安装失败")
+        return 0 if ok else 1
+    manifest = load_project_manifest(manifest_path)
+    if manifest is None:
+        print(f"❌ 找不到 {manifest_path}(可用 --install <git-url> 安装单个依赖)")
+        return 2
+    if not manifest['deps']:
+        print(f"✅ {manifest['name'] or '项目'} 无依赖")
+        return 0
+    print(f"安装 {manifest['name']} v{manifest['version']} 的 {len(manifest['deps'])} 个依赖:")
+    failed = []
+    for dep_name, src in manifest['deps'].items():
+        if not src:
+            print(f"  ⚠️  {dep_name}: 无源地址,跳过")
+            failed.append(dep_name)
+            continue
+        if not install_dependency(dep_name, src):
+            failed.append(dep_name)
+    if failed:
+        print(f"❌ {len(failed)} 个依赖失败: {', '.join(failed)}")
+        return 1
+    print("✅ 全部依赖安装完成")
+    return 0
+
+# ==================== P2.2 Formatter ====================
+
+def format_code(code: str) -> str:
+    """Intent 代码格式化(P2.2) — token 流重排, 不动语义
+
+    大道不称: 格式不该是个人品味, 是语言的默认秩序。
+    规则刻意少(对齐 gofmt 哲学):
+      - 4 空格缩进, { 后加深, } 前恢复
+      - K&R 花括号: def f() { — { 不换行
+      - ; 结尾换行(类内方法 } 也换行)
+      - 二元运算符/=>/管道两侧空格; , 后空格; ( [ . : 紧贴
+      - 保留注释(行注释跟随所在行)
+    不做: 80 列软限制不断行(太长是内容问题不是格式问题)、无可配置项。
+    """
+    tokens = Lexer(code, keep_comments=True).tokenize()
+    out_lines = []
+    depth = 0
+    line_parts = []          # 当前行的 token 片段
+    pending_comments = []    # 独立成行的注释(上一行遗留)
+
+    def flush_line():
+        nonlocal line_parts
+        text = "".join(line_parts).rstrip()
+        if text:
+            out_lines.append("    " * depth + text)
+        line_parts = []
+
+    def spacing(prev_tok, tok) -> str:
+        """两个 token 之间是否需要空格"""
+        if prev_tok is None:
+            return ""
+        pv, tv = prev_tok.value, tok.value
+        pt, tt = prev_tok.type, tok.type
+        # 注释前保留两空格
+        if tt == TokenType.COMMENT:
+            return "  " if line_parts else ""
+        # 冒号: 类型标注 x: Int / 字典 "k": v — 前紧贴, 后空格
+        if tv == ':' and pt != TokenType.COMMENT:
+            return ""
+        if pv == ':':
+            # match 分支标签 score: 后不空格; 其余冒号后空格
+            if tv == '{':
+                return " "
+            return " "
+        # 开括号/点/分号类紧贴
+        if tv in (')', ']', ',', ';', '.'):
+            return ""
+        if tv == '(':
+            # 调用/定义紧贴; 关键字(if/while/for/match)后留空格
+            if pt == TokenType.KEYWORD and pv in ('if', 'while', 'for', 'match', 'return', 'catch', 'with'):
+                return " "
+            return ""
+        if pv in ('(', '[', '.', '!'):
+            return ""
+        if pv == ',':
+            return " "
+        if pv == ';':
+            return ""  # ; 后通常换行, 兜底
+        # => 与管道两侧空格
+        if pv in ('=>', '|>') or tv in ('=>', '|>'):
+            return " "
+        # 运算符两侧空格
+        if pt == TokenType.OPERATOR or tt == TokenType.OPERATOR:
+            return " "
+        if pt == TokenType.SYMBOL and pv in ('+', '-', '*', '/', '%', '**', '//', '==', '!=', '<', '>', '<=', '>=', '='):
+            return " "
+        if tt == TokenType.SYMBOL and tv in ('+', '-', '*', '/', '%', '**', '//', '==', '!=', '<', '>', '<=', '>=', '='):
+            return " "
+        # 默认: 关键字/标识符/字面量之间留空格
+        return " "
+
+    prev = None
+    for tok in tokens:
+        if tok.type == TokenType.EOF:
+            break
+        if tok.type == TokenType.NEWLINE:
+            flush_line()
+            prev = None
+            continue
+        if tok.type == TokenType.COMMENT:
+            if line_parts:
+                # 行尾注释: 拼到当前行
+                line_parts.append("  " + tok.value)
+                flush_line()
+                prev = None
+            else:
+                # 独立注释行
+                out_lines.append("    " * depth + tok.value)
+            continue
+        # 花括号深度管理
+        if tok.value == '{':
+            line_parts.append(" {")
+            flush_line()
+            depth += 1
+            prev = None
+            continue
+        if tok.value == '}':
+            if line_parts:
+                flush_line()
+            depth = max(0, depth - 1)
+            line_parts.append("}")
+            prev = tok
+            continue
+        # 普通 token
+        if tok.type == TokenType.STRING:
+            # Lexer 剥掉了引号 — formatter 还原(f 前缀一并恢复)
+            prefix = 'f' if getattr(tok, 'is_fstring', False) else ''
+            text = prefix + '"' + tok.value + '"'
+            line_parts.append(spacing(prev, tok) + text)
+        else:
+            line_parts.append(spacing(prev, tok) + tok.value)
+        prev = tok
+        # ; 结尾换行
+        if tok.value == ';':
+            flush_line()
+            prev = None
+        # match 分支: 行内出现过 => 时, 分支逗号后换行
+        elif tok.value == ',' and any('=>' in p for p in line_parts):
+            flush_line()
+            prev = None
+    flush_line()
+    # 收尾: 去掉多余空行(最多保留一个连续空行由源码空行决定 — V0.1 统一单空行分隔块)
+    result = "\n".join(out_lines)
+    return result + "\n" if result else ""
+
+def run_format(path: str) -> int:
+    """--fmt: 格式化文件, 结果打印到 stdout(重定向即写回)"""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            code = f.read()
+    except FileNotFoundError:
+        print(f"❌ 找不到文件: {path}")
+        return 2
+    try:
+        formatted = format_code(code)
+    except SyntaxError as e:
+        print(f"❌ 语法错误, 无法格式化: {e}")
+        return 2
+    print(formatted, end='')
+    return 0
+
+# ==================== P2.3 Linter ====================
+
+def _walk_ast(node):
+    """遍历 AST 所有节点(dataclass 通用递归, 含 dict/list/tuple 容器)"""
+    from dataclasses import fields, is_dataclass
+    if node is None:
+        return
+    yield node
+    if is_dataclass(node):
+        for f in fields(node):
+            v = getattr(node, f.name, None)
+            if isinstance(v, ASTNode):
+                yield from _walk_ast(v)
+            elif isinstance(v, dict):
+                for item in v.values():
+                    if isinstance(item, ASTNode):
+                        yield from _walk_ast(item)
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, ASTNode):
+                        yield from _walk_ast(item)
+                    elif isinstance(item, tuple):
+                        for sub in item:
+                            if isinstance(sub, ASTNode):
+                                yield from _walk_ast(sub)
+
+def lint_code(code: str) -> List[Tuple[str, int, int, str]]:
+    """Intent 静态检查(P2.3) — 基于 AST, 不执行
+
+    省察克治的自动化。规则刻意少, 每条对应 Intent 的一条哲学:
+      E1 let 常量被重新赋值        — 不可变是默认, 改了就是违约
+      W1 catch 吞掉错误却什么都不做 — 沉默的 catch 比没有 catch 更糟
+      I1 顶层函数无契约            — 契约是身份证, 建议随身携带
+      W2 import 了却没用到          — 不带多余的东西上路
+    返回 [(级别, 行, 列, 消息), ...]
+    """
+    issues = []
+    tokens = Lexer(code).tokenize()
+    parser = Parser(tokens, code)
+    program = parser.parse()
+
+    # E1: 不可变变量被重新赋值 — 作用域敏感(块内 let 不出块, 方法间同名互不相干)
+    from dataclasses import fields as _dc_fields, is_dataclass as _is_dc
+
+    def _scope_aware_check(root):
+        scope_stack = [{}]   # name -> (is_const, decl_line)
+        local_issues = []
+
+        def declare(name, is_const, line):
+            scope_stack[-1][name] = (is_const, line)
+
+        def find(name):
+            for scope in reversed(scope_stack):
+                if name in scope:
+                    return scope[name]
+            return None
+
+        def visit(node):
+            if node is None:
+                return
+            if isinstance(node, VariableDecl):
+                declare(node.name, node.is_const, node.line)
+                return
+            if isinstance(node, Assignment):
+                found = find(node.target)
+                if found is not None and found[0]:
+                    local_issues.append(('E', node.line, node.column,
+                                         f"let 声明的常量 '{node.target}' (第 {found[1]} 行) 被重新赋值"
+                                         f"(需要 mut 就诚实声明 let mut)"))
+                return
+            if isinstance(node, (IfStmt, WhileStmt, ForStmt, TryStmt, WithStmt)):
+                # 条件/可迭代表达式属于外层作用域
+                for fname in ('condition', 'iterable', 'resource'):
+                    v = getattr(node, fname, None)
+                    if v is not None:
+                        visit(v)
+                if isinstance(node, IfStmt):
+                    bodies = [node.then_branch] + [b for _, b in node.elif_branches] + [node.else_branch]
+                elif isinstance(node, TryStmt):
+                    bodies = [node.try_body, node.catch_body, node.finally_body]
+                else:
+                    bodies = [node.body]
+                for body in bodies:
+                    scope_stack.append({})
+                    for stmt in body:
+                        visit(stmt)
+                    scope_stack.pop()
+                return
+            # 其余节点: 递归子节点
+            if _is_dc(node):
+                for f in _dc_fields(node):
+                    v = getattr(node, f.name, None)
+                    if isinstance(v, ASTNode):
+                        visit(v)
+                    elif isinstance(v, list):
+                        for item in v:
+                            if isinstance(item, ASTNode):
+                                visit(item)
+                    elif isinstance(v, dict):
+                        for item in v.values():
+                            if isinstance(item, ASTNode):
+                                visit(item)
+
+        nodes = root if isinstance(root, list) else [root]
+        for n in nodes:
+            visit(n)
+        return local_issues
+
+    issues.extend(_scope_aware_check(program.statements))
+    for func in program.functions.values():
+        issues.extend(_scope_aware_check(func))
+    for node in _walk_ast(program):
+        if isinstance(node, ClassStmt):
+            for method in node.methods:
+                issues.extend(_scope_aware_check(method))
+
+    # W1: 空 catch 块
+    for node in _walk_ast(program):
+        if isinstance(node, TryStmt) and node.catch_var and not node.catch_body:
+            issues.append(('W', node.line, node.column,
+                           "catch 绑定了错误变量却什么都不做 — 沉默的 catch 比没有 catch 更糟"))
+
+    # I1: 顶层函数无契约
+    for func in program.functions.values():
+        if not func.requires and not func.ensures:
+            issues.append(('I', func.line, func.column,
+                           f"函数 '{func.name}' 无 requires/ensures — 契约是身份证, 建议携带"))
+
+    # W2: 未使用的 import(import std.math 后用 math.x 或 std.math.x 都算用过)
+    imports = []   # (module_name, alias, line, col)
+    used_names = set()
+    for node in _walk_ast(program):
+        if isinstance(node, ImportStmt):
+            imports.append((node.module_name, node.alias, node.line, node.column))
+        if isinstance(node, MemberAccess):
+            root = node.obj
+            while isinstance(root, MemberAccess):
+                root = root.obj
+            if isinstance(root, Variable):
+                used_names.add(root.name)
+    for module_name, alias, line, col in imports:
+        candidates = set()
+        if alias:
+            candidates.add(alias)
+        else:
+            candidates.add(module_name.split('.')[0])   # std.math → std
+            candidates.add(module_name.split('.')[-1])  # std.math → math
+        if not (candidates & used_names):
+            issues.append(('W', line, col,
+                           f"import 的 '{module_name}' 未被使用 — 不带多余的东西上路"))
+    return issues
+
+def run_lint(path: str) -> int:
+    """--lint: 静态检查, 打印报告。有 E 级问题退出 1, 否则 0(警告不阻断)"""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            code = f.read()
+    except FileNotFoundError:
+        print(f"❌ 找不到文件: {path}")
+        return 2
+    try:
+        issues = lint_code(code)
+    except SyntaxError as e:
+        print(f"❌ 语法错误, 无法检查: {e}")
+        return 2
+    if not issues:
+        print(f"✅ {path}: 无问题")
+        return 0
+    level_name = {'E': '错误', 'W': '警告', 'I': '提示'}
+    level_icon = {'E': '❌', 'W': '⚠️ ', 'I': '💡'}
+    errors = 0
+    for level, line, col, msg in sorted(issues, key=lambda x: (x[1], x[2])):
+        print(f"{level_icon[level]} {level_name[level]} {path}:{line}:{col}")
+        print(f"   {msg}")
+        if level == 'E':
+            errors += 1
+    print(f"\n共 {len(issues)} 条({errors} 错误 / "
+          f"{sum(1 for i in issues if i[0]=='W')} 警告 / "
+          f"{sum(1 for i in issues if i[0]=='I')} 提示)")
+    return 1 if errors else 0
+
+# ==================== P2.4 Doc 生成 ====================
+
+def _unparse(node) -> str:
+    """把表达式 AST 反打印为源码字符串(doc 生成用)"""
+    if node is None:
+        return ""
+    if isinstance(node, Literal):
+        if node.literal_type == 'string':
+            return f'"{node.value}"'
+        return str(node.value)
+    if isinstance(node, Variable):
+        return node.name
+    if isinstance(node, BinaryOp):
+        return f"{_unparse(node.left)} {node.op} {_unparse(node.right)}"
+    if isinstance(node, UnaryOp):
+        return f"{node.op}{_unparse(node.operand)}"
+    if isinstance(node, CallExpr):
+        inner = _unparse(node.func)
+        args = ", ".join(_unparse(a) for a in node.args)
+        return f"{inner}({args})"
+    if isinstance(node, MemberAccess):
+        return f"{_unparse(node.obj)}.{node.member}"
+    if isinstance(node, TernaryExpr):
+        return f"if {_unparse(node.condition)} {{ ... }} else {{ ... }}"
+    return f"<{type(node).__name__}>"
+
+def generate_docs(code: str, title: str = "模块文档") -> str:
+    """从 Intent 源码生成 markdown 文档(P2.4)
+
+    函数签名 + 上方注释块(文档注释) + 契约 + 参数表。
+    哲学注释是文档的一部分 — 代码解释自己为什么存在。
+    """
+    tokens = Lexer(code).tokenize()
+    parser = Parser(tokens, code)
+    program = parser.parse()
+
+    # 按行取源码, 用于提取函数上方的注释块
+    lines = code.split('\n')
+
+    def comment_block_before(line_no: int) -> List[str]:
+        """提取 line_no 行(1-based)之前的连续注释行"""
+        block = []
+        i = line_no - 2  # 0-based 的前一行
+        while i >= 0:
+            stripped = lines[i].strip()
+            if stripped.startswith('//'):
+                block.append(stripped[2:].strip())
+                i -= 1
+            elif stripped == '':
+                break
+            else:
+                break
+        return list(reversed(block))
+
+    def param_type_str(t: Optional[str]) -> str:
+        return t if t else 'Any'
+
+    out = [f"# {title}", ""]
+    funcs = sorted(program.functions.values(), key=lambda f: (f.line, f.column))
+    for func in funcs:
+        doc_lines = comment_block_before(func.line)
+        out.append(f"## `{func.name}`")
+        out.append("")
+        if doc_lines:
+            for dl in doc_lines:
+                out.append(f"> {dl}")
+            out.append("")
+        # 签名
+        params = ", ".join(f"{p[0]}: {param_type_str(p[1])}" for p in func.params)
+        sig = f"def {func.name}({params})"
+        if func.return_type:
+            sig += f" -> {func.return_type}"
+        out.append("```intent")
+        out.append(sig)
+        if func.requires:
+            for r in func.requires:
+                out.append(f"    requires {_unparse(r)}")
+        if func.ensures:
+            for e in func.ensures:
+                out.append(f"    ensures {_unparse(e)}")
+        out.append("```")
+        out.append("")
+        if func.params:
+            out.append("| 参数 | 类型 |")
+            out.append("|---|---|")
+            for p in func.params:
+                out.append(f"| `{p[0]}` | {param_type_str(p[1])} |")
+            out.append("")
+        if func.requires:
+            out.append("**前置条件**:")
+            for r in func.requires:
+                out.append(f"- {_unparse(r)}")
+            out.append("")
+        if func.ensures:
+            out.append("**后置条件**:")
+            for e in func.ensures:
+                out.append(f"- {_unparse(e)}")
+            out.append("")
+    # 类
+    for node in _walk_ast(program):
+        if isinstance(node, ClassStmt):
+            out.append(f"## class `{node.name}`")
+            out.append("")
+            doc_lines = comment_block_before(node.line)
+            if doc_lines:
+                for dl in doc_lines:
+                    out.append(f"> {dl}")
+                out.append("")
+            for method in node.methods:
+                params = ", ".join(f"{p[0]}: {param_type_str(p[1])}" for p in method.params)
+                out.append(f"- `{method.name}({params})`"
+                           + (f" -> `{method.return_type}`" if method.return_type else ""))
+            out.append("")
+    return "\n".join(out) + "\n"
+
+def run_doc(path: str) -> int:
+    """--doc: 生成模块文档到 stdout"""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            code = f.read()
+    except FileNotFoundError:
+        print(f"❌ 找不到文件: {path}")
+        return 2
+    try:
+        title = os.path.splitext(os.path.basename(path))[0]
+        print(generate_docs(code, title))
+    except SyntaxError as e:
+        print(f"❌ 语法错误, 无法生成文档: {e}")
+        return 2
+    return 0
+
+def check_code(code: str, code_name: str) -> None:
+    """--check: 只解析不执行。
+
+    语法干净 → 退出0; 有错误 → 逐条报告并退出2。
+    治文件模式的宽松执行假通过(语法错误只警告仍退出0)。
+    """
+    try:
+        tokens = Lexer(code).tokenize()
+        parser = Parser(tokens, code)
+        parser.parse()
+    except SyntaxError as e:
+        print(f"❌ 语法错误: {code_name}")
+        print(f"   {e}")
+        sys.exit(2)
+    if parser.errors:
+        print(f"❌ 语法错误: {code_name} ({len(parser.errors)} 个)")
+        for err in parser.errors:
+            print(f"   • {err}")
+        sys.exit(2)
+    print(f"✅ 语法检查通过: {code_name}")
+    sys.exit(0)
+
+def emit_analysis(code: str, kind: str, out_path: str, code_name: str) -> None:
+    """--emit: 将词法/语法分析结果写入文件"""
+    try:
+        tokens = Lexer(code).tokenize()
+        parser = Parser(tokens, code)
+        ast = parser.parse()
+    except SyntaxError as e:
+        print(f"❌ 无法分析 {code_name}: {e}")
+        sys.exit(2)
+    lines = []
+    if kind == 'tokens':
+        for i, tok in enumerate(tokens):
+            lines.append(f"{i:4d}: {tok}")
+    elif kind == 'ast':
+        for func in ast.functions.values():
+            lines.append(f"函数: {func.name}")
+            if func.params:
+                params = ", ".join(f"{p[0]}: {p[1]}" for p in func.params)
+                lines.append(f"  参数: {params}")
+            if func.return_type:
+                lines.append(f"  返回类型: {func.return_type}")
+            if func.requires:
+                lines.append(f"  前置条件: {len(func.requires)} 条")
+            if func.ensures:
+                lines.append(f"  后置条件: {len(func.ensures)} 条")
+            lines.append(f"  语句数: {len(func.body)}")
+        lines.append(f"全局语句数: {len(ast.statements)}")
+        if parser.errors:
+            lines.append(f"解析错误: {len(parser.errors)} 个")
+            for err in parser.errors:
+                lines.append(f"  • {err}")
+    else:
+        print(f"❌ 未知的 --emit 类型: {kind}(支持 tokens/ast)")
+        sys.exit(2)
+    with open(out_path, 'w', encoding='utf-8') as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"✅ 已写入 {out_path} ({len(lines)} 行)")
+
+# ==================== P0.2 测试框架 ====================
+
+def collect_test_files(path: str) -> List[str]:
+    """收集测试文件: 目录下所有不以 _ 开头的 .intent 文件
+
+    _ 开头的文件是演示/草稿,不参与测试运行。
+    """
+    if os.path.isfile(path):
+        return [path]
+    if not os.path.isdir(path):
+        print(f"❌ 测试路径不存在: {path}")
+        sys.exit(2)
+    files = []
+    for root, _dirs, names in os.walk(path):
+        for name in names:
+            if name.endswith('.intent') and not name.startswith('_'):
+                files.append(os.path.join(root, name))
+    return sorted(files)
+
+def run_tests(path: str):
+    """P0.2 测试框架: 发现并执行 test_* 函数
+
+    约定: 测试文件中 def test_xxx() 函数即测试用例;
+    每个测试文件用独立 Interpreter 执行,测试间状态隔离。
+    断言用内置 assert(condition, message)。
+    """
+    files = collect_test_files(path)
+    if not files:
+        print(f"❌ 在 {path} 下没有找到测试文件(*.intent, _ 开头的文件被跳过)")
+        sys.exit(2)
+
+    total = passed = 0
+    failures = []  # (rel_path, test_name, IntentError, interpreter)
+    t0 = time.time()
+
+    for fpath in files:
+        with open(fpath, 'r', encoding='utf-8') as f:
+            code = f.read()
+        # 每个文件独立解释器 — 测试间状态隔离
+        interp = Interpreter()
+        interp._set_source(code)
+        interp.current_filename = fpath
+        # P2.1: 测试文件所在目录加入模块搜索路径(lib/ 相对测试文件解析)
+        interp.add_module_search_path(os.path.dirname(os.path.abspath(fpath)))
+        rel = os.path.relpath(fpath, path)
+        try:
+            lexer = Lexer(code)
+            tokens = lexer.tokenize()
+            parser = Parser(tokens, code)
+            ast = parser.parse()
+            if parser.errors:
+                raise SyntaxError(f"{len(parser.errors)} 个语法错误,首个: {parser.errors[0]}")
+            interp.execute_program(ast)
+        except Exception as e:
+            err = wrap_intent_error(e, interp)
+            total += 1
+            failures.append((rel, '<模块加载>', err, interp))
+            print(f"  ❌ {rel} :: <模块加载>")
+            continue
+        # 执行所有 test_* 函数; 无测试函数的文件是库文件, 静默跳过
+        test_names = sorted(n for n in interp.functions if n.startswith('test_'))
+        for tname in test_names:
+            total += 1
+            try:
+                interp.execute_function(interp.functions[tname], [])
+                passed += 1
+                print(f"  ✅ {rel} :: {tname}")
+            except Exception as e:
+                err = wrap_intent_error(e, interp)
+                failures.append((rel, tname, err, interp))
+                print(f"  ❌ {rel} :: {tname}")
+
+    elapsed = time.time() - t0
+    print()
+    print("=" * 56)
+    print(f"  测试结果: {passed}/{total} 通过, {total - passed} 失败 ({elapsed:.2f}s)")
+    print("=" * 56)
+    # 失败详情统一渲染 — 复用 P0.1 的错误诊断
+    for rel, tname, err, interp in failures:
+        print()
+        print(f"── {rel} :: {tname} ──")
+        print(render_intent_error(err, interp))
+    sys.exit(1 if failures else 0)
 
 # ==================== 程序入口 ====================
 if __name__ == '__main__':
-    print(f"""
+    # 单文件入口 + 辅助模块(intent_bytecode 等)的经典坑:
+    # 本文件以 __main__ 运行时, 辅助模块的 from mini_intent import ...
+    # 会重新加载一份 mini_intent → 两套类定义 → isinstance 全部失效。
+    # 把 __main__ 注册为 sys.modules['mini_intent'], 保证类身份唯一。
+    import sys as _sys
+    _sys.modules['mini_intent'] = _sys.modules['__main__']
+    # banner 只在交互终端显示 — 重定向到文件时保持输出纯净
+    if sys.stdout.isatty():
+        print(f"""
 ╔═══════════════════════════════════════════════════════╗
 ║              Intent 语言解释器 v{VERSION}              ║
 ║         {PHILOSOPHY_SLOGAN}                ║

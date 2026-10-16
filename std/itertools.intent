@@ -1,0 +1,114 @@
+// std/itertools.intent — 迭代组合工具模块(P3.1a)
+// 心学为体：组合先于发明，万物皆可由少数原语生出
+// 禅道为翼：每个函数都是纯的变换，输入不变，输出新生
+// 马哲为用：量变引起质变 — 简单列表的组合产生丰富的操作
+
+export chain, zip_longest, cycle, enumerate, flatten, unique, chunk, groupby, count_where;
+
+// ══ 拼接与补足 ══
+
+// chain — 多条序列首尾相续
+def chain(a, b) {
+    return a + b;
+}
+
+// zip_longest — 配对, 短的一方补足(不丢弃)
+def zip_longest(a, b, fill) {
+    let mut n = len(a);
+    if len(b) > n { n = len(b); }
+    let mut out = [];
+    let mut i = 0;
+    while i < n {
+        let x = (i < len(a)) ? a[i] : fill;
+        let y = (i < len(b)) ? b[i] : fill;
+        out = out + [[x, y]];
+        i = i + 1;
+    }
+    return out;
+}
+
+// cycle — 循环往复, 重复 n 次
+def cycle(lst, n: Int) {
+    let mut out = [];
+    let mut k = 0;
+    while k < n {
+        out = out + lst;
+        k = k + 1;
+    }
+    return out;
+}
+
+// ══ 索引与展平 ══
+
+// enumerate — 物各有其位, 返回 [序号, 值] 对
+def enumerate(lst) {
+    let mut out = [];
+    let mut i = 0;
+    for x in lst {
+        out = out + [[i, x]];
+        i = i + 1;
+    }
+    return out;
+}
+
+// flatten — 化繁为简, 展平一层
+def flatten(lst) {
+    let mut out = [];
+    for x in lst {
+        if starts_with(type_of(x), "List") {
+            out = out + x;
+        } else {
+            out = out + [x];
+        }
+    }
+    return out;
+}
+
+// ══ 去重与分块 ══
+
+// unique — 去重保序(存在的才留, 不重复)
+def unique(lst) {
+    let mut out = [];
+    for x in lst {
+        if !contains(out, x) {
+            out = out + [x];
+        }
+    }
+    return out;
+}
+
+// chunk — 分而治之, 按大小切块
+def chunk(lst, size: Int) {
+    let mut out = [];
+    let mut i = 0;
+    while i < len(lst) {
+        out = out + [lst[i:i + size]];
+        i = i + size;
+    }
+    return out;
+}
+
+// ══ 分组与统计 ══
+
+// groupby — 物以类聚, 按键分组(键限标量)
+def groupby(lst, key_fn) {
+    let mut out = {};
+    for x in lst {
+        let k = key_fn(x);
+        let ks = "" + k;
+        if !out.has_key(ks) {
+            out[ks] = [];
+        }
+        out[ks] = out[ks] + [x];
+    }
+    return out;
+}
+
+// count_where — 数一数符合条件的
+def count_where(lst, pred) -> Int {
+    let mut n = 0;
+    for x in lst {
+        if pred(x) { n = n + 1; }
+    }
+    return n;
+}

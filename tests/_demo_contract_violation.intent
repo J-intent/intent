@@ -1,0 +1,15 @@
+// P0.1 验证: 契约违反(requires) 的专属错误
+def safe_divide(a: Float, b: Float): Float
+    requires b != 0.0
+    ensures result * b == a
+{
+    return a / b;
+};
+
+def compute(x: Float): Float {
+    return safe_divide(10.0, x);
+};
+
+def main() {
+    print("结果:", compute(0.0));
+};

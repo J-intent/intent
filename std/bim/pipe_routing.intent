@@ -109,7 +109,7 @@ def segment_collides(a: Point3D, b: Point3D, obstacles, margin: Float) -> Int {
         let mut s = 0;
         let mut hit = 0;
         while s <= steps and hit == 0 {
-            let t = s;
+            let mut t = s;
             let t_f = t;
             let inv = steps;
             let ratio = t_f / inv;

@@ -1,0 +1,13 @@
+// P0.1 验证: 运行时错误 + Intent 调用链
+def inner(items: List, idx: Int): Int {
+    return items[idx];
+};
+
+def outer(): Int {
+    let data = [10, 20, 30];
+    return inner(data, 99);
+};
+
+def main() {
+    print("结果:", outer());
+};

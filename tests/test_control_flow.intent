@@ -1,0 +1,35 @@
+// 控制流回归测试 — if/while/for
+def test_if_statement() {
+    let mut r = 0;
+    if 5 > 3 { r = 1; };
+    assert r == 1, "if 真分支";
+    if 2 > 9 { r = 99; };
+    assert r == 1, "if 假分支不执行";
+};
+
+def test_while_loop() {
+    let mut i = 0;
+    let mut sum = 0;
+    while i < 5 {
+        sum = sum + i;
+        i = i + 1;
+    };
+    assert sum == 10, "while 累加 0..4";
+};
+
+def test_for_range() {
+    let mut sum = 0;
+    for i in range(5) {
+        sum = sum + i;
+    };
+    assert sum == 10, "for range 累加";
+};
+
+def test_for_dict() {
+    let d = {"a": 1, "b": 2};
+    let mut total = 0;
+    for k in d {
+        total = total + d[k];
+    };
+    assert total == 3, "for 遍历字典";
+};

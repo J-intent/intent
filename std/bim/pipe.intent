@@ -224,7 +224,7 @@ def segment_distance(a1: Point3D, a2: Point3D, b1: Point3D, b2: Point3D) -> Floa
             return a1.distance_to(b1);
         };
         // d1 退化为点
-        let t = clamp(f / e, 0.0, 1.0);
+        let mut t = clamp(f / e, 0.0, 1.0);
         return a1.distance_to(b1.add_vector(d2.scale(t)));
     };
 

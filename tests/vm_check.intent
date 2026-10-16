@@ -1,0 +1,22 @@
+def fib(n: Int): Int {
+    if n < 2 { return n; };
+    return fib(n - 1) + fib(n - 2);
+};
+
+def main() {
+    let mut total = 0;
+    let mut i = 0;
+    while i < 10 {
+        total = total + i;
+        i = i + 1;
+    };
+    print("1+2+...+9 =", total);
+    print("fib(10) =", fib(10));
+    let x = 5;
+    if x > 3 {
+        print("x 大于 3");
+    } else {
+        print("x 不大于 3");
+    };
+    return 0;
+};

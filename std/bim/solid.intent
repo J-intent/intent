@@ -49,7 +49,7 @@ class Plane {
     // 求交：直线与平面
     def intersect_line(line: Line3D) -> Point3D {
         let d = this.normal.dot(line.direction());
-        let t = (0.0 - this.d - this.normal.dot(line.start)) / d;
+        let mut t = (0.0 - this.d - this.normal.dot(line.start)) / d;
         let p = line.point_at(t);
         return p;
     }
@@ -134,7 +134,7 @@ class Cylinder {
         let axis_len_sq = axis.length() * axis.length();
         let to_point = this.start.to(point);
         // 投影参数 t ∈ [0,1]
-        let t = max(0.0, min(1.0, axis.dot(to_point) / axis_len_sq));
+        let mut t = max(0.0, min(1.0, axis.dot(to_point) / axis_len_sq));
         // 投影点
         let proj = Point3D();
         proj.create(this.start.x + axis.x * t,

@@ -1,0 +1,29 @@
+// 字符串能力回归测试(P1.2) — f-string / 三引号多行 / 插值
+
+def test_interpolation() {
+    let name = "Intent";
+    let ver = 2;
+    let s = "语言: ${name}, 版本: ${ver}";
+    assert s == "语言: Intent, 版本: 2", "字符串插值";
+};
+
+def test_fstring_prefix() {
+    // f 前缀 = 意图的显式宣告, 行为与插值字符串一致
+    let x = 21;
+    let s = f"答案是 ${x * 2}";
+    assert s == "答案是 42", "f-string 前缀";
+};
+
+def test_multiline_string() {
+    let poem = """心学为体
+禅道为翼
+马哲为用""";
+    assert len(poem) == 14, "三引号保留换行";
+    assert starts_with(poem, "心学"), "三引号起始";
+};
+
+def test_multiline_with_quote() {
+    // 三引号内可含单引号
+    let s = """他说"心即理也",然后走了""";
+    assert "心即理也" in s, "三引号内含引号";
+};

@@ -1,25 +1,12 @@
-# Python
+# 临时调试文件（历史 _t_* 约定）——不进库
+_t_*.intent
+examples/_t_*.intent
+_test_defer.txt
+
+# Python 缓存
 __pycache__/
 *.pyc
-*.pyo
 
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Debug files
-debug_*.py
-
-# Build artifacts
-dist/
-build/
-*.egg-info/
-
-# Empty placeholder files
-0
-Int
-x
+# 运行时产物
+*.intentc
+langforge_state.json

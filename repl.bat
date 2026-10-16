@@ -1,2 +1,2 @@
 @echo off
-python src/repl.py %*
+python src\repl %*

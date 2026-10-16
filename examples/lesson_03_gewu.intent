@@ -19,7 +19,7 @@ enum Direction { North, South, East, West };
 print("【体验1】enum = 圈定世界的可能性");
 print("  Direction 只有四种状态：东·南·西·北");
 print("  非此即彼，没有模糊地带");
-print("  你已经把"方向"这个物格透了");
+print("  你已经把「方向」这个物格透了");
 print("");
 
 // ── 体验2：match = 穷举每一种可能 ──

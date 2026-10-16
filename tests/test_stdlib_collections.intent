@@ -1,0 +1,49 @@
+// 标准库回归测试(P3.1b) — std/collections
+
+import std.collections;
+
+def test_counter() {
+    let c = std.collections.counter([1, 2, 2, 3, 3, 3]);
+    assert c[1] == 1, "counter 单现";
+    assert c[2] == 2, "counter 双现";
+    assert c[3] == 3, "counter 三现";
+};
+
+def test_counter_strings() {
+    let c = std.collections.counter(["a", "b", "a"]);
+    assert c["a"] == 2, "counter 字符串键";
+    assert c["b"] == 1, "counter 字符串键 2";
+};
+
+def test_stack_lifo() {
+    let s = std.collections.Stack();
+    s.push(1);
+    s.push(2);
+    s.push(3);
+    assert s.pop()? == 3, "栈后进先出";
+    assert s.pop()? == 2, "栈继续出";
+    assert s.size() == 1, "栈余一";
+};
+
+def test_stack_empty_err() {
+    let s = std.collections.Stack();
+    let r = s.pop();
+    assert !r.is_ok, "空栈 pop 返回 Err";
+};
+
+def test_queue_fifo() {
+    let q = std.collections.Queue();
+    q.enqueue("a");
+    q.enqueue("b");
+    assert q.dequeue()? == "a", "队列先进先出";
+    assert q.peek()? == "b", "队列 peek 不移除";
+    assert q.size() == 1, "队列余一";
+};
+
+def test_most_common() {
+    let c = std.collections.counter([1, 1, 2, 2, 2, 3]);
+    let top = std.collections.most_common(c, 2);
+    assert top[0][0] == 2, "most_common 最高频是 2";
+    assert top[0][1] == 3, "most_common 次数 3";
+    assert len(top) == 2, "most_common 取前 n";
+};

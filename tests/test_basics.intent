@@ -1,0 +1,28 @@
+// 基础语法回归测试 — let/类型推断/mut/算术
+def test_let_and_types() {
+    let x = 10;
+    assert x == 10, "let 声明与求值";
+    let s = "Intent";
+    assert len(s) == 6, "字符串长度";
+    assert type_of(x) == "Int", "类型推断为 Int";
+    assert type_of(s) == "String", "类型推断为 String";
+};
+
+def test_mut() {
+    let mut c = 0;
+    c = c + 5;
+    c = c * 2;
+    assert c == 10, "let mut 允许改变";
+};
+
+def test_arithmetic() {
+    assert 3 + 4 * 5 == 23, "运算优先级";
+    assert 10 / 2 == 5, "整除";
+    assert 7 % 3 == 1, "取余";
+    assert 2 ** 10 == 1024, "幂运算";
+};
+
+def test_bool_logic() {
+    assert true and not false, "逻辑与";
+    assert 5 > 3 or 2 > 9, "逻辑或";
+};

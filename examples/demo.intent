@@ -1,47 +1,66 @@
-// demo.intent - 展示标准库使用
-import std from "./std/__init__.intent";
+// Intent 语言演示 — 心学为体，禅道为翼，马哲为用
+// 只用真实存在的特性(v2.0)
 
-def main() {
-    // 显示库信息
-    std.about();
-    print("");
-    
-    // 使用数学模块
-    print("=== 数学模块演示 ===");
-    print("5! = ", std.factorial(5));
-    print("17是素数吗？", std.is_prime(17));
-    print("gcd(48, 18) = ", std.gcd(48, 18));
-    print("安全除法: 22/7 = ", std.safe_div(22, 7));
-    print("");
-    
-    // 使用字符串模块
-    print("=== 字符串模块演示 ===");
-    print("反转'Intent': ", std.reverse("Intent"));
-    print("'level'是回文吗？", std.is_palindrome("level"));
-    print("修剪字符串: '", std.trim("   Hello Intent   "), "'");
-    print("");
-    
-    // 使用列表模块
-    print("=== 列表模块演示 ===");
-    let numbers = [1, 2, 3, 4, 5];
-    
-    // 映射：每个元素平方
-    let squares = std.map(numbers, func(x) { return x * x; });
-    print("平方: ", squares);
-    
-    // 过滤：只保留偶数
-    let evens = std.filter(numbers, func(x) { return x % 2 == 0; });
-    print("偶数: ", evens);
-    
-    // 归约：求和
-    let sum = std.reduce(numbers, func(a, b) { return a + b; }, 0);
-    print("总和: ", sum);
-    print("");
-    
-    // 使用契约模块
-    print("=== 契约模块演示 ===");
-    std.assert(len(numbers) == 5, "列表应有5个元素");
-    print("所有断言通过！");
-    
-    return 0;
-    }
+// ── 1. let = 如如不动 ──
+let name = "Intent";
+let version = "2.0";
+print("语言: ", name, " v", version);
+
+// ── 2. let mut = 承认我在改变 ──
+let mut counter = 0;
+counter = counter + 1;
+counter = counter + 1;
+print("计数器: ", counter);
+
+// ── 3. 闭包 = 此心光明 ──
+def make_adder(n: Int) {
+    return fn(x: Int) { return x + n; };
+};
+let add5 = make_adder(5);
+print("add5(10) = ", add5(10));
+
+// ── 4. 管道 = 知行合一 ──
+def double(x: Int): Int { return x * 2; };
+def inc(x: Int): Int { return x + 1; };
+print("5 |> double |> inc = ", 5 |> double |> inc);
+
+// ── 5. match = 格物致知 ──
+def kind(n: Int): String {
+    return match n {
+        x if x > 0 => "正数",
+        x if x < 0 => "负数",
+        _ => "零",
+    };
+};
+print("kind(-3) = ", kind(-3));
+
+// ── 6. Result + ? = 烦恼即菩提 ──
+def safe_div(a: Int, b: Int) {
+    if b == 0 { return Err("除数不能为零"); };
+    return Ok(a / b);
+};
+let r = safe_div(22, 7)?;
+print("22 / 7 = ", r);
+
+// ── 7. 契约 = 实事求是 ──
+def withdraw(balance: Int, amount: Int): Int
+    requires amount > 0
+    requires balance >= amount
+    ensures result >= 0
+{
+    return balance - amount;
+};
+print("取款 100-30 = ", withdraw(100, 30));
+
+// ── 8. with = 向死而生 ──
+class Logger {
+    def init() { this.lines = 0; }
+    def log(msg: String) { this.lines = this.lines + 1; }
+    def close() { print("Logger 关闭, 共 ", this.lines, " 行"); }
+}
+with Logger() as logger {
+    logger.log("第一行");
+    logger.log("第二行");
+};
+
+print("演示完成 — 存在先于本质");

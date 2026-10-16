@@ -1,0 +1,32 @@
+// 模式匹配回归测试 — match/枚举/穷举
+def test_match_literal() {
+    def kind(t: String): String {
+        return match t {
+            "int" => "整数",
+            "float" => "浮点",
+            _ => "其他",
+        };
+    };
+    assert kind("int") == "整数", "match 字面量";
+    assert kind("float") == "浮点", "match 字面量2";
+    assert kind("str") == "其他", "match 通配符兜底";
+};
+
+def test_match_range() {
+    // 注: match range 模式(90..100)尚未实现 — 暂用 if guard 表达范围条件
+    def grade(score: Int): String {
+        return match score {
+            n if n >= 90 => "A",
+            n if n >= 60 => "B",
+            _ => "C",
+        };
+    };
+    assert grade(95) == "A", "match guard 上段";
+    assert grade(70) == "B", "match guard 中段";
+    assert grade(30) == "C", "match 通配符兜底";
+};
+
+def test_enum() {
+    enum Direction { North, South, East, West };
+    assert North != South, "枚举变体互异";
+};

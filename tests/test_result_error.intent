@@ -1,0 +1,42 @@
+// 错误处理回归测试 — try/catch/finally/defer/Result
+def test_try_catch() {
+    let data = [1, 2, 3];
+    let mut caught = 0;
+    try {
+        let x = data[10];
+        print("不该执行:", x);
+    } catch e {
+        caught = 1;
+    };
+    assert caught == 1, "try/catch 捕获越界";
+};
+
+def test_finally() {
+    let data = [1, 2, 3];
+    let mut done = 0;
+    try {
+        let x = data[1];
+    } catch e {
+        done = 99;
+    } finally {
+        done = done + 1;
+    };
+    assert done == 1, "finally 无论如何执行";
+};
+
+def test_result_ok_err() {
+    let ok_val = Ok(42);
+    let err_val = Err("boom");
+    assert ok_val.unwrap() == 42, "Ok 解包";
+};
+
+def test_defer_runs() {
+    let mut log = 0;
+    def work() {
+        defer { log = log + 1; };
+        return 1;
+    };
+    let r = work();
+    assert r == 1, "函数正常返回";
+    assert log == 1, "defer 在作用域退出时执行";
+};

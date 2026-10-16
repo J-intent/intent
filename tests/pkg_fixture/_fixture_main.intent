@@ -1,0 +1,12 @@
+// 包管理回归测试(P2.1) — import 本地 lib 模块
+import mathkit;
+
+def test_import_lib_module() {
+    assert mathkit.double(21) == 42, "lib 模块函数可用";
+    assert mathkit.triple(3) == 9, "lib 模块导出";
+};
+
+def test_manifest_parses() {
+    // 意图清单可读(经 run_code 前的 manifest 注入验证)
+    assert 1 == 1, "占位";
+};

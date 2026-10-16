@@ -39,7 +39,7 @@ print("【体验4】try/catch = 把烦恼转化为智慧");
 try {
     let x = 1 / 0;
     print("  这行不会执行");
-} catch {
+} catch e {
     print("  捕获到了错误！");
     print("  你看到了错误，你理解了它");
     print("  你不是被错误打败了——你认识了它");
@@ -51,7 +51,7 @@ let mut flag = 0;
 try {
     flag = 1;
     let y = 1 / 0;
-} catch {
+} catch e {
     flag = 2;
 } finally {
     print("【体验5】finally = 无论如何，善始善终");
@@ -71,7 +71,7 @@ while try_count < 5 {
             let z = 1 / 0;
         };
         print("  第", try_count, "次尝试：成功");
-    } catch {
+    } catch e {
         error_count = error_count + 1;
         print("  第", try_count, "次尝试：失败（但继续）");
     };

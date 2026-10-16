@@ -1,0 +1,42 @@
+// 面向对象回归测试 — class/继承/方法/this
+class Point {
+    def init() {
+        this.x = 0;
+        this.y = 0;
+    }
+    def set(x: Int, y: Int) {
+        this.x = x;
+        this.y = y;
+    }
+    def sum(): Int {
+        return this.x + this.y;
+    }
+}
+
+def test_class_basic() {
+    let p = Point();
+    p.set(3, 4);
+    assert p.x == 3, "实例字段写入";
+    assert p.sum() == 7, "方法访问 this";
+}
+
+class Animal {
+    def init(n: String) {
+        this.name = n;
+    }
+    def speak(): String {
+        return "...";
+    }
+}
+
+class Dog < Animal {
+    def speak(): String {
+        return "Woof";
+    }
+}
+
+def test_inheritance() {
+    let d = Dog("Rex");
+    assert d.name == "Rex", "子类继承父类 init";
+    assert d.speak() == "Woof", "子类覆盖父类方法";
+}
