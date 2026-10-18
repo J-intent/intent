@@ -11,6 +11,8 @@ import sys
 import os
 import re
 import time
+import threading
+import queue
 
 # 提升 Python 递归限制（Intent 递归函数需要更深的调用栈）
 sys.setrecursionlimit(100000)
@@ -19,7 +21,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional, Tuple, Union, Callable
 from enum import Enum
-from collections import ChainMap
+from collections import ChainMap, deque
 
 # ==================== 解决 Windows 的 readline 问题 ====================
 try:
@@ -47,7 +49,7 @@ except ImportError:
             print("安装命令: pip install pyreadline3", file=sys.stderr)
 
 # ==================== 常量定义 ====================
-VERSION = "2.1.0"
+VERSION = "2.8.0"
 PHILOSOPHY_SLOGAN = "心学为体,禅道为翼,马哲为用"
 
 # ==================== 哲学翻译器 ====================
@@ -205,11 +207,13 @@ class Lexer:
         'and', 'or', 'not', 'in', 'is',
         'class', 'this', 'mut', 'fn',  # 类系统 + 匿名函数
         'try', 'catch', 'finally', 'defer',  # 错误处理 + 延迟执行
+        'raise',  # 异常链(EX1): raise <错误值> from <原因>
         'with',  # 块级资源管理(P1.1)
         'export',  # 显式模块导出(P2.1)
         'assert',  # 断言
         'enum',  # 枚举
-        'yield'  # 生成器
+        'yield',  # 生成器
+        'spawn', 'scope',  # 结构化并发(CC1): 派生任务 + 作用域退出自动 join
     }
 
     # 内置类型名 - 不是关键字,只是预定义的类型标识符
@@ -220,7 +224,8 @@ class Lexer:
         '+', '-', '*', '/', '%', '**', '//', '==', '!=', '<', '>', '<=', '>=',
         '!', '&&', '||', '&', '|', '^', '~', '<<', '>>', ':=', '++', '--',
         '+=', '-=', '*=', '/=', '%=', '**=', '//=', '&=', '|=', '^=', '<<=', '>>=',
-        '|>'  # 管道操作符
+        '|>',  # 管道操作符
+        '<-'  # 通道发送(CC2): ch <- v / <- ch
     }
 
     SINGLE_SYMBOLS = set('(){}[],:;.=+-*/%<>!&|^~@')
@@ -627,6 +632,43 @@ class YieldStmt(ASTNode):
     line: int = 0
     column: int = 0
 
+
+@dataclass
+class RaiseStmt(ASTNode):
+    """raise 语句(EX1) — raise <错误值> [from <原因>];
+
+    错误是一等值: raise 把 error() 构造的错误值抛回控制流,
+    from Y 把因果链显式化(__cause__) — 不猜, 直接说谁导致谁。
+    """
+    value: Optional["Expression"] = None
+    cause: Optional["Expression"] = None
+    line: int = 0
+    column: int = 0
+
+
+@dataclass
+class SpawnStmt(ASTNode):
+    """spawn 语句(CC1) — spawn <可调用>; / spawn f(args);
+
+    结构化并发: 派生出的任务登记进当前 scope 的任务表,
+    scope 退出时统一 join — 没有孤儿线程, 异常不沉没。
+    """
+    expr: Optional["Expression"] = None
+    line: int = 0
+    column: int = 0
+
+
+@dataclass
+class ScopeStmt(ASTNode):
+    """scope 块(CC1) — scope { ... };
+
+    并发作用域: 块内 spawn 的全部任务, 在块退出时自动 join
+    (Zig Go 的结构化并发语义); 任务异常在 join 处重抛。
+    """
+    body: List[ASTNode] = field(default_factory=list)
+    line: int = 0
+    column: int = 0
+
 @dataclass
 class ImportStmt(ASTNode):
     """import语句"""
@@ -644,6 +686,29 @@ class ExportStmt(ASTNode):
 class Expression(ASTNode):
     """表达式基类"""
     pass
+
+@dataclass
+class SendExpr(Expression):
+    """ch <- v(CC2) — 通道发送表达式
+
+    把 v 送入通道 ch; 缓冲满则阻塞, 通道已关闭则报错(Go 语义)。
+    求值结果为 None — 发送是动作, 不是值。
+    """
+    chan: Optional["Expression"] = None
+    value: Optional["Expression"] = None
+    line: int = 0
+    column: int = 0
+
+@dataclass
+class RecvExpr(Expression):
+    """<- ch(CC2) — 通道接收表达式
+
+    从通道 ch 取出下一个值; 空则阻塞等待,
+    已关闭且无剩余数据则抛 ChannelClosedError(显式失败, 不返回哑值)。
+    """
+    chan: Optional["Expression"] = None
+    line: int = 0
+    column: int = 0
 
 @dataclass
 @dataclass
@@ -1202,6 +1267,40 @@ class Parser:
         if self.match(TokenType.KEYWORD, 'try'):
             return self.parse_try_stmt()
 
+        # raise 语句(EX1): raise <错误值> [from <原因>] ;
+        if self.match(TokenType.KEYWORD, 'raise'):
+            token = self.current_token
+            self.advance()
+            value = self.parse_expression()
+            cause = None
+            if self.match(TokenType.KEYWORD, 'from'):
+                self.advance()
+                cause = self.parse_expression()
+            self.expect(TokenType.SYMBOL, ';')
+            return RaiseStmt(value=value, cause=cause,
+                             line=token.line, column=token.column)
+
+        # spawn 语句(CC1): spawn <可调用>; / spawn f(args);
+        if self.match(TokenType.KEYWORD, 'spawn'):
+            token = self.current_token
+            self.advance()
+            expr = self.parse_expression()
+            self.expect(TokenType.SYMBOL, ';')
+            return SpawnStmt(expr=expr, line=token.line, column=token.column)
+
+        # scope 块(CC1): scope { ... } — 退出自动 join
+        if self.match(TokenType.KEYWORD, 'scope'):
+            token = self.current_token
+            self.advance()
+            self.expect(TokenType.SYMBOL, '{')
+            scope_stmt = ScopeStmt(line=token.line, column=token.column)
+            while not self.match(TokenType.SYMBOL, '}'):
+                s = self.parse_statement()
+                if s:
+                    scope_stmt.body.append(s)
+            self.expect(TokenType.SYMBOL, '}')
+            return scope_stmt
+
         # with 语句(P1.1): with expr [as name] { body }
         if self.match(TokenType.KEYWORD, 'with'):
             return self.parse_with_stmt()
@@ -1604,12 +1703,19 @@ class Parser:
         # else分支
         if self.match(TokenType.KEYWORD, 'else'):
             self.advance()
-            self.expect(TokenType.SYMBOL, '{')
-            while not self.match(TokenType.SYMBOL, '}'):
-                branch_stmt = self.parse_statement()
-                if branch_stmt:
-                    stmt.else_branch.append(branch_stmt)
-            self.expect(TokenType.SYMBOL, '}')
+            if self.match(TokenType.KEYWORD, 'if'):
+                # else if 链 → 嵌套 IfStmt(标准悬空 else 处理, 与 elif 语义等价)
+                # 修根因: 原实现 else 后只接受 '{', Python 式 else if 触发
+                # panic 恢复把后续语句错位到外层, 模块加载时函数体泄洪到顶层
+                nested = self.parse_if_stmt()
+                stmt.else_branch.append(nested)
+            else:
+                self.expect(TokenType.SYMBOL, '{')
+                while not self.match(TokenType.SYMBOL, '}'):
+                    branch_stmt = self.parse_statement()
+                    if branch_stmt:
+                        stmt.else_branch.append(branch_stmt)
+                self.expect(TokenType.SYMBOL, '}')
 
         return stmt
 
@@ -1979,8 +2085,18 @@ class Parser:
         return expr
 
     def parse_expression(self) -> Expression:
-        """解析表达式 - 三元 > 管道 > 逻辑或 > ..."""
-        return self.parse_ternary()
+        """解析表达式 - 三元 > 通道发送 > 管道 > 逻辑或 > ...
+
+        CC2: ch <- v 是发送表达式, 优先级最低(右部吃到语句/参数尾),
+        与 Go 的 ch <- v 语句位一致。
+        """
+        expr = self.parse_ternary()
+        while self.match(TokenType.OPERATOR) and self.current_token.value == '<-':
+            op_token = self.current_token
+            self.advance()
+            right = self.parse_ternary()
+            expr = SendExpr(chan=expr, value=right, line=op_token.line, column=op_token.column)
+        return expr
 
     def parse_ternary(self) -> Expression:
         """解析三元表达式 cond ? then : else"""
@@ -2102,6 +2218,12 @@ class Parser:
             self.advance()
             operand = self.parse_unary()
             return UnaryOp(op='!', operand=operand, line=op_token.line, column=op_token.column)
+        # CC2: <- ch 通道接收(前缀, 与 ch <- v 共用 <- 词法)
+        if self.match(TokenType.OPERATOR) and self.current_token.value == '<-':
+            op_token = self.current_token
+            self.advance()
+            operand = self.parse_unary()
+            return RecvExpr(chan=operand, line=op_token.line, column=op_token.column)
         if self.match(TokenType.OPERATOR) and self.current_token.value in ('+', '-', '!'):
             op_token = self.current_token
             self.advance()
@@ -2659,17 +2781,267 @@ class ContractViolation(IntentError):
 
 class CallFrame:
     """调用栈帧 — 记录一次函数调用的发生处"""
-    __slots__ = ('name', 'line', 'column', 'filename')
+    __slots__ = ('name', 'line', 'column', 'filename', 'scope')
 
     def __init__(self, name: str, line: int = 0, column: int = 0, filename: str = ""):
         self.name = name
         self.line = line
         self.column = column
         self.filename = filename
+        self.scope = None  # EX2: 本帧作用域(异常穿帧时帧快照取本地人用)
 
     def __repr__(self):
         loc = f"{self.filename}:{self.line}" if self.filename else f"line {self.line}"
         return f"{self.name} ({loc})"
+
+
+class DebuggerQuit(Exception):
+    """调试器主动退出 — 穿透解释器异常包装, 顶层优雅收尾"""
+
+
+POSTMORTEM_SNAPSHOT = '.intent_postmortem.json'
+
+
+class Postmortem:
+    """EX2: 事后调试器 — 崩溃后的帧检视会话
+
+    与 C7 调试器的分工: Debugger 是事前(打断点逐步走),
+    Postmortem 是事后(错误已发生, 栈已冻结, 只检视不执行)。
+    帧快照来自异常穿帧时挂在 _intent_frames 上的局部变量链。
+    命令: frames 帧列表 | frame N 切帧 | vars 当前帧变量 |
+          where 出错位置 | quit 收尾。stdin EOF(非交互)自动收尾。
+    """
+
+    def __init__(self, interpreter):
+        self.interp = interpreter
+        self.current = 0
+
+    def save_snapshot(self, err, frames) -> None:
+        """帧快照写盘 — 进程退出后仍可捡回(崩溃不留白)"""
+        snapshot = {
+            'error': {'type': getattr(err, 'py_type', None) or type(err).__name__,
+                      'message': str(err),
+                      'line': err.line, 'column': err.column,
+                      'filename': err.filename},
+            'frames': frames,
+            'saved_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+        }
+        try:
+            with open(POSTMORTEM_SNAPSHOT, 'w', encoding='utf-8') as f:
+                json.dump(snapshot, f, ensure_ascii=False, indent=2)
+            print(f"\n💾 帧快照已存档: {POSTMORTEM_SNAPSHOT}"
+                  f"(停机后可用任何文本编辑器捡回)")
+        except OSError as e:
+            print(f"\n⚠️  帧快照存档失败: {e}")
+
+    def show_frames(self, frames) -> None:
+        print(f"\n🔎 帧检视(共 {len(frames)} 帧, 从外到内;"
+              f" frame N 切帧, vars 看当前帧变量):")
+        for i, fr in enumerate(frames):
+            marker = "👉" if i == self.current else "  "
+            loc = f"{fr.get('filename') or '<?>'}:{fr.get('line')}"
+            print(f"  {marker} 帧 #{i} {fr.get('name')} ({loc})")
+            if i == self.current:
+                for k, v in (fr.get('locals') or {}).items():
+                    print(f"        {k} = {v}")
+
+    def command_loop(self, frames) -> None:
+        while True:
+            try:
+                raw = input("(intent-pm) ")
+            except EOFError:
+                print("[事后调试] 输入结束, 收尾")
+                return
+            except KeyboardInterrupt:
+                print("\n[事后调试] 中断, 收尾")
+                return
+            cmd = raw.strip()
+            if not cmd:
+                continue
+            parts = cmd.split(None, 1)
+            head = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if head in ('frames', 'f'):
+                self.show_frames(frames)
+            elif head in ('frame', 'fr'):
+                if not frames:
+                    print("[事后调试] 没有帧可切")
+                    continue
+                try:
+                    self.current = max(0, min(len(frames) - 1, int(rest)))
+                except ValueError:
+                    print("[事后调试] frame 需要帧号: frame 1")
+                    continue
+                self.show_frames(frames)
+            elif head in ('vars', 'v'):
+                fr = frames[self.current] if frames else {}
+                locs = fr.get('locals') or {}
+                print(f"  帧 #{self.current} {fr.get('name', '')} "
+                      f"局部变量({len(locs)}):")
+                for k, v in locs.items():
+                    print(f"    {k} = {v}")
+            elif head in ('where', 'w'):
+                fr = frames[-1] if frames else {}
+                print(f"  出错位置: {fr.get('name', '?')} "
+                      f"{fr.get('filename') or '<?>'}:{fr.get('line')}")
+            elif head in ('quit', 'q'):
+                raise DebuggerQuit()
+            elif head in ('help', 'h', '?'):
+                print("  命令: frames | frame N | vars | where | quit")
+            else:
+                print(f"[事后调试] 未知命令: {head} (help 查看命令)")
+
+
+class Debugger:
+    """C7 行级调试器 — 断点/单步/变量检视/调用栈
+
+    挂在 Interpreter.execute_statement 入口: 每条语句执行前检查
+    当前行是否命中断点或处于单步模式, 命中即打印位置并进入命令循环。
+    stdin EOF(非交互/管道场景)时自动放行至程序终止 — 保证 exit 0。
+    普通执行路径 self.debugger 为 None, 零开销。
+    """
+
+    def __init__(self, interpreter):
+        self.interp = interpreter
+        self.breakpoints: set = set()
+        self.stepping = False
+        self._banner_shown = False
+
+    # ── hook: 每条语句执行前由 execute_statement 调用 ──
+    def check(self, stmt) -> None:
+        """行命中(断点/单步) → 展示位置 + 命令循环"""
+        line = getattr(stmt, 'line', None)
+        if not line:
+            return
+        if line in self.breakpoints or self.stepping:
+            self._show_location(line)
+            self.command_loop()
+
+    def _show_location(self, line: int) -> None:
+        src = ""
+        if self.interp.source_lines and 0 < line <= len(self.interp.source_lines):
+            src = self.interp.source_lines[line - 1].strip()
+        name = self.interp.current_filename or "<stdin>"
+        print(f"🛑 断点 {name}:{line}  {src}")
+
+    def show_banner(self) -> None:
+        if self._banner_shown:
+            return
+        self._banner_shown = True
+        print("╔══ Intent 调试器 (C7) ═════════════════════════════╗")
+        print("║ 命令: break N 设断点   | step 单步   | continue 放行 ║")
+        print("║       print EXPR 变量检视 | vars 当前变量           ║")
+        print("║       backtrace 调用栈 | breakpoints 断点列表       ║")
+        print("║       quit 退出调试                                  ║")
+        print("╚═══════════════════════════════════════════════════╝")
+
+    def command_loop(self) -> None:
+        """断点命令循环 — 返回即放行(step/continue/EOF); quit 抛 DebuggerQuit"""
+        while True:
+            try:
+                raw = input("(intent-dbg) ")
+            except EOFError:
+                print("[调试器] 命令输入结束, 放行执行至程序终止")
+                self.stepping = False
+                return
+            except KeyboardInterrupt:
+                print("\n[调试器] 中断, 放行执行")
+                self.stepping = False
+                return
+            cmd = raw.strip()
+            if not cmd:
+                continue
+            parts = cmd.split(None, 1)
+            head = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if head in ('step', 's'):
+                self.stepping = True
+                return
+            elif head in ('continue', 'c'):
+                self.stepping = False
+                return
+            elif head in ('break', 'b'):
+                self._cmd_break(rest)
+            elif head in ('delete', 'd'):
+                self._cmd_delete(rest)
+            elif head in ('print', 'p'):
+                self._cmd_print(rest)
+            elif head in ('backtrace', 'bt'):
+                self._cmd_backtrace()
+            elif head in ('vars', 'v'):
+                self._cmd_vars()
+            elif head in ('breakpoints', 'bl'):
+                self._cmd_list()
+            elif head in ('quit', 'q'):
+                raise DebuggerQuit()
+            elif head in ('help', 'h', '?'):
+                self.show_banner()
+            else:
+                print(f"[调试器] 未知命令: {head} (help 查看命令)")
+
+    def _cmd_break(self, rest: str) -> None:
+        try:
+            line_no = int(rest)
+        except ValueError:
+            print("[调试器] break 需要行号: break 12")
+            return
+        self.breakpoints.add(line_no)
+        print(f"[调试器] 断点已设: 第 {line_no} 行")
+
+    def _cmd_delete(self, rest: str) -> None:
+        if not rest:
+            self.breakpoints.clear()
+            print("[调试器] 已清空全部断点")
+            return
+        try:
+            line_no = int(rest)
+        except ValueError:
+            print("[调试器] delete 需要行号: delete 12")
+            return
+        self.breakpoints.discard(line_no)
+        print(f"[调试器] 断点已删: 第 {line_no} 行")
+
+    def _cmd_list(self) -> None:
+        if not self.breakpoints:
+            print("[调试器] 当前无断点")
+            return
+        print("[调试器] 断点: " + ", ".join(str(n) for n in sorted(self.breakpoints)))
+
+    def _cmd_print(self, expr_src: str) -> None:
+        """变量检视 — 在当前作用域求值任意 Intent 表达式"""
+        if not expr_src:
+            print("[调试器] print 需要表达式: print x + 1")
+            return
+        try:
+            # 表达式语句要求分号结尾 — 调试输入补一个, 含分号则不重复加
+            src = expr_src if expr_src.rstrip().endswith(';') else expr_src + ';'
+            tokens = Lexer(src).tokenize()
+            program = Parser(tokens, src).parse()
+            stmts = program.statements
+            if not stmts or not isinstance(stmts[0], Expression):
+                print(f"[调试器] 无法解析为表达式: {expr_src}")
+                return
+            val = self.interp.evaluate_expression(stmts[0])
+            print(f"  {expr_src} = {self.interp._value_to_str(val)}")
+        except Exception as e:
+            print(f"[调试器] 求值失败: {e}")
+
+    def _cmd_backtrace(self) -> None:
+        frames = self.interp.call_stack
+        if not frames:
+            print("[调试器] 调用栈为空")
+            return
+        for i, fr in enumerate(reversed(frames)):
+            print(f"  #{i} {fr.name}  at {fr.filename}:{fr.line}")
+
+    def _cmd_vars(self) -> None:
+        symbols = getattr(self.interp.current_scope, 'symbols', {})
+        if not symbols:
+            print("[调试器] 当前作用域无变量")
+            return
+        for name, val in symbols.items():
+            print(f"  {name} = {self.interp._value_to_str(val)}")
+
 
 @dataclass
 class PipeExpr(Expression):
@@ -2854,6 +3226,20 @@ class EnumType(Type):
     def can_assign_from(self, other: Type) -> bool:
         return isinstance(other, EnumType) and other.name == self.name
 
+
+class ChannelType(Type):
+    """CC2: 通道类型 — 并发通信的原语类型"""
+
+    def __init__(self):
+        super().__init__("Channel")
+
+
+class MockType(Type):
+    """TQ1: 测试替身类型"""
+
+    def __init__(self):
+        super().__init__("Mock")
+
 # ==================== 运行时值 ====================
 class RuntimeValue:
     """运行时值基类"""
@@ -2899,6 +3285,8 @@ class RuntimeValue:
             return DictValue(new_entries, key_t, val_t)
         if isinstance(self, (InstanceValue, FunctionValue, ClassValue)):
             return self  # 对象/函数/类是引用语义
+        if isinstance(self, (ChannelValue, MockValue)):
+            return self  # CC2 通道/TQ1 mock: 共享句柄, 引用语义
         if isinstance(self, (ResultValue, ErrorValue)):
             return self.copy()  # 委托各自实现
         return RuntimeValue(self.type, self.value)
@@ -2958,6 +3346,63 @@ class BoolValue(RuntimeValue):
     def to_bool(self) -> bool:
         return self.value
 
+# ── MM1: 容器对象注册表(引用计数观测 + 循环回收触发)─────────
+# 设计文档: docs/memory_design.md
+# 策略(寄生期 v3.0): 容器值(List/Dict/Instance)创建即登记弱引用;
+# 循环垃圾委托宿主 CPython 分代 GC — 注册表提供观测与触发入口。
+# 不变量: 注册表持有弱引用, 自身不拉长任何对象寿命。
+# v3.5(M2 属性优化) / v4.0(M3 JIT) 自持 GC 时必须与此表同构。
+
+import weakref as _weakref
+import gc as _gc
+
+
+class _ObjectRegistry:
+    """意图运行时容器对象注册表(MM1 首期)"""
+
+    __slots__ = ("_refs", "alloc_total", "reclaim_total")
+
+    def __init__(self):
+        self._refs = []            # weakref.ref — 目标死亡即失效
+        self.alloc_total = 0       # 累计创建容器数
+        self.reclaim_total = 0     # 累计回收容器数(观测值)
+
+    def register(self, obj) -> None:
+        self.alloc_total += 1
+        self._refs.append(_weakref.ref(obj))
+        if len(self._refs) > 4096:  # 防膨胀: 定期修剪死亡弱引用
+            self._prune()
+
+    def _prune(self) -> None:
+        self._refs = [r for r in self._refs if r() is not None]
+
+    def live(self) -> int:
+        self._prune()
+        return len(self._refs)
+
+    def stats(self) -> dict:
+        self._prune()
+        by_type = {}
+        for r in self._refs:
+            o = r()
+            if o is not None:
+                t = o.get_type().name if hasattr(o, 'get_type') else type(o).__name__
+                by_type[t] = by_type.get(t, 0) + 1
+        return {"live": len(self._refs), "alloc_total": self.alloc_total,
+                "reclaim_total": self.reclaim_total, "by_type": by_type}
+
+    def collect(self) -> int:
+        before = self.live()
+        _gc.collect()
+        after = self.live()
+        gained = max(0, before - after)
+        self.reclaim_total += gained
+        return gained
+
+
+OBJECT_REGISTRY = _ObjectRegistry()
+
+
 class ListValue(RuntimeValue):
     """列表值"""
 
@@ -2965,6 +3410,7 @@ class ListValue(RuntimeValue):
         if element_type is None:
             element_type = IntType() if not values else values[0].get_type()
         super().__init__(ListType(element_type), values)
+        OBJECT_REGISTRY.register(self)  # MM1: 创建即登记
 
     def __str__(self):
         items = ", ".join(str(v) for v in self.value)
@@ -3022,19 +3468,21 @@ PY_TO_INTENT_EXC = {
 class ErrorValue(RuntimeValue):
     """Intent 异常值 — 烦恼即菩提: 错误被捕获为一等值
 
-    成员: .type(异常类型名) .message(消息) .stack(Intent 调用链)
+    成员: .type(异常类型名) .message(消息) .stack(Intent 调用链) .__cause__(起因)
     catch 可按类型分流: catch e: ContractError { ... }
     """
     err_type: str = "RuntimeError"
     message: str = ""
     stack: List['RuntimeValue'] = field(default_factory=list)
+    cause: Optional['ErrorValue'] = None   # EX1: raise X from Y 的因果链
 
     def __init__(self, err_type: str = "RuntimeError", message: str = "",
-                 stack=None):
+                 stack=None, cause: 'Optional[ErrorValue]' = None):
         super().__init__(StringType(), message)
         self.err_type = err_type
         self.message = message
         self.stack = stack if stack is not None else []
+        self.cause = cause
 
     def __str__(self):
         return f"{self.err_type}: {self.message}"
@@ -3043,7 +3491,131 @@ class ErrorValue(RuntimeValue):
         return str(self)
 
     def copy(self) -> 'ErrorValue':
-        return ErrorValue(self.err_type, self.message, list(self.stack))
+        return ErrorValue(self.err_type, self.message, list(self.stack),
+                          self.cause)
+
+
+class IntentRaise(Exception):
+    """raise 语句的抛出载体(EX1) — 携带 Intent 错误值
+
+    穿帧时由 _execute_function 快照调用栈; 到 catch 时经 _make_error_value
+    原样还原为 ErrorValue(类型/消息/因果链不丢); 到顶层由 wrap_intent_error
+    接住渲染异常链。
+    """
+    def __init__(self, error_value: 'ErrorValue'):
+        super().__init__(f"{error_value.err_type}: {error_value.message}")
+        self.error_value = error_value
+
+
+class _SpawnTask:
+    """CC1: 一个派生的并发任务(线程 + 错误捕获)
+
+    演示级实现(Python threading): 每个任务跑在独立 Interpreter 上,
+    闭包作用域经 FunctionValue 共享 — GIL 下对不相交数据的并发访问安全,
+    共享可变状态的竞争由使用者自己同步(channel 是 CC2 的课题)。
+    异常不沉没: 捕获后挂在 task.error, scope join 时重抛。
+    """
+    def __init__(self, callee, args: list):
+        self.callee = callee
+        self.args = args
+        self.error = None
+        self._thread = None
+
+    def _run(self):
+        try:
+            if isinstance(self.callee, FunctionValue):
+                worker = Interpreter()
+                worker.execute_function(self.callee, list(self.args))
+            elif callable(self.callee):
+                self.callee(list(self.args))
+        except Exception as e:  # 任务异常: 捕获, 留到 join 处裁决
+            self.error = e
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run,
+                                        name=f"intent-spawn", daemon=False)
+        self._thread.start()
+
+    def join(self):
+        if self._thread is not None:
+            self._thread.join()
+
+
+class ChannelClosedError(Exception):
+    """CC2: 通道已关闭 — 发送到关闭通道, 或从关闭且排空的通道接收"""
+
+
+class ChannelValue(RuntimeValue):
+    """CC2: 线程安全通道(Go channel 语义的演示级子集)
+
+    - chan() 无界缓冲; chan(n) 容量 n(满则发送阻塞)
+    - ch <- v 发送(阻塞直至入队); <- ch 接收(空则阻塞等待)
+    - close(ch) 关闭: 此后发送报错; 接收排空剩余数据后抛
+      ChannelClosedError — 显式失败, 不返回哑值(契约哲学)
+    底层 queue.Queue: 阻塞与线程安全由标准库保证, 不自己造锁。
+    引用语义: 传参/赋值共享同一通道(copy() 返回自身)。
+    """
+
+    def __init__(self, capacity: int = 0):
+        super().__init__(ChannelType(), None)
+        self.capacity = capacity
+        self._queue: 'queue.Queue' = queue.Queue(maxsize=capacity)
+        self._closed = False
+        self._close_lock = threading.Lock()
+
+    def send(self, value: 'RuntimeValue') -> None:
+        with self._close_lock:
+            if self._closed:
+                raise ChannelClosedError("向已关闭的 channel 发送")
+        self._queue.put(value)  # 缓冲满则阻塞 — 与 Go 一致
+
+    def recv(self) -> 'RuntimeValue':
+        # 轮询等待: 关闭信号到时要能立即观察到(纯 get() 阻塞无法感知 close)
+        while True:
+            try:
+                return self._queue.get(timeout=0.02)
+            except queue.Empty:
+                with self._close_lock:
+                    if self._closed and self._queue.empty():
+                        raise ChannelClosedError(
+                            "channel 已关闭且无剩余数据(关闭语义: 排空即止)")
+
+    def close(self) -> None:
+        with self._close_lock:
+            self._closed = True
+
+    def __str__(self):
+        state = "closed" if self._closed else "open"
+        cap = "unbounded" if self.capacity == 0 else f"cap={self.capacity}"
+        return f"<channel {state} {cap}>"
+
+
+class MockValue(RuntimeValue):
+    """TQ1: 测试替身 — 记录调用, 返回预设值
+
+    用法: m = mock("名"); m(1, 2); mock_calls(m) → [[1, 2]];
+    mock_return(m, v) 预设返回值。不验证参数(那是 Q3 属性测试的活)。
+    引用语义: copy() 返回自身。
+    """
+
+    def __init__(self, name: str = "mock"):
+        super().__init__(MockType(), None)
+        self.name = name
+        self.calls: list = []          # List[List[RuntimeValue]]
+        self.return_value = NoneValue()
+
+    def __call__(self, args: list) -> 'RuntimeValue':
+        self.calls.append([a.copy() if isinstance(a, RuntimeValue) else a
+                           for a in args])
+        return self.return_value
+
+    def __str__(self):
+        return f"<mock {self.name} calls={len(self.calls)}>"
+
+
+class SkipTest(Exception):
+    """TQ1: skip(reason) — 测试主动跳过(不是失败, 不是通过)"""
+
 
 class DictValue(RuntimeValue):
     """字典值 - 键值对集合"""
@@ -3057,6 +3629,7 @@ class DictValue(RuntimeValue):
         if value_type is None:
             value_type = IntType()
         super().__init__(DictType(key_type, value_type), entries)
+        OBJECT_REGISTRY.register(self)  # MM1: 创建即登记
 
     def __str__(self):
         items = ", ".join(f"{k}: {v}" for k, v in self.value.items())
@@ -3279,6 +3852,7 @@ class InstanceValue(RuntimeValue):
         super().__init__(StringType(), klass.name)
         self.klass = klass
         self.fields = {}
+        OBJECT_REGISTRY.register(self)  # MM1: 创建即登记
 
     def get(self, name: str) -> Optional[RuntimeValue]:
         """读取字段"""
@@ -3637,6 +4211,8 @@ class Interpreter:
         self.current_filename: str = ""
         # ── P0.4: 命令行参数(args() 内置读取) ──
         self.cli_args: list = []
+        # ── CC1: 结构化并发 — 嵌套 scope 的任务表栈 ──
+        self._spawn_stack: list = []
         # ── P1.3a: 类型别名表(透明同义词) ──
         self.type_aliases: Dict[str, str] = {}
         self.current_scope = self.global_scope
@@ -3664,6 +4240,8 @@ class Interpreter:
         self.enum_registry: Dict[str, List[str]] = {}  # enum_name → [variants]
         # ── 导入栈 (循环依赖检测) ──
         self._import_stack: List[str] = []
+        # ── C7: 调试器挂载点(仅 --debug 模式启用; 普通执行为 None 零开销) ──
+        self.debugger = None
 
     def _exit_scope(self, old_scope: 'Scope'):
         """退出当前作用域，执行 defer 栈"""
@@ -3757,6 +4335,18 @@ class Interpreter:
             'type': self._builtin_type,
             'Ok': self._builtin_ok,
             'Err': self._builtin_err,
+            'error': self._builtin_error,
+            # CC2: 通道通信
+            'chan': self._builtin_chan,
+            'close': self._builtin_close,
+            # TQ1: 测试框架深化
+            'skip': self._builtin_skip,
+            'expect_error': self._builtin_expect_error,
+            'param_cases': self._builtin_param_cases,
+            'mock': self._builtin_mock,
+            'mock_return': self._builtin_mock_return,
+            'mock_calls': self._builtin_mock_calls,
+            'mock_call_count': self._builtin_mock_call_count,
             'read_file': self._builtin_read_file,
             'write_file': self._builtin_write_file,
             # std/time
@@ -3820,6 +4410,83 @@ class Interpreter:
             'path_basename': self._builtin_path_basename,
             'path_dirname': self._builtin_path_dirname,
             'path_ext': self._builtin_path_ext,
+            # std/http
+            'http_get': self._builtin_http_get,
+            'http_post': self._builtin_http_post,
+            'http_get_json': self._builtin_http_get_json,
+            'http_post_json': self._builtin_http_post_json,
+            'http_serve_start': self._builtin_http_serve_start,
+            'http_serve_stop': self._builtin_http_serve_stop,
+            # std/sqlite
+            'sqlite_open': self._builtin_sqlite_open,
+            'sqlite_exec': self._builtin_sqlite_exec,
+            'sqlite_query': self._builtin_sqlite_query,
+            'sqlite_close': self._builtin_sqlite_close,
+            # std/re
+            're_test': self._builtin_re_test,
+            're_full_match': self._builtin_re_full_match,
+            're_find_all': self._builtin_re_find_all,
+            're_groups': self._builtin_re_groups,
+            're_replace': self._builtin_re_replace,
+            're_split': self._builtin_re_split,
+            # std/datetime
+            'datetime_now': self._builtin_datetime_now,
+            'datetime_today': self._builtin_datetime_today,
+            'datetime_parse': self._builtin_datetime_parse,
+            'datetime_format': self._builtin_datetime_format,
+            'datetime_add_days': self._builtin_datetime_add_days,
+            'datetime_add_hours': self._builtin_datetime_add_hours,
+            'datetime_diff_days': self._builtin_datetime_diff_days,
+            'datetime_diff_seconds': self._builtin_datetime_diff_seconds,
+            'datetime_weekday': self._builtin_datetime_weekday,
+            'datetime_parts': self._builtin_datetime_parts,
+            'datetime_timestamp': self._builtin_datetime_timestamp,
+            'datetime_from_timestamp': self._builtin_datetime_from_timestamp,
+            'datetime_to_timezone': self._builtin_datetime_to_timezone,
+            # std/encoding
+            'enc_base64_encode': self._builtin_enc_base64_encode,
+            'enc_base64_decode': self._builtin_enc_base64_decode,
+            'enc_gzip_compress': self._builtin_enc_gzip_compress,
+            'enc_gzip_decompress': self._builtin_enc_gzip_decompress,
+            'enc_urlencode': self._builtin_enc_urlencode,
+            'enc_urldecode': self._builtin_enc_urldecode,
+            # std/glob (SL1)
+            'glob_match': self._builtin_glob_match,
+            # std/shutil (SL1)
+            'shutil_copy_file': self._builtin_shutil_copy_file,
+            'shutil_move': self._builtin_shutil_move,
+            'shutil_rmtree': self._builtin_shutil_rmtree,
+            # std/tempfile (SL1)
+            'tempfile_mkdtemp': self._builtin_tempfile_mkdtemp,
+            'tempfile_mkstemp': self._builtin_tempfile_mkstemp,
+            'tempfile_tempdir': self._builtin_tempfile_tempdir,
+            # std/uuid (SL1)
+            'uuid_uuid4': self._builtin_uuid_uuid4,
+            'uuid_uuid4_hex': self._builtin_uuid_uuid4_hex,
+            # std/hashlib (SL1)
+            'hash_md5': self._builtin_hash_md5,
+            'hash_sha1': self._builtin_hash_sha1,
+            'hash_sha256': self._builtin_hash_sha256,
+            'hash_sha512': self._builtin_hash_sha512,
+            # std/hmac (SL1)
+            'hmac_sha256': self._builtin_hmac_sha256,
+            'hmac_sha256_verify': self._builtin_hmac_sha256_verify,
+            # std/secrets (SL1)
+            'secrets_token_hex': self._builtin_secrets_token_hex,
+            'secrets_rand_below': self._builtin_secrets_rand_below,
+            'secrets_choice': self._builtin_secrets_choice,
+            # std/decimal (SL1)
+            'decimal_add': self._builtin_decimal_add,
+            'decimal_sub': self._builtin_decimal_sub,
+            'decimal_mul': self._builtin_decimal_mul,
+            'decimal_div': self._builtin_decimal_div,
+            'decimal_compare': self._builtin_decimal_compare,
+            # std/memory (MM1)
+            'mem_live_count': self._builtin_mem_live_count,
+            'mem_alloc_total': self._builtin_mem_alloc_total,
+            'mem_stats_info': self._builtin_mem_stats_info,
+            'gc_collect_now': self._builtin_gc_collect_now,
+            'ref_count_of': self._builtin_ref_count_of,
         }
 
     def _builtin_print(self, args: List[RuntimeValue]) -> RuntimeValue:
@@ -4223,6 +4890,149 @@ class Interpreter:
             raise TypeError(f"Err() 期望1个参数,得到 {len(args)}个")
         return make_err(args[0])
 
+    def _builtin_error(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """error(type, message) - 构造 Intent 错误值(EX1: raise 的原料)
+
+        错误是一等值 — 先构造, 再 raise; from 子句挂因果链。
+        """
+        if len(args) != 2:
+            raise TypeError(
+                f"error() 期望2个参数(type, message), 得到 {len(args)}个")
+        if not isinstance(args[0], StringValue) or not isinstance(args[1], StringValue):
+            raise TypeError(
+                'error() 参数必须是字符串: error("ValueError", "消息")')
+        return ErrorValue(args[0].value, args[1].value)
+
+    # ── CC2: 通道通信内置 ────────────────────────────────
+
+    def _builtin_chan(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """chan() / chan(n) — 创建通道: 无界缓冲 / 容量 n(满则发送阻塞)"""
+        if len(args) > 1:
+            raise TypeError(f"chan() 期望 0-1 个参数(可选容量), 得到 {len(args)} 个")
+        capacity = 0
+        if args:
+            if not isinstance(args[0], IntValue):
+                raise TypeError("chan() 的容量必须是整数")
+            capacity = args[0].value
+            if capacity < 0:
+                raise ValueError("chan() 的容量不能为负")
+        return ChannelValue(capacity)
+
+    def _builtin_close(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """close(ch) — 关闭通道: 发送此后再报错, 接收排空剩余即止"""
+        if len(args) != 1:
+            raise TypeError(f"close() 期望1个参数(channel), 得到 {len(args)} 个")
+        if not isinstance(args[0], ChannelValue):
+            raise TypeError(f"close() 期望通道(chan() 创建), 得到 {args[0].type}")
+        args[0].close()
+        return NoneValue()
+
+    # ── TQ1: 测试框架深化内置 ────────────────────────────
+
+    def _builtin_skip(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """skip(reason) — 标记当前测试跳过
+
+        跳过是诚实的中间态: 既不是通过也不是失败, 运行器单独计数。
+        """
+        reason = args[0].value if args and isinstance(args[0], StringValue) else ""
+        raise SkipTest(reason)
+
+    def _builtin_expect_error(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """expect_error(fn, type) — 断言 fn() 抛出指定类型的错误
+
+        返回捕获到的 ErrorValue; 未抛错或类型不符 → AssertionError。
+        预期异常的正面表达: 坏路径也是契约的一部分。
+        """
+        if len(args) != 2:
+            raise TypeError("expect_error() 期望2个参数(fn, 期望类型), "
+                            f"得到 {len(args)} 个")
+        fn, expected = args[0], args[1]
+        if not isinstance(expected, StringValue):
+            raise TypeError("expect_error() 第2个参数必须是错误类型字符串")
+        if not isinstance(fn, FunctionValue) and not callable(fn):
+            raise TypeError("expect_error() 第1个参数必须是可调用对象")
+        try:
+            if isinstance(fn, FunctionValue):
+                self.execute_function(fn, [])
+            else:
+                fn([])
+        except SkipTest:
+            raise
+        except Exception as e:
+            ie = wrap_intent_error(e, self)
+            actual = getattr(ie, 'py_type', None) or type(e).__name__
+            if actual != expected.value:
+                raise AssertionError(
+                    f"expect_error 类型不符: 期望 {expected.value}, 实际 {actual}")
+            ev = getattr(ie, 'error_value', None)
+            if ev is None:
+                ev = ErrorValue(actual, ie.message)
+            return ev
+        raise AssertionError(
+            f"expect_error: 期望抛出 {expected.value}, 但函数正常返回了")
+
+    def _builtin_param_cases(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """param_cases(cases, fn) — 参数化: 每个用例调用一次 fn
+
+        cases 是列表的列表(每项一组实参, 展开传给 fn — pytest
+        parametrize 语义); 任一用例失败 → AssertionError 带上用例
+        序号与内容(定位到个案)。无装饰器语法前的数据驱动等价物
+        (X1 装饰器落地后可升华)。
+        """
+        if len(args) != 2:
+            raise TypeError("param_cases() 期望2个参数(cases, fn), "
+                            f"得到 {len(args)} 个")
+        cases, fn = args[0], args[1]
+        if not isinstance(cases, ListValue):
+            raise TypeError("param_cases() 第1个参数必须是用例列表")
+        if not isinstance(fn, FunctionValue) and not callable(fn):
+            raise TypeError("param_cases() 第2个参数必须是可调用对象")
+        for idx, case in enumerate(cases.value):
+            case_args = case.value if isinstance(case, ListValue) else [case]
+            try:
+                if isinstance(fn, FunctionValue):
+                    self.execute_function(fn, list(case_args))
+                else:
+                    fn(list(case_args))
+            except SkipTest:
+                raise
+            except Exception as e:
+                ie = wrap_intent_error(e, self)
+                raise AssertionError(
+                    f"参数化用例 #{idx} 失败: {ie.message} (用例: {case})")
+        return NoneValue()
+
+    def _builtin_mock(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """mock(name) — 创建测试替身(记录调用序列, 返回预设值)"""
+        if len(args) > 1:
+            raise TypeError(f"mock() 期望0-1个参数(名称), 得到 {len(args)} 个")
+        name = args[0].value if args and isinstance(args[0], StringValue) else "mock"
+        return MockValue(name)
+
+    def _builtin_mock_return(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """mock_return(m, v) — 预设 mock 的返回值"""
+        if len(args) != 2:
+            raise TypeError("mock_return() 期望2个参数(mock, 返回值), "
+                            f"得到 {len(args)} 个")
+        if not isinstance(args[0], MockValue):
+            raise TypeError(f"mock_return() 第1个参数必须是 mock, 得到 {args[0].type}")
+        args[0].return_value = args[1].copy() if isinstance(args[1], RuntimeValue) \
+            else args[1]
+        return NoneValue()
+
+    def _builtin_mock_calls(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """mock_calls(m) — 取调用记录: [[arg, ...], ...]"""
+        if len(args) != 1 or not isinstance(args[0], MockValue):
+            raise TypeError("mock_calls() 期望1个参数(mock)")
+        return ListValue([ListValue(list(c), AnyType()) for c in args[0].calls],
+                         AnyType())
+
+    def _builtin_mock_call_count(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """mock_call_count(m) — 调用次数"""
+        if len(args) != 1 or not isinstance(args[0], MockValue):
+            raise TypeError("mock_call_count() 期望1个参数(mock)")
+        return IntValue(len(args[0].calls))
+
     def _builtin_read_file(self, args: List[RuntimeValue]) -> RuntimeValue:
         """read_file(path) — 读取文件内容为字符串"""
         if len(args) != 1:
@@ -4300,7 +5110,8 @@ class Interpreter:
         if isinstance(py_val, dict):
             d = DictValue()
             for k, v in py_val.items():
-                d.value[StringValue(k)] = self._py_to_runtime(v)
+                # 键保持 Python 标量形态 — DictValue._norm_key 的全库约定
+                d.value[k] = self._py_to_runtime(v)
             return d
         elif isinstance(py_val, list):
             return ListValue([self._py_to_runtime(item) for item in py_val])
@@ -4339,6 +5150,667 @@ class Interpreter:
                 d[k] = self._runtime_to_py(v)
             return d
         return str(val)
+
+    # ══ std/http（B6）──
+    def _http_request(self, method: str, url: str, body: str = None):
+        """HTTP 请求 — urllib 实现, 返回 (status, body)"""
+        import urllib.request
+        import urllib.error
+        data = body.encode('utf-8') if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        if data is not None:
+            req.add_header('Content-Type', 'application/json')
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, resp.read().decode('utf-8')
+        except urllib.error.HTTPError as he:
+            return he.code, he.read().decode('utf-8', errors='replace')
+        except urllib.error.URLError as ue:
+            raise RuntimeError(f"HTTP 请求失败: {url} — {ue.reason}")
+
+    def _builtin_http_get(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """http_get(url: String) — GET 请求, 返回响应体字符串"""
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("http_get() 期望1个字符串参数(url)")
+        _status, body = self._http_request('GET', args[0].value)
+        return StringValue(body)
+
+    def _builtin_http_post(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """http_post(url: String, body: String) — POST 请求, 返回响应体字符串"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], StringValue):
+            raise TypeError("http_post() 期望2个字符串参数(url, body)")
+        _status, body = self._http_request('POST', args[0].value, args[1].value)
+        return StringValue(body)
+
+    def _builtin_http_get_json(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """http_get_json(url: String) — GET 并解析 JSON 响应"""
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("http_get_json() 期望1个字符串参数(url)")
+        import json as _json
+        _status, body = self._http_request('GET', args[0].value)
+        try:
+            return self._py_to_runtime(_json.loads(body))
+        except _json.JSONDecodeError as je:
+            raise ValueError(f"HTTP 响应不是合法 JSON: {je.msg}")
+
+    def _builtin_http_post_json(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """http_post_json(url: String, value) — POST JSON 体, 返回响应体字符串"""
+        if len(args) != 2 or not isinstance(args[0], StringValue):
+            raise TypeError("http_post_json() 期望 (字符串 url, 任意值)")
+        import json as _json
+        body = _json.dumps(self._runtime_to_py(args[1]), ensure_ascii=False)
+        _status, resp = self._http_request('POST', args[0].value, body)
+        return StringValue(resp)
+
+    def _builtin_http_serve_start(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """http_serve_start(port: Int) — 本地测试服务器, 返回实际端口
+
+        路由: GET /hello → 文本; GET /json → JSON; POST /echo → 回声。
+        port=0 由操作系统分配。测试与演示的闭环球桌——不依赖外网。
+        """
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        if len(args) != 1:
+            raise TypeError("http_serve_start() 期望1个参数(port)")
+        interp = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):  # 静默 — 不污染测试输出
+                pass
+
+            def _send(self, code: int, payload: str, ctype: str):
+                raw = payload.encode('utf-8')
+                self.send_response(code)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_GET(self):
+                if self.path == '/hello':
+                    self._send(200, 'hello from intent test server', 'text/plain')
+                elif self.path == '/json':
+                    self._send(200, '{"lang": "intent", "version": 2, "ok": true}',
+                               'application/json')
+                else:
+                    self._send(404, 'not found', 'text/plain')
+
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length).decode('utf-8') if length else ''
+                if self.path == '/echo':
+                    self._send(200, body, 'text/plain')
+                else:
+                    self._send(404, 'not found', 'text/plain')
+
+        try:
+            server = ThreadingHTTPServer(('127.0.0.1', int(args[0].value)), _Handler)
+        except OSError as oe:
+            raise RuntimeError(f"测试服务器启动失败: {oe}")
+        server.port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        if not hasattr(interp, '_http_servers'):
+            interp._http_servers = {}
+        interp._http_servers[server.port] = server
+        return IntValue(server.port)
+
+    def _builtin_http_serve_stop(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """http_serve_stop(port: Int) — 关闭测试服务器"""
+        if len(args) != 1:
+            raise TypeError("http_serve_stop() 期望1个参数(port)")
+        servers = getattr(self, '_http_servers', {})
+        server = servers.pop(int(args[0].value), None)
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        return IntValue(0)
+
+    # ══ std/sqlite（B7）──
+    def _sqlite_handle(self, args, idx: int = 0):
+        """取 sqlite 连接句柄 — 参数校验 + 连接存在性"""
+        import sqlite3
+        if len(args) < idx + 1 or not isinstance(args[idx], IntValue):
+            raise TypeError("期望整数句柄(sqlite_open 的返回值)")
+        conn = getattr(self, '_sqlite_conns', {}).get(args[idx].value)
+        if conn is None:
+            raise RuntimeError(f"sqlite 句柄 {args[idx].value} 无效或已关闭")
+        return conn
+
+    def _builtin_sqlite_open(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """sqlite_open(path: String) — 打开数据库, 返回句柄(":memory:" 内存库)"""
+        import sqlite3
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("sqlite_open() 期望1个字符串参数(path)")
+        try:
+            conn = sqlite3.connect(args[0].value)
+        except sqlite3.Error as se:
+            raise RuntimeError(f"sqlite 打开失败: {se}")
+        if not hasattr(self, '_sqlite_conns'):
+            self._sqlite_conns = {}
+            self._sqlite_next = 1
+        handle = self._sqlite_next
+        self._sqlite_next += 1
+        self._sqlite_conns[handle] = conn
+        return IntValue(handle)
+
+    def _builtin_sqlite_exec(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """sqlite_exec(handle: Int, sql: String) — 执行写操作, 返回影响行数"""
+        if len(args) != 2 or not isinstance(args[1], StringValue):
+            raise TypeError("sqlite_exec() 期望 (整数句柄, 字符串 sql)")
+        conn = self._sqlite_handle(args)
+        try:
+            cur = conn.execute(args[1].value)
+            conn.commit()
+            return IntValue(cur.rowcount if cur.rowcount != -1 else 0)
+        except Exception as se:
+            raise RuntimeError(f"sqlite 执行失败: {se}")
+
+    def _builtin_sqlite_query(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """sqlite_query(handle: Int, sql: String) — 查询, 返回行字典列表"""
+        if len(args) != 2 or not isinstance(args[1], StringValue):
+            raise TypeError("sqlite_query() 期望 (整数句柄, 字符串 sql)")
+        conn = self._sqlite_handle(args)
+        try:
+            cur = conn.execute(args[1].value)
+            names = [d[0] for d in cur.description] if cur.description else []
+            rows = ListValue([], AnyType())
+            for row in cur.fetchall():
+                d = DictValue()
+                for name, val in zip(names, row):
+                    # 键为 Python 标量 — DictValue._norm_key 约定
+                    d.value[name] = self._py_to_runtime(val)
+                rows.value.append(d)
+            return rows
+        except Exception as se:
+            raise RuntimeError(f"sqlite 查询失败: {se}")
+
+    def _builtin_sqlite_close(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """sqlite_close(handle: Int) — 关闭连接"""
+        conn = self._sqlite_handle(args)
+        conn.close()
+        getattr(self, '_sqlite_conns', {}).pop(args[0].value, None)
+        return IntValue(0)
+
+    # ══ std/re（B8）──
+    def _re_compile(self, pattern: str):
+        """编译正则 — 非法模式转 ValueError（保留 re 模块原始消息）"""
+        import re as _re
+        try:
+            return _re.compile(pattern)
+        except _re.error as ee:
+            raise ValueError(f"正则表达式错误: {ee}")
+
+    def _builtin_re_test(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """re_test(pattern: String, text: String) — 是否存在匹配(re.search)"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], StringValue):
+            raise TypeError("re_test() 期望2个字符串参数(pattern, text)")
+        return BoolValue(self._re_compile(args[0].value).search(args[1].value)
+                         is not None)
+
+    def _builtin_re_full_match(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """re_full_match(pattern, text) — 整串匹配(re.fullmatch)"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], StringValue):
+            raise TypeError("re_full_match() 期望2个字符串参数(pattern, text)")
+        return BoolValue(self._re_compile(args[0].value).fullmatch(args[1].value)
+                         is not None)
+
+    def _builtin_re_find_all(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """re_find_all(pattern, text) — 所有匹配子串(完整匹配, 不含分组)"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], StringValue):
+            raise TypeError("re_find_all() 期望2个字符串参数(pattern, text)")
+        rx = self._re_compile(args[0].value)
+        return ListValue([StringValue(m.group(0)) for m in rx.finditer(args[1].value)],
+                         StringType())
+
+    def _builtin_re_groups(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """re_groups(pattern, text) — 首个匹配的捕获组列表(无匹配返回空列表)"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], StringValue):
+            raise TypeError("re_groups() 期望2个字符串参数(pattern, text)")
+        m = self._re_compile(args[0].value).search(args[1].value)
+        if m is None:
+            return ListValue([], StringType())
+        # 未参与匹配的组 → None(与 Python re 语义一致)
+        return ListValue([NoneValue() if g is None else StringValue(g)
+                          for g in m.groups()], StringType())
+
+    def _builtin_re_replace(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """re_replace(pattern, repl, text) — 全局替换(repl 支持 \\1 反向引用)"""
+        if len(args) != 3 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], StringValue) or not isinstance(args[2], StringValue):
+            raise TypeError("re_replace() 期望3个字符串参数(pattern, repl, text)")
+        return StringValue(self._re_compile(args[0].value).sub(args[1].value,
+                                                              args[2].value))
+
+    def _builtin_re_split(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """re_split(pattern, text) — 按模式切分(捕获组产生的分段也返回)"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], StringValue):
+            raise TypeError("re_split() 期望2个字符串参数(pattern, text)")
+        return ListValue([StringValue(p)
+                          for p in self._re_compile(args[0].value).split(args[1].value)],
+                         StringType())
+
+    # ══ std/datetime（B4）──
+    # 表示法：ISO 字符串（"YYYY-MM-DD" 或 "YYYY-MM-DD HH:MM:SS"），
+    # 朴素时间（naive）；timestamp/from_timestamp 按本地时区解释，
+    # to_timezone 显式按 UTC 解释输入。非法输入抛 ValueError。
+    def _dt_parse(self, s: str):
+        """解析 ISO 字符串 → datetime（保留输入是否含时间成分的信息在外层判断）"""
+        from datetime import datetime as _dt
+        text = s.strip()
+        try:
+            return _dt.fromisoformat(text)
+        except ValueError:
+            raise ValueError(
+                f"无效的日期时间: '{s}'（期望 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS）")
+
+    @staticmethod
+    def _dt_iso(dt) -> str:
+        """datetime → ISO 字符串（空格分隔，与解析输入同构）"""
+        return dt.isoformat(sep=' ')
+
+    def _builtin_datetime_now(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_now() — 当前本地日期时间（ISO 字符串）"""
+        from datetime import datetime as _dt
+        return StringValue(self._dt_iso(_dt.now()))
+
+    def _builtin_datetime_today(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_today() — 今天日期（ISO 字符串）"""
+        from datetime import date as _date
+        return StringValue(_date.today().isoformat())
+
+    def _builtin_datetime_parse(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_parse(iso) — 校验并规范化（非法抛 ValueError）"""
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("datetime_parse() 期望1个字符串参数(iso)")
+        return StringValue(self._dt_iso(self._dt_parse(args[0].value)))
+
+    def _builtin_datetime_format(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_format(iso, fmt) — 按 strftime 格式串格式化"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], StringValue):
+            raise TypeError("datetime_format() 期望2个字符串参数(iso, fmt)")
+        return StringValue(self._dt_parse(args[0].value).strftime(args[1].value))
+
+    def _builtin_datetime_add_days(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_add_days(iso, days) — 加天数（可为负）"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], IntValue):
+            raise TypeError("datetime_add_days() 期望 (字符串 iso, 整数 days)")
+        from datetime import timedelta as _td
+        dt = self._dt_parse(args[0].value) + _td(days=args[1].value)
+        return StringValue(self._dt_iso(dt))
+
+    def _builtin_datetime_add_hours(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_add_hours(iso, hours) — 加小时（可为负）"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], (IntValue, FloatValue)):
+            raise TypeError("datetime_add_hours() 期望 (字符串 iso, 数值 hours)")
+        from datetime import timedelta as _td
+        dt = self._dt_parse(args[0].value) + _td(hours=args[1].value)
+        return StringValue(self._dt_iso(dt))
+
+    def _builtin_datetime_diff_days(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_diff_days(a, b) — a - b 的整天数（向下取整）"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], StringValue):
+            raise TypeError("datetime_diff_days() 期望2个字符串参数(a, b)")
+        delta = self._dt_parse(args[0].value) - self._dt_parse(args[1].value)
+        return IntValue(delta.days)
+
+    def _builtin_datetime_diff_seconds(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_diff_seconds(a, b) — a - b 的秒数"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], StringValue):
+            raise TypeError("datetime_diff_seconds() 期望2个字符串参数(a, b)")
+        delta = self._dt_parse(args[0].value) - self._dt_parse(args[1].value)
+        return IntValue(int(delta.total_seconds()))
+
+    def _builtin_datetime_weekday(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_weekday(iso) — 星期几（0=周一 … 6=周日）"""
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("datetime_weekday() 期望1个字符串参数(iso)")
+        return IntValue(self._dt_parse(args[0].value).weekday())
+
+    def _builtin_datetime_parts(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_parts(iso) — {year, month, day, hour, minute, second} 字典"""
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("datetime_parts() 期望1个字符串参数(iso)")
+        dt = self._dt_parse(args[0].value)
+        d = DictValue()
+        for key, val in (('year', dt.year), ('month', dt.month), ('day', dt.day),
+                         ('hour', dt.hour), ('minute', dt.minute),
+                         ('second', dt.second)):
+            d.value[key] = IntValue(val)
+        return d
+
+    def _builtin_datetime_timestamp(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_timestamp(iso) — Unix 时间戳（按本地时区解释）"""
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("datetime_timestamp() 期望1个字符串参数(iso)")
+        return FloatValue(self._dt_parse(args[0].value).timestamp())
+
+    def _builtin_datetime_from_timestamp(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_from_timestamp(ts) — Unix 时间戳 → 本地 ISO 字符串"""
+        if len(args) != 1 or not isinstance(args[0], (IntValue, FloatValue)):
+            raise TypeError("datetime_from_timestamp() 期望1个数值参数(ts)")
+        from datetime import datetime as _dt
+        return StringValue(self._dt_iso(_dt.fromtimestamp(args[0].value)))
+
+    def _builtin_datetime_to_timezone(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """datetime_to_timezone(iso, offset_hours) — 输入按 UTC 解释，
+        返回 offset_hours 时区的墙上时间（如 (14:00, +8) → 22:00）"""
+        if len(args) != 2 or not isinstance(args[0], StringValue) \
+                or not isinstance(args[1], (IntValue, FloatValue)):
+            raise TypeError("datetime_to_timezone() 期望 (字符串 iso, 数值 offset_hours)")
+        from datetime import timezone as _tz, timedelta as _td
+        dt = self._dt_parse(args[0].value).replace(tzinfo=_tz.utc)
+        shifted = (dt + _td(hours=args[1].value)).replace(tzinfo=None)
+        return StringValue(self._dt_iso(shifted))
+
+    # ══ std/encoding（B9）──
+    # 表示法：Intent 字符串是文本，二进制字节序列以 base64 文本承载。
+    # gzip_compress 返回「压缩字节的 base64」；非法输入一律转 ValueError。
+    def _builtin_enc_base64_encode(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """enc_base64_encode(text) — UTF-8 字节 → 标准 base64"""
+        import base64 as _b64
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("enc_base64_encode() 期望1个字符串参数(text)")
+        raw = args[0].value.encode('utf-8')
+        return StringValue(_b64.b64encode(raw).decode('ascii'))
+
+    def _builtin_enc_base64_decode(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """enc_base64_decode(data) — base64 → UTF-8 文本（非法抛 ValueError）"""
+        import base64 as _b64
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("enc_base64_decode() 期望1个字符串参数(data)")
+        try:
+            raw = _b64.b64decode(args[0].value, validate=True)
+            return StringValue(raw.decode('utf-8'))
+        except Exception as ee:
+            raise ValueError(f"无效的 base64 数据: {ee}")
+
+    def _builtin_enc_gzip_compress(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """enc_gzip_compress(text) — gzip 压缩后以 base64 文本返回"""
+        import base64 as _b64, gzip as _gzip
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("enc_gzip_compress() 期望1个字符串参数(text)")
+        raw = _gzip.compress(args[0].value.encode('utf-8'))
+        return StringValue(_b64.b64encode(raw).decode('ascii'))
+
+    def _builtin_enc_gzip_decompress(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """enc_gzip_decompress(data) — base64 → gzip 解压 → 文本（非法抛 ValueError）"""
+        import base64 as _b64, gzip as _gzip
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("enc_gzip_decompress() 期望1个字符串参数(data)")
+        try:
+            raw = _b64.b64decode(args[0].value, validate=True)
+            return StringValue(_gzip.decompress(raw).decode('utf-8'))
+        except Exception as ee:
+            raise ValueError(f"无效的 gzip 数据: {ee}")
+
+    def _builtin_enc_urlencode(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """enc_urlencode(text) — UTF-8 百分号编码（默认无保留字符，空格 → %20）"""
+        from urllib.parse import quote as _quote
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("enc_urlencode() 期望1个字符串参数(text)")
+        return StringValue(_quote(args[0].value, safe=''))
+
+    def _builtin_enc_urldecode(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """enc_urldecode(data) — 百分号解码（UTF-8，非法输入抛 ValueError）"""
+        from urllib.parse import unquote as _unquote
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("enc_urldecode() 期望1个字符串参数(data)")
+        try:
+            return StringValue(_unquote(args[0].value, errors='strict'))
+        except Exception as ee:
+            raise ValueError(f"无效的百分号编码: {ee}")
+
+    # ══ std/glob（SL1）══
+    def _builtin_glob_match(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """glob_match(pattern) — 通配符匹配路径列表(空表=无匹配)"""
+        import glob as _glob
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("glob_match() 期望1个字符串参数(pattern)")
+        return ListValue([StringValue(p) for p in _glob.glob(args[0].value)],
+                         element_type=StringType())
+
+    # ══ std/shutil（SL1）══
+    def _builtin_shutil_copy_file(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """shutil_copy_file(src, dst) — 复制文件(覆盖式)"""
+        import shutil as _shutil
+        if len(args) != 2 or not all(isinstance(a, StringValue) for a in args):
+            raise TypeError("shutil_copy_file() 期望2个字符串参数(src, dst)")
+        try:
+            _shutil.copyfile(args[0].value, args[1].value)
+        except Exception as ee:
+            raise RuntimeError(f"复制失败: {ee}")
+        return BoolValue(True)
+
+    def _builtin_shutil_move(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """shutil_move(src, dst) — 移动文件或目录"""
+        import shutil as _shutil
+        if len(args) != 2 or not all(isinstance(a, StringValue) for a in args):
+            raise TypeError("shutil_move() 期望2个字符串参数(src, dst)")
+        try:
+            _shutil.move(args[0].value, args[1].value)
+        except Exception as ee:
+            raise RuntimeError(f"移动失败: {ee}")
+        return BoolValue(True)
+
+    def _builtin_shutil_rmtree(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """shutil_rmtree(path) — 递归删除目录(不存在抛 RuntimeError)"""
+        import shutil as _shutil
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("shutil_rmtree() 期望1个字符串参数(path)")
+        try:
+            _shutil.rmtree(args[0].value)
+        except Exception as ee:
+            raise RuntimeError(f"删除目录失败: {ee}")
+        return BoolValue(True)
+
+    # ══ std/tempfile（SL1）══
+    def _builtin_tempfile_mkdtemp(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """tempfile_mkdtemp() — 创建唯一临时目录, 返回路径"""
+        import tempfile as _tf
+        if args:
+            raise TypeError("tempfile_mkdtemp() 无参数")
+        return StringValue(_tf.mkdtemp())
+
+    def _builtin_tempfile_mkstemp(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """tempfile_mkstemp(prefix) — 创建唯一临时文件, 返回路径"""
+        import tempfile as _tf
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError("tempfile_mkstemp() 期望1个字符串参数(prefix)")
+        fd, path = _tf.mkstemp(prefix=args[0].value)
+        import os as _os
+        _os.close(fd)
+        return StringValue(path)
+
+    def _builtin_tempfile_tempdir(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """tempfile_tempdir() — 系统临时目录路径"""
+        import tempfile as _tf
+        if args:
+            raise TypeError("tempfile_tempdir() 无参数")
+        return StringValue(_tf.gettempdir())
+
+    # ══ std/uuid（SL1）══
+    def _builtin_uuid_uuid4(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """uuid_uuid4() — 随机 UUID(带连字符)"""
+        import uuid as _uuid
+        if args:
+            raise TypeError("uuid_uuid4() 无参数")
+        return StringValue(str(_uuid.uuid4()))
+
+    def _builtin_uuid_uuid4_hex(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """uuid_uuid4_hex() — 随机 UUID(32 位无连字符)"""
+        import uuid as _uuid
+        if args:
+            raise TypeError("uuid_uuid4_hex() 无参数")
+        return StringValue(_uuid.uuid4().hex)
+
+    # ══ std/hashlib（SL1）══
+    def _hash_text(self, algo: str, args: List[RuntimeValue]) -> RuntimeValue:
+        import hashlib as _hl
+        if len(args) != 1 or not isinstance(args[0], StringValue):
+            raise TypeError(f"{algo}() 期望1个字符串参数(text)")
+        h = _hl.new(algo)
+        h.update(args[0].value.encode('utf-8'))
+        return StringValue(h.hexdigest())
+
+    def _builtin_hash_md5(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """hash_md5(text) — MD5 十六进制摘要"""
+        return self._hash_text('md5', args)
+
+    def _builtin_hash_sha1(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """hash_sha1(text) — SHA-1 十六进制摘要"""
+        return self._hash_text('sha1', args)
+
+    def _builtin_hash_sha256(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """hash_sha256(text) — SHA-256 十六进制摘要"""
+        return self._hash_text('sha256', args)
+
+    def _builtin_hash_sha512(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """hash_sha512(text) — SHA-512 十六进制摘要"""
+        return self._hash_text('sha512', args)
+
+    # ══ std/hmac（SL1）══
+    def _builtin_hmac_sha256(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """hmac_sha256(key, msg) — HMAC-SHA256 十六进制摘要"""
+        import hmac as _hmac, hashlib as _hl
+        if len(args) != 2 or not all(isinstance(a, StringValue) for a in args):
+            raise TypeError("hmac_sha256() 期望2个字符串参数(key, msg)")
+        mac = _hmac.new(args[0].value.encode('utf-8'),
+                        args[1].value.encode('utf-8'), _hl.sha256)
+        return StringValue(mac.hexdigest())
+
+    def _builtin_hmac_sha256_verify(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """hmac_sha256_verify(key, msg, sig) — 常量时间比对签名"""
+        import hmac as _hmac, hashlib as _hl
+        if len(args) != 3 or not all(isinstance(a, StringValue) for a in args):
+            raise TypeError("hmac_sha256_verify() 期望3个字符串参数(key, msg, sig)")
+        mac = _hmac.new(args[0].value.encode('utf-8'),
+                        args[1].value.encode('utf-8'), _hl.sha256)
+        return BoolValue(_hmac.compare_digest(mac.hexdigest(), args[2].value))
+
+    # ══ std/secrets（SL1）══
+    def _builtin_secrets_token_hex(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """secrets_token_hex(n) — n 字节安全随机数的十六进制(2n 字符)"""
+        import secrets as _secrets
+        if len(args) != 1 or not isinstance(args[0], IntValue) or args[0].value < 0:
+            raise TypeError("secrets_token_hex() 期望1个非负整数参数(n)")
+        return StringValue(_secrets.token_hex(args[0].value))
+
+    def _builtin_secrets_rand_below(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """secrets_rand_below(n) — [0, n) 安全随机整数"""
+        import secrets as _secrets
+        if len(args) != 1 or not isinstance(args[0], IntValue) or args[0].value <= 0:
+            raise TypeError("secrets_rand_below() 期望1个正整数参数(n)")
+        return IntValue(_secrets.randbelow(args[0].value))
+
+    def _builtin_secrets_choice(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """secrets_choice(lst) — 列表安全随机取一(空表抛 ValueError)"""
+        import secrets as _secrets
+        if len(args) != 1 or not isinstance(args[0], ListValue):
+            raise TypeError("secrets_choice() 期望1个列表参数(lst)")
+        if not args[0].value:
+            raise ValueError("secrets_choice() 不能从空列表选择")
+        return _secrets.choice(args[0].value)
+
+    # ══ std/decimal（SL1）══
+    # 表示法约定: Decimal 以字符串承载("12.34"), 运算走 Python decimal
+    # (任意精度, 二进制浮点误差自此绝缘), 结果一律返回规范化字符串。
+    def _decimal_parse(self, s: str):
+        from decimal import Decimal, InvalidOperation
+        try:
+            return Decimal(s)
+        except InvalidOperation:
+            raise ValueError(f"无效的十进制数字: {s}")
+
+    def _builtin_decimal_add(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """decimal_add(a, b) — 精确加法(字符串进, 字符串出)"""
+        if len(args) != 2 or not all(isinstance(a, StringValue) for a in args):
+            raise TypeError("decimal_add() 期望2个字符串参数(a, b)")
+        return StringValue(str(self._decimal_parse(args[0].value)
+                               + self._decimal_parse(args[1].value)))
+
+    def _builtin_decimal_sub(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """decimal_sub(a, b) — 精确减法"""
+        if len(args) != 2 or not all(isinstance(a, StringValue) for a in args):
+            raise TypeError("decimal_sub() 期望2个字符串参数(a, b)")
+        return StringValue(str(self._decimal_parse(args[0].value)
+                               - self._decimal_parse(args[1].value)))
+
+    def _builtin_decimal_mul(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """decimal_mul(a, b) — 精确乘法"""
+        if len(args) != 2 or not all(isinstance(a, StringValue) for a in args):
+            raise TypeError("decimal_mul() 期望2个字符串参数(a, b)")
+        return StringValue(str(self._decimal_parse(args[0].value)
+                               * self._decimal_parse(args[1].value)))
+
+    def _builtin_decimal_div(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """decimal_div(a, b) — 精确除法(28 位精度, 除零抛 ZeroDivisionError)"""
+        if len(args) != 2 or not all(isinstance(a, StringValue) for a in args):
+            raise TypeError("decimal_div() 期望2个字符串参数(a, b)")
+        b = self._decimal_parse(args[1].value)
+        if b == 0:
+            raise ZeroDivisionError("decimal_div() 除数不能为零")
+        return StringValue(str(self._decimal_parse(args[0].value) / b))
+
+    def _builtin_decimal_compare(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """decimal_compare(a, b) — 精确比较: a>b→1, a<b→-1, 相等→0"""
+        if len(args) != 2 or not all(isinstance(a, StringValue) for a in args):
+            raise TypeError("decimal_compare() 期望2个字符串参数(a, b)")
+        a = self._decimal_parse(args[0].value)
+        b = self._decimal_parse(args[1].value)
+        return IntValue(1 if a > b else (-1 if a < b else 0))
+
+    # ══ std/memory（MM1: 引用计数观测 + 循环回收）══
+    def _builtin_mem_live_count(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """mem_live_count() — 当前存活的容器对象数(注册表观测)"""
+        if args:
+            raise TypeError("mem_live_count() 无参数")
+        return IntValue(OBJECT_REGISTRY.live())
+
+    def _builtin_mem_alloc_total(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """mem_alloc_total() — 累计创建的容器对象数"""
+        if args:
+            raise TypeError("mem_alloc_total() 无参数")
+        return IntValue(OBJECT_REGISTRY.alloc_total)
+
+    def _builtin_mem_stats_info(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """mem_stats_info() — 内存统计字典(live/alloc_total/reclaim_total/by_type)"""
+        if args:
+            raise TypeError("mem_stats_info() 无参数")
+        st = OBJECT_REGISTRY.stats()
+        d = DictValue()
+        d.value["live"] = IntValue(st["live"])
+        d.value["alloc_total"] = IntValue(st["alloc_total"])
+        d.value["reclaim_total"] = IntValue(st["reclaim_total"])
+        by_type = DictValue()
+        for k, v in st["by_type"].items():
+            by_type.value[k] = IntValue(v)
+        d.value["by_type"] = by_type
+        return d
+
+    def _builtin_gc_collect_now(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """gc_collect_now() — 触发循环垃圾回收, 返回本次回收的容器数"""
+        if args:
+            raise TypeError("gc_collect_now() 无参数")
+        return IntValue(OBJECT_REGISTRY.collect())
+
+    def _builtin_ref_count_of(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """ref_count_of(obj) — 对象的宿主引用计数(观测值, 含解释器内部引用)"""
+        import sys as _sys
+        if len(args) != 1:
+            raise TypeError("ref_count_of() 期望1个参数(obj)")
+        return IntValue(_sys.getrefcount(args[0]) - 1)
 
     # ══ std/math 补充 ──
     def _builtin_sqrt(self, args: List[RuntimeValue]) -> RuntimeValue:
@@ -4755,6 +6227,9 @@ class Interpreter:
     def execute_statement(self, stmt: ASTNode) -> RuntimeValue:
         """执行语句"""
         self._track_node(stmt)
+        # C7: 调试器 hook — 断点/单步命中即暂停进命令循环
+        if self.debugger is not None:
+            self.debugger.check(stmt)
         try:
             return self._execute_statement_safe(stmt)
         except (NameError, ValueError, TypeError, RuntimeError, IndexError, KeyError, ZeroDivisionError, AssertionError) as e:
@@ -4810,6 +6285,12 @@ class Interpreter:
 
         elif isinstance(stmt, TryStmt):
             return self.execute_try_stmt(stmt)
+        elif isinstance(stmt, RaiseStmt):
+            return self.execute_raise(stmt)
+        elif isinstance(stmt, SpawnStmt):
+            return self.execute_spawn(stmt)
+        elif isinstance(stmt, ScopeStmt):
+            return self.execute_scope(stmt)
         elif isinstance(stmt, WithStmt):
             return self.execute_with_stmt(stmt)
         elif isinstance(stmt, TypeAliasStmt):
@@ -5314,6 +6795,13 @@ class Interpreter:
         消息取首行(去除 _error_context 的多行位置信息),
         栈取异常穿帧快照(顶层则为当前调用栈)。
         """
+        # EX1: raise 抛出的错误值原样进 catch(类型/消息/因果链不丢)
+        if isinstance(e, IntentRaise):
+            ev = e.error_value
+            if not ev.stack:
+                ev.stack = [StringValue(repr(fr)) for fr in
+                            (getattr(e, '_intent_stack', None) or self.call_stack)]
+            return ev
         py_type = type(e).__name__
         intent_type = PY_TO_INTENT_EXC.get(py_type, py_type)
         msg = str(e)
@@ -5392,6 +6880,88 @@ class Interpreter:
                 for body_stmt in stmt.finally_body:
                     self.execute_statement(body_stmt)
                 self.current_scope = old_scope
+        return result
+
+    def execute_raise(self, stmt: 'RaiseStmt') -> RuntimeValue:
+        """执行 raise(EX1): 把错误值抛回控制流; from Y 显式挂因果链"""
+        err = self._coerce_error_value(self.evaluate_expression(stmt.value))
+        if stmt.cause is not None:
+            err.cause = self._coerce_error_value(
+                self.evaluate_expression(stmt.cause))
+        raise IntentRaise(err)
+
+    def _coerce_error_value(self, val) -> 'ErrorValue':
+        """raise 目标归一为 ErrorValue: ErrorValue 原样; Err(e) 取内层;
+        字符串 → RuntimeError 简写; 其余明确拒绝(不静然猜测)。"""
+        if isinstance(val, ErrorValue):
+            return val
+        if isinstance(val, ResultValue) and not val.is_ok:
+            inner = val.err_value
+            if isinstance(inner, ErrorValue):
+                return inner
+            return ErrorValue("ResultError", str(inner))
+        if isinstance(val, StringValue):
+            return ErrorValue("RuntimeError", val.value)
+        raise TypeError(
+            f"raise 期望错误值(error() 构造 / Err() / 字符串简写), "
+            f"得到 {type(val).__name__}")
+
+    def execute_spawn(self, stmt: 'SpawnStmt') -> RuntimeValue:
+        """spawn(CC1): 派生线程任务, 登记进当前 scope 的任务表
+
+        调用点求值(参数在 spawn 处定格), 线程里只负责执行 —
+        structured concurrency: 没有孤儿线程, scope 退出统一 join。
+        """
+        if not self._spawn_stack:
+            raise RuntimeError(
+                "spawn 必须在 scope 块内(结构化并发: 不允许孤儿线程)")
+        expr = stmt.expr
+        if isinstance(expr, CallExpr):
+            callee_expr = expr.func
+            if isinstance(callee_expr, (Variable, MemberAccess)):
+                callee = self.evaluate_expression(callee_expr)
+            elif isinstance(callee_expr, str):
+                callee = self.current_scope.get(callee_expr)
+            else:
+                raise RuntimeError("spawn 的调用目标无法解析")
+            args = [self.evaluate_expression(a) for a in expr.args]
+        else:
+            callee = self.evaluate_expression(expr)
+            args = []
+        if not isinstance(callee, FunctionValue) and not callable(callee):
+            raise TypeError("spawn 期望可调用对象(函数/闭包/lambda)")
+        task = _SpawnTask(callee, args)
+        self._spawn_stack[-1].append(task)
+        task.start()
+        return NoneValue()
+
+    def execute_scope(self, stmt: 'ScopeStmt') -> RuntimeValue:
+        """scope 块(CC1): 执行块, 退出时自动 join 全部派生任务
+
+        任务异常在 join 处重抛(第一个) — 并发的错误不沉没。
+        return/break/continue 穿透语义与其他块语句一致。
+        """
+        tasks = []
+        self._spawn_stack.append(tasks)
+        old_scope = self.current_scope
+        self.current_scope = self.current_scope.enter()
+        result = IntValue(0)
+        try:
+            for body_stmt in stmt.body:
+                result = self.execute_statement(body_stmt)
+                if self.return_flag or self.break_flag or self.continue_flag:
+                    break
+        finally:
+            self.current_scope = old_scope
+            self._spawn_stack.pop()
+            # 结构化并发的核心: 作用域退出 = 全部任务汇合点
+            first_error = None
+            for task in tasks:
+                task.join()
+                if task.error is not None and first_error is None:
+                    first_error = task.error
+            if first_error is not None:
+                raise first_error
         return result
 
     def execute_assert(self, stmt: 'AssertStmt'):
@@ -5745,6 +7315,20 @@ class Interpreter:
                     e._intent_stack = list(self.call_stack)
                 except Exception:
                     pass
+            # EX2: 帧快照链 — 本帧局部变量在此刻仍可见(作用域还没弹)
+            # 最深层先补, 外层穿帧时前插 → 最终从外到内排列
+            try:
+                snap = {'name': frame.name, 'line': frame.line,
+                        'column': frame.column, 'filename': frame.filename,
+                        'locals': {k: _brief_value(v) for k, v
+                                   in _frame_symbols(frame).items()}}
+                chain = getattr(e, '_intent_frames', None)
+                if chain is None:
+                    chain = []
+                    e._intent_frames = chain
+                chain.insert(0, snap)
+            except Exception:
+                pass
             raise
         finally:
             self.call_stack.pop()
@@ -5805,6 +7389,10 @@ class Interpreter:
         old_scope = self.current_scope
         parent = closure_scope if closure_scope is not None else old_scope
         self.current_scope = Scope(parent=parent)
+        # EX2: 本帧作用域挂到调用栈帧 — 异常穿帧时(外层 except 看到的
+        # 已是最内层 scope), 帧快照必须从帧上取, 才能各帧各的本地人
+        if self.call_stack:
+            self.call_stack[-1].scope = self.current_scope
 
         # 设置参数(在验证契约之前,使参数名可用于 requires/ensures)
         # 同时进行运行时类型校验(使用泛型代入后的类型)
@@ -5949,6 +7537,19 @@ class Interpreter:
                     e._intent_stack = list(self.call_stack)
                 except Exception:
                     pass
+            # EX2: 方法帧同样补局部变量快照(与 execute_function 同构)
+            try:
+                snap = {'name': frame.name, 'line': frame.line,
+                        'column': frame.column, 'filename': frame.filename,
+                        'locals': {k: _brief_value(v) for k, v
+                                   in _frame_symbols(frame).items()}}
+                chain = getattr(e, '_intent_frames', None)
+                if chain is None:
+                    chain = []
+                    e._intent_frames = chain
+                chain.insert(0, snap)
+            except Exception:
+                pass
             raise
         finally:
             self.call_stack.pop()
@@ -5982,6 +7583,9 @@ class Interpreter:
         old_return_flag = self.return_flag
         old_return_value = self.return_value
         self.current_scope = method_scope
+        # EX2: 方法帧作用域挂帧(与 _execute_function_inner 同构)
+        if self.call_stack:
+            self.call_stack[-1].scope = self.current_scope
         
         # 执行函数体
         self.return_flag = False
@@ -6065,7 +7669,7 @@ class Interpreter:
                     return method
                 raise NameError(f"实例没有属性 '{expr.member}'")
 
-            # ErrorValue 成员访问(P1.4): e.type / e.message / e.stack
+            # ErrorValue 成员访问(P1.4): e.type / e.message / e.stack / e.__cause__
             if isinstance(obj_value, ErrorValue):
                 if expr.member == 'type':
                     return StringValue(obj_value.err_type)
@@ -6073,6 +7677,10 @@ class Interpreter:
                     return StringValue(obj_value.message)
                 if expr.member == 'stack':
                     return ListValue(list(obj_value.stack), StringType())
+                if expr.member in ('__cause__', 'cause'):
+                    if obj_value.cause is not None:
+                        return obj_value.cause
+                    return NoneValue()
                 raise NameError(f"异常值没有成员 '{expr.member}'")
 
             # ResultValue 成员访问 — Ok/Err 是平等的两种值,Result 有自己的结构
@@ -6193,6 +7801,22 @@ class Interpreter:
 
             raise TypeError(f"管道右侧必须是可调用对象")
 
+        elif isinstance(expr, SendExpr):
+            # CC2: ch <- v — 发送(阻塞直到入队; 关闭通道上报错)
+            chan_val = self.evaluate_expression(expr.chan, context)
+            if not isinstance(chan_val, ChannelValue):
+                raise TypeError(f"<- 左侧必须是通道(chan() 创建), 得到 {chan_val.type}")
+            value = self.evaluate_expression(expr.value, context)
+            chan_val.send(value)
+            return NoneValue()
+
+        elif isinstance(expr, RecvExpr):
+            # CC2: <- ch — 接收(空则阻塞; 关闭且空则 ChannelClosedError)
+            chan_val = self.evaluate_expression(expr.chan, context)
+            if not isinstance(chan_val, ChannelValue):
+                raise TypeError(f"<- 右侧必须是通道(chan() 创建), 得到 {chan_val.type}")
+            return chan_val.recv()
+
         elif isinstance(expr, IfExpr):
             # if 表达式:求值条件,选择分支,返回结果
             cond_val = self.evaluate_expression(expr.condition, context)
@@ -6279,6 +7903,21 @@ class Interpreter:
             return val
 
         elif isinstance(expr, BinaryOp):
+            # 逻辑运算短路求值(Python 语义): and 左假即假 / or 左真即真,
+            # 右侧不需求值。修根因: 原实现两侧 eager 求值后交 _binary_op,
+            # 边界条件如 `i < len(lst) and lst[i] < x` 在 i==len(lst) 时
+            # 右侧仍被求值 → IndexError(空列表/heapq/bisect 全族中招)。
+            # 返回类型保持 BoolValue 不变(与原 _binary_op 语义兼容)。
+            if expr.op == 'and':
+                left = self.evaluate_expression(expr.left, context)
+                if not left.to_bool():
+                    return BoolValue(False)
+                return BoolValue(self.evaluate_expression(expr.right, context).to_bool())
+            if expr.op == 'or':
+                left = self.evaluate_expression(expr.left, context)
+                if left.to_bool():
+                    return BoolValue(True)
+                return BoolValue(self.evaluate_expression(expr.right, context).to_bool())
             left = self.evaluate_expression(expr.left, context)
             right = self.evaluate_expression(expr.right, context)
             return self._binary_op(left, expr.op, right)
@@ -6380,6 +8019,10 @@ class Interpreter:
                     args = [self.evaluate_expression(arg, context) for arg in expr.args]
                     instance = scope_val.call(self, args)
                     return instance
+                # TQ1: mock 等可调用值(测试替身直接调用 m(args))
+                if callable(scope_val):
+                    args = [self.evaluate_expression(arg, context) for arg in expr.args]
+                    return scope_val(args)
 
             raise NameError(f"未定义的函数: {func_name or expr.func}")
 
@@ -7008,11 +8651,15 @@ def main():
     parser.add_argument('--version', action='store_true', help='显示版本号')
     parser.add_argument('--check', action='store_true',
                         help='只解析不执行: 语法干净退出0, 有错误退出2(CI/lint 前置)')
+    parser.add_argument('--types', action='store_true',
+                        help='L1: 渐进类型静态检查(mypy-lite: 标注处检查+推断处放过)')
     parser.add_argument('--emit', nargs=2, metavar=('KIND', 'FILE'),
                         help='将词法/语法结果写入文件: --emit tokens out.txt | --emit ast out.txt')
     parser.add_argument('--install', nargs='?', const='__BATCH__', default=None,
                         metavar='URL',
                         help='安装依赖: 带 URL 装单个; 不带按 intent.toml 的 [deps] 批量装')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='PK1: 安装预演 — 只做依赖解析(约束合并/冲突检测)不安装')
     parser.add_argument('--fmt', default=None, metavar='FILE',
                         help='格式化 Intent 文件, 结果输出到 stdout')
     parser.add_argument('--lint', default=None, metavar='FILE',
@@ -7031,6 +8678,10 @@ def main():
     parser.add_argument('-r', '--repl', action='store_true', help='启动REPL交互环境')
     parser.add_argument('-t', '--tokens', action='store_true', help='显示词法分析结果')
     parser.add_argument('-a', '--ast', action='store_true', help='显示语法分析结果')
+    parser.add_argument('--debug', action='store_true',
+                        help='C7: 调试模式执行(断点/单步/变量检视/调用栈)')
+    parser.add_argument('--postmortem', action='store_true',
+                        help='EX2: 事后调试(异常帧快照存档 + 崩溃后进场检视)')
 
     # parse_known_args: 源文件之后的额外参数透传给 Intent 程序(args() 读取)
     args, extra = parser.parse_known_args()
@@ -7046,9 +8697,15 @@ def main():
         print(f"Intent v{VERSION} ({PHILOSOPHY_SLOGAN})")
         return
 
-    # --install: 依赖安装(P2.1)
+    # --install: 依赖安装(PK1: 版本解析 + lock)
     if args.install is not None:
-        sys.exit(run_install(None if args.install == '__BATCH__' else args.install))
+        proj_dir = None
+        # 批量模式的位置参数是项目目录(判定命令: --install --dry-run tests/pkg_fixture)
+        if args.install == '__BATCH__' and args.filename \
+                and os.path.isdir(args.filename):
+            proj_dir = args.filename
+        sys.exit(run_install(None if args.install == '__BATCH__' else args.install,
+                             dry_run=args.dry_run, project_dir=proj_dir))
 
     # --fmt: 格式化(P2.2)
     if args.fmt:
@@ -7079,7 +8736,7 @@ def main():
             sys.exit(2)
         from intent_bytecode import compile_program, VM
         try:
-            emitter = compile_program(program)
+            emitter = compile_program(program, interpreter.builtins.keys())
         except NotImplementedError as e:
             print(f"❌ 编译失败(特性未覆盖, 属 M11 范围): {e}", file=sys.stderr)
             sys.exit(2)
@@ -7087,7 +8744,7 @@ def main():
         print(f"⚙️  字节码编译完成: {args.compile} → {len(emitter.code)} 条指令, "
               f"{len(emitter.functions)} 个函数", file=sys.stderr)
         if args.run_vm:
-            vm = VM(emitter, interpreter._builtin_print)
+            vm = VM(emitter, interpreter)
             vm.run()
         sys.exit(0)
 
@@ -7097,7 +8754,14 @@ def main():
         lib_dir = os.path.abspath('lib')
         if lib_dir not in interpreter.module_search_paths:
             interpreter.module_search_paths.append(lib_dir)
-    global_lib = os.path.join(os.path.expanduser('~'), '.intent', 'lib')
+    # PK2: .venv/lib 优先于全局库 — 项目有自己的院子就不去公共池塘打水
+    # (INTENT_HOME 可覆盖默认 ~/.intent, 与 tools/venv.py 同一约定)
+    intent_home = os.environ.get('INTENT_HOME') or os.path.join(
+        os.path.expanduser('~'), '.intent')
+    venv_lib = os.path.abspath(os.path.join('.venv', 'lib'))
+    if os.path.isdir(venv_lib) and venv_lib not in interpreter.module_search_paths:
+        interpreter.module_search_paths.append(venv_lib)
+    global_lib = os.path.join(intent_home, 'lib')
     if os.path.isdir(global_lib) and global_lib not in interpreter.module_search_paths:
         interpreter.module_search_paths.append(global_lib)
 
@@ -7126,10 +8790,31 @@ def main():
         check_code(code or "", code_name)
         return
 
+    # --types: L1 渐进类型静态检查(标注处检查+推断处放过)
+    if args.types:
+        type_check_code(code or "", code_name)
+        return
+
     # --emit: tokens/ast 写入文件
     if args.emit:
         emit_kind, emit_path = args.emit
         emit_analysis(code or "", emit_kind, emit_path, code_name)
+        return
+
+    # --debug: 调试模式执行(C7) — 断点/单步/变量检视/调用栈
+    if args.debug:
+        if code is None:
+            print("❌ --debug 需要代码来源: --debug file.intent 或 --debug -c '...'")
+            sys.exit(2)
+        run_debug(code, code_name)
+        return
+
+    # --postmortem: 事后调试(EX2) — 异常帧快照存档, 崩溃后进场检视
+    if args.postmortem:
+        if code is None:
+            print("❌ --postmortem 需要代码来源: --postmortem file.intent")
+            sys.exit(2)
+        run_postmortem(code, code_name)
         return
 
     # -c 直接执行(无需文件)
@@ -7216,6 +8901,24 @@ def main():
     if code is not None:
         run_code(code, interpreter, args)
 
+def _brief_value(v) -> str:
+    """EX2: 帧快照的变量渲染 — 安全截断, 不因 repr 失败丢整份快照"""
+    try:
+        s = str(v)
+    except Exception:
+        s = f"<{type(v).__name__}>"
+    return s if len(s) <= 60 else s[:57] + "..."
+
+def _frame_symbols(frame) -> dict:
+    """EX2: 取某帧自己的局部变量表
+
+    异常路径上内层作用域不会恢复, 外层 except 看到的 current_scope
+    已是最内层 — 所以每帧的作用域在建帧时就挂到 CallFrame.scope 上,
+    快照从帧取, 各帧各的本地人, 张冠李戴即是假检视。
+    """
+    scope = getattr(frame, 'scope', None)
+    return scope.symbols if scope is not None else {}
+
 def wrap_intent_error(e: Exception, interpreter: 'Interpreter') -> IntentError:
     """把任意异常包装为带源码位置与调用栈的 IntentError
 
@@ -7231,6 +8934,18 @@ def wrap_intent_error(e: Exception, interpreter: 'Interpreter') -> IntentError:
             e.column = interpreter.current_col
             e.filename = interpreter.current_filename
         return e
+    # EX1: raise 抛出的错误值 → IntentError(携带 error_value 供链渲染)
+    if isinstance(e, IntentRaise):
+        ev = e.error_value
+        ie = IntentError(
+            f"{ev.err_type}: {ev.message}",
+            line=getattr(e, '_intent_line', None) or interpreter.current_line or None,
+            column=interpreter.current_col or None,
+            stack=getattr(e, '_intent_stack', None) or list(interpreter.call_stack),
+            filename=interpreter.current_filename)
+        ie.py_type = ev.err_type
+        ie.error_value = ev
+        return ie
     is_syntax = isinstance(e, SyntaxError)
     ie = IntentError(
         str(e),
@@ -7280,6 +8995,17 @@ def render_intent_error(e: IntentError, interpreter: 'Interpreter') -> str:
     if isinstance(e, ContractViolation):
         out.append("   提示: 契约是函数与调用者之间的合同 — 检查实参是否满足")
         out.append("         requires,或函数实现是否兑现了 ensures 的承诺")
+
+    # 5. 异常链(EX1): raise X from Y 的 __cause__ — 从起因到外层
+    causes = []
+    cur = getattr(getattr(e, 'error_value', None), 'cause', None)
+    while cur is not None and isinstance(cur, ErrorValue):
+        causes.append(cur)
+        cur = getattr(cur, 'cause', None)
+    if causes:
+        out.append("   异常链(__cause__, 从起因到外层):")
+        for c in reversed(causes):
+            out.append(f"     {c.err_type}: {c.message}")
     return "\n".join(out)
 
 def run_code(code: str, interpreter: Interpreter, args):
@@ -7359,17 +9085,19 @@ def run_code(code: str, interpreter: Interpreter, args):
 # ── P2.1 包管理 V0.1(本地优先, 无版本求解器) ──────────
 
 def load_project_manifest(path: str = "intent.toml") -> Optional[dict]:
-    """读取项目清单 intent.toml(P2.1)
+    """读取项目清单 intent.toml(P2.1 / PK1)
 
     格式:
       [project]
       name = "myproj"
       version = "0.1.0"
       [deps]
-      mylib = { git = "https://github.com/x/mylib.git" }
+      mylib = { git = "https://github.com/x/mylib.git", version = "^1.2" }
       utils = "../utils"        # 本地路径依赖
+      mathkit = "^1.2"          # 裸版本约束 → 本地注册表同名包(PK1)
 
     返回 None 表示无清单文件。tomllib 不可用时抛清晰错误。
+    deps 每项规范化为 {'source': 路径或URL, 'version': 约束串或 ''}。
     """
     if not os.path.isfile(path):
         return None
@@ -7387,9 +9115,12 @@ def load_project_manifest(path: str = "intent.toml") -> Optional[dict]:
     }
     for dep_name, spec in data.get('deps', {}).items():
         if isinstance(spec, dict):
-            manifest['deps'][dep_name] = spec.get('git') or spec.get('path') or ''
+            manifest['deps'][dep_name] = {
+                'source': spec.get('git') or spec.get('path') or '',
+                'version': str(spec.get('version', '') or ''),
+            }
         else:
-            manifest['deps'][dep_name] = str(spec)
+            manifest['deps'][dep_name] = {'source': str(spec), 'version': ''}
     return manifest
 
 def _dep_dir_name(dep_name: str, source: str) -> str:
@@ -7435,35 +9166,409 @@ def install_dependency(dep_name: str, source: str, lib_dir: str = "lib") -> bool
     print(f"  📦 复制 {dep_name} ({source})")
     return True
 
-def run_install(source: Optional[str] = None, manifest_path: str = "intent.toml") -> int:
-    """--install: 安装依赖(P2.1)
+# ==================== PK1 依赖解析器 ====================
+# 语义化版本约束 + 冲突解决 + intent.lock 锁定。
+# 设计: 约束累积 → 候选枚举 → 公共兼容集取最高(回退) → 无解报冲突。
+# 刻意不做: 全局 SAT 求解(复杂性瘟疫); git 依赖的 tag 枚举(未克隆无版本可读)。
+
+class DependencyConflict(Exception):
+    """依赖冲突: 同一包的多个约束不存在公共兼容版本"""
+
+
+def _parse_semver(vstr: str) -> tuple:
+    """语义化版本 → (major, minor, patch, prerelease_ids|None)
+
+    '1.2.3' → (1,2,3,None); '1.2' → (1,2,0,None); '1.0.0-beta.1' → (1,0,0,('beta','1'))
+    正式版高于同号预发布版(semver 共识)。
+    """
+    s = (vstr or '').strip()
+    if s.startswith('v'):
+        s = s[1:]
+    if not s:
+        raise ValueError("空版本号")
+    core, sep, pre = s.partition('-')
+    parts = core.split('.')
+    if len(parts) > 3 or not all(p.isdigit() for p in parts):
+        raise ValueError(f"非法语义化版本: '{vstr}'")
+    while len(parts) < 3:
+        parts.append('0')
+    pre_ids = tuple(pre.split('.')) if sep and pre else None
+    return (int(parts[0]), int(parts[1]), int(parts[2]), pre_ids)
+
+
+def _cmp_semver(a: tuple, b: tuple) -> int:
+    """semver 比较: -1 / 0 / 1"""
+    for i in range(3):
+        if a[i] != b[i]:
+            return -1 if a[i] < b[i] else 1
+    pa, pb = a[3], b[3]
+    if pa is None and pb is None:
+        return 0
+    if pa is None:
+        return 1
+    if pb is None:
+        return -1
+    for x, y in zip(pa, pb):
+        xd, yd = x.isdigit(), y.isdigit()
+        if xd and yd:
+            if int(x) != int(y):
+                return -1 if int(x) < int(y) else 1
+        elif xd != yd:
+            return -1 if xd else 1   # 数字标识符 < 字母标识符
+        elif x != y:
+            return -1 if x < y else 1
+    if len(pa) != len(pb):
+        return -1 if len(pa) < len(pb) else 1
+    return 0
+
+
+def _semver_str(v: tuple) -> str:
+    base = f"{v[0]}.{v[1]}.{v[2]}"
+    return base + (f"-{'.'.join(v[3])}" if v[3] else "")
+
+
+def _caret_bound(vstr: str) -> tuple:
+    """^ 的上界(不含): ^1.2.3→2.0.0; ^0.2.3→0.3.0; ^0.0.3→0.0.4; ^1→2.0.0"""
+    s = vstr.strip().lstrip('v').split('-')[0]
+    parts = [p for p in s.split('.') if p != '']
+    nums = [int(p) for p in parts] + [0, 0, 0]
+    major, minor, patch = nums[0], nums[1], nums[2]
+    if major > 0:
+        return (major + 1, 0, 0, None)
+    if len(parts) >= 2:
+        if minor > 0:
+            return (0, minor + 1,0, None)
+        return (0, 0, patch + 1, None)
+    return (1, 0, 0, None)
+
+
+def _tilde_bound(vstr: str) -> tuple:
+    """~ 的上界(不含): ~1.2.3→1.3.0; ~1.2→1.3.0; ~1→2.0.0"""
+    s = vstr.strip().lstrip('v').split('-')[0]
+    parts = [p for p in s.split('.') if p != '']
+    nums = [int(p) for p in parts] + [0, 0, 0]
+    if len(parts) >= 2:
+        return (nums[0], nums[1] + 1, 0, None)
+    return (nums[0] + 1, 0, 0, None)
+
+
+def _parse_constraint(cstr: str) -> list:
+    """约束串 → [(op, bound), ...] AND 语义
+
+    '*'/'' 任意; '^1.2' 兼容; '~1.2' 补丁级; '>=1.0, <2.0' 多段;
+    '=1.2.3' 或裸 '1.2.3' 精确匹配。
+    """
+    cstr = (cstr or '').strip()
+    if cstr in ('', '*', 'any'):
+        return []
+    clauses = []
+    for part in cstr.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith('^'):
+            clauses.append(('>=', _parse_semver(part[1:])))
+            clauses.append(('<', _caret_bound(part[1:])))
+        elif part.startswith('~'):
+            clauses.append(('>=', _parse_semver(part[1:])))
+            clauses.append(('<', _tilde_bound(part[1:])))
+        elif part.startswith('>='):
+            clauses.append(('>=', _parse_semver(part[2:])))
+        elif part.startswith('<='):
+            clauses.append(('<=', _parse_semver(part[2:])))
+        elif part.startswith('=='):
+            clauses.append(('=', _parse_semver(part[2:])))
+        elif part.startswith('>'):
+            clauses.append(('>', _parse_semver(part[1:])))
+        elif part.startswith('<'):
+            clauses.append(('<', _parse_semver(part[1:])))
+        elif part.startswith('='):
+            clauses.append(('=', _parse_semver(part[1:])))
+        else:
+            clauses.append(('=', _parse_semver(part)))
+    return clauses
+
+
+def _constraint_allows(clauses: list, version: tuple) -> bool:
+    for op, bound in clauses:
+        c = _cmp_semver(version, bound)
+        if op == '>=' and c < 0:
+            return False
+        if op == '>' and c <= 0:
+            return False
+        if op == '<=' and c > 0:
+            return False
+        if op == '<' and c >= 0:
+            return False
+        if op == '=' and c != 0:
+            return False
+    return True
+
+
+def _pkg_manifest_at(pkg_dir: str) -> Optional[dict]:
+    """读取依赖包目录下的 intent.toml; 无则 None(裸模块目录)"""
+    path = os.path.join(pkg_dir, 'intent.toml')
+    if not os.path.isfile(path):
+        return None
+    return load_project_manifest(path)
+
+
+def _registry_candidates(name: str, registry_dir: str) -> list:
+    """本地注册表中同名包的全部候选 → [(version_tuple, snapshot_dir)] 按版本降序"""
+    idx_path = os.path.join(registry_dir, 'registry.json')
+    if not os.path.isfile(idx_path):
+        return []
+    try:
+        with open(idx_path, 'r', encoding='utf-8') as f:
+            index = json.load(f)
+    except (OSError, ValueError):
+        return []
+    entry = index.get(name)
+    if not entry:
+        return []
+    import functools
+    cands = []
+    for ver, meta in (entry.get('versions') or {}).items():
+        try:
+            vt = _parse_semver(ver)
+        except ValueError:
+            continue
+        cands.append((vt, os.path.join(registry_dir, meta.get('path', ''))))
+    cands.sort(key=functools.cmp_to_key(lambda a, b: _cmp_semver(a[0], b[0])),
+               reverse=True)
+    return cands
+
+
+def _is_path_like(source: str, parent_dir: str) -> bool:
+    """依赖源是路径还是注册表包名: 含分隔符/相对点/目录存在 → 路径"""
+    return ('/' in source or os.sep in source or source.startswith('.')
+            or os.path.isdir(os.path.join(parent_dir, source)))
+
+
+def resolve_dependencies(project_dir: str, root_manifest: dict,
+                         registry_dir: Optional[str] = None) -> dict:
+    """BFS 解析依赖图 → lock 结构 {name: {version, source, deps, required_by}}
+
+    - 约束累积: 同一包被多处要求时合并全部约束(钻石依赖)
+    - 候选枚举: path/git 依赖单候选; 注册表依赖多版本候选
+    - 择高回退: 满足全部约束的候选取最高版本(最新不满足自动退到次高)
+    - 冲突: 无公共兼容版本, 或同目录版本漂移 → DependencyConflict
+    """
+    if registry_dir is None:
+        registry_dir = os.path.join(os.path.abspath(project_dir), 'registry')
+    constraints = {}   # name → [(constraint_str, required_by)]
+    candidates = {}    # name → {source_key: (version_tuple|None, dep_dir|None, deps)}
+    order = []         # 首次出现序(报告稳定)
+    queue = deque([(n, s, 'root(项目清单)', os.path.abspath(project_dir))
+                   for n, s in root_manifest['deps'].items()])
+
+    def register(name, spec, parent_dir):
+        """登记一个候选; 返回本次新增的候选 key(其子树待遍历)"""
+        source = (spec.get('source') or '').strip()
+        if not source:
+            raise DependencyConflict(f"依赖 '{name}' 没有源地址")
+        new_keys = []
+        if source.startswith(('http://', 'https://', 'git@')):
+            key = f"git:{source}"
+            if key not in candidates[name]:
+                # git 依赖未克隆读不到版本 — 占位候选, install 后校验
+                candidates[name][key] = (None, None, {})
+                new_keys.append(key)
+        elif not _is_path_like(source, parent_dir):
+            for vt, snap in _registry_candidates(name, registry_dir):
+                key = f"registry:{name}@{_semver_str(vt)}"
+                if key in candidates[name]:
+                    continue
+                pkg = _pkg_manifest_at(snap)
+                candidates[name][key] = (vt, snap, pkg['deps'] if pkg else {})
+                new_keys.append(key)
+            if not candidates[name]:
+                raise DependencyConflict(
+                    f"注册表中没有包 '{name}'(registry_dir={registry_dir})")
+        else:
+            dep_dir = source if os.path.isabs(source) \
+                else os.path.abspath(os.path.join(parent_dir, source))
+            if not os.path.isdir(dep_dir):
+                raise DependencyConflict(f"依赖目录不存在: {dep_dir}")
+            pkg = _pkg_manifest_at(dep_dir)
+            if pkg and (pkg.get('version') or '').strip():
+                try:
+                    vt = _parse_semver(pkg['version'])
+                except ValueError as e:
+                    raise DependencyConflict(f"依赖 '{name}' 版本非法: {e}")
+                deps = pkg['deps']
+            else:
+                vt, deps = None, {}
+            key = f"path:{dep_dir}"
+            prev = candidates[name].get(key)
+            if prev is None:
+                candidates[name][key] = (vt, dep_dir, deps)
+                new_keys.append(key)
+            elif vt is not None and prev[0] is not None \
+                    and _cmp_semver(vt, prev[0]) != 0:
+                raise DependencyConflict(
+                    f"包 '{name}' 同目录版本漂移: {_semver_str(prev[0])} → "
+                    f"{_semver_str(vt)}(以先见者为准, 请人工裁决)")
+        return new_keys
+
+    while queue:
+        name, spec, required_by, parent_dir = queue.popleft()
+        ver_c = (spec.get('version') or '').strip() or '*'
+        if name not in constraints:
+            order.append(name)
+            candidates[name] = {}
+        constraints.setdefault(name, []).append((ver_c, required_by))
+        for key in register(name, spec, parent_dir):
+            _vt, dep_dir, deps = candidates[name][key]
+            if dep_dir is None:
+                continue
+            for dn, ds in deps.items():
+                queue.append((dn, ds, name, dep_dir))
+
+    # ── 仲裁: 每个包在满足全部约束的候选中取最高版本 ──
+    resolved = {}
+    for name in order:
+        cons = constraints[name]
+        best = None
+        for key, (vt, dep_dir, deps) in candidates[name].items():
+            if vt is None:
+                continue
+            if not all(_constraint_allows(_parse_constraint(c), vt)
+                       for c, _by in cons):
+                continue
+            if best is None or _cmp_semver(vt, best[0]) > 0:
+                best = (vt, key, dep_dir, deps)
+        if best is None:
+            versioned = [(k, v) for k, v in candidates[name].items()
+                         if v[0] is not None]
+            if not versioned:
+                # 只有 git 候选: 版本留空, install 后校验
+                key, (_vt, dep_dir, deps) = next(iter(candidates[name].items()))
+                resolved[name] = {'version': None, 'source': key[4:],
+                                  'deps': {}, 'required_by': [b for _c, b in cons]}
+                continue
+            detail = " ∧ ".join(f"{c}(by {b})" for c, b in cons)
+            avail = ", ".join(_semver_str(v[0]) for _k, v in versioned)
+            raise DependencyConflict(
+                f"包 '{name}' 无公共兼容版本: 约束 [{detail}] vs 可用 [{avail}]")
+        vt, key, dep_dir, deps = best
+        resolved[name] = {
+            'version': _semver_str(vt),
+            'source': dep_dir if key.startswith('path:') else key.split(':', 1)[1],
+            'deps': {dn: dict(ds) for dn, ds in deps.items()},
+            'required_by': [b for _c, b in cons],
+            '_constraints': [c for c, _by in cons],
+        }
+    return resolved
+
+
+def write_lockfile(project_dir: str, resolved: dict, root_manifest: dict) -> str:
+    """写 intent.lock(JSON): 锁定版本/来源/直接依赖/要求方"""
+    lock = {
+        'version': 1,
+        'project': root_manifest.get('name') or '',
+        'packages': {
+            name: {
+                'version': info['version'],
+                'source': info['source'],
+                'deps': {dn: (ds.get('version') or '*')
+                         for dn, ds in info['deps'].items()},
+                'required_by': info['required_by'],
+            }
+            for name, info in resolved.items()
+        },
+    }
+    path = os.path.join(project_dir, 'intent.lock')
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(lock, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+    return path
+
+
+def render_resolution_plan(root_manifest: dict, resolved: dict,
+                           project_dir: str) -> str:
+    """依赖解析计划(判定命令要求输出含「依赖解析」)"""
+    lines = [f"🔍 依赖解析: {root_manifest.get('name') or '项目'} "
+             f"v{root_manifest.get('version', '0.0.0')} ({project_dir})"]
+    for name, info in resolved.items():
+        ver = info['version'] or '未锁定(git)'
+        src = info['source'] or '?'
+        if not src.startswith(('http://', 'https://', 'git@')):
+            try:
+                src = os.path.relpath(src, project_dir)
+            except ValueError:
+                pass
+        # 约束合并展示: 该包被全部要求方施加的约束(去重保序)
+        seen, merged = set(), []
+        for cstr in info.get('_constraints', []):
+            if cstr not in seen:
+                seen.add(cstr)
+                merged.append(cstr)
+        cons_txt = " ∧ ".join(merged) if merged else "(无约束)"
+        lines.append(f"  {name} {ver} ← {src}   约束: {cons_txt}")
+    lines.append(f"  ✅ 解析完成: {len(resolved)} 个包, 0 冲突")
+    return "\n".join(lines)
+
+
+def run_install(source: Optional[str] = None, manifest_path: str = "intent.toml",
+                dry_run: bool = False, project_dir: Optional[str] = None) -> int:
+    """--install: 安装依赖(PK1 起带版本解析)
 
     带 URL: 安装单个; 不带: 按 intent.toml 的 [deps] 批量安装。
+    --dry-run: 只跑依赖解析(约束合并/冲突检测/计划), 不安装不写锁。
+    project_dir: 批量模式项目目录(判定命令 --install --dry-run <dir> 传入)。
     """
     if source:
+        # 本地目录且带 intent.toml → 按项目批量解析(而非当成单个依赖源)
+        if os.path.isdir(source) and os.path.isfile(os.path.join(source, 'intent.toml')):
+            return _run_batch_install(source, dry_run=dry_run)
         ok = install_dependency(_dep_dir_name('dep', source), source)
         print("✅ 安装完成" if ok else "❌ 安装失败")
         return 0 if ok else 1
-    manifest = load_project_manifest(manifest_path)
+    return _run_batch_install(project_dir=project_dir,
+                              manifest_path=manifest_path, dry_run=dry_run)
+
+
+def _run_batch_install(project_dir: Optional[str] = None,
+                       manifest_path: str = "intent.toml",
+                       dry_run: bool = False) -> int:
+    """批量安装: 按项目 intent.toml 的 [deps] 解析(PK1)并安装"""
+    base_dir = os.path.abspath(project_dir) if project_dir else os.getcwd()
+    mpath = os.path.join(base_dir, os.path.basename(manifest_path))
+    manifest = load_project_manifest(mpath)
     if manifest is None:
-        print(f"❌ 找不到 {manifest_path}(可用 --install <git-url> 安装单个依赖)")
+        print(f"❌ 找不到 {mpath}(可用 --install <git-url> 安装单个依赖)")
         return 2
     if not manifest['deps']:
         print(f"✅ {manifest['name'] or '项目'} 无依赖")
         return 0
-    print(f"安装 {manifest['name']} v{manifest['version']} 的 {len(manifest['deps'])} 个依赖:")
-    failed = []
-    for dep_name, src in manifest['deps'].items():
-        if not src:
-            print(f"  ⚠️  {dep_name}: 无源地址,跳过")
-            failed.append(dep_name)
-            continue
-        if not install_dependency(dep_name, src):
-            failed.append(dep_name)
-    if failed:
-        print(f"❌ {len(failed)} 个依赖失败: {', '.join(failed)}")
+    try:
+        resolved = resolve_dependencies(base_dir, manifest)
+    except DependencyConflict as e:
+        print(f"❌ 依赖冲突: {e}")
         return 1
-    print("✅ 全部依赖安装完成")
+    print(render_resolution_plan(manifest, resolved, base_dir))
+    if dry_run:
+        print("   (--dry-run: 未写入 intent.lock, 未执行安装)")
+        return 0
+    lock_path = write_lockfile(base_dir, resolved, manifest)
+    try:
+        lock_rel = os.path.relpath(lock_path, os.getcwd())
+    except ValueError:
+        lock_rel = lock_path
+    print(f"   🔒 已写入 {lock_rel}")
+    lib_dir = os.path.join(base_dir, 'lib')
+    failed = []
+    for name, info in resolved.items():
+        if not info['source'] or info['source'].startswith(
+                ('http://', 'https://', 'git@')):
+            continue
+        if not install_dependency(name, info['source'], lib_dir=lib_dir):
+            failed.append(name)
+    if failed:
+        print(f"❌ {len(failed)} 个依赖安装失败: {', '.join(failed)}")
+        return 1
+    print("✅ 全部依赖安装完成(版本已锁定 intent.lock)")
     return 0
 
 # ==================== P2.2 Formatter ====================
@@ -7919,6 +10024,319 @@ def run_doc(path: str) -> int:
         return 2
     return 0
 
+# ==================== L1 渐进类型: 静态类型检查器 ====================
+# mypy-lite 切片: 标注处检查 + 推断处放过。
+# 哲学同构: 契约(运行时可验证)是主防线, 类型(静态提示)是副防线 —
+# 已知的检查, 未知的放过; 显式的信任, 不猜。
+
+# 内置函数返回类型白名单(标注处检查的最小知识集; None = 放过不猜)
+_BUILTIN_RETURN_TYPES = {
+    'len': 'Int', 'int': 'Int', 'ord': 'Int', 'hex': 'Int', 'bin': 'Int',
+    'float': 'Float',
+    'str': 'String', 'type_of': 'String', 'upper': 'String', 'lower': 'String',
+    'strip': 'String', 'join': 'String', 'replace': 'String', 'format': 'String',
+    'keys': 'List', 'values': 'List', 'sorted': 'List', 'reversed': 'List',
+    'range': 'List', 'enumerate': 'List', 'zip': 'List', 'list': 'List',
+    'set': 'Set',
+    'dict': 'Dict', 'any': 'Bool', 'all': 'Bool',
+}
+
+# 数值互通(spec §2.1 刻意宽松): Int 标注接受 Float 值, 反之亦然
+_NUMERIC_TYPES = {'Int', 'Float'}
+
+
+def _base_type(type_str: str) -> str:
+    """取类型基类名: 'List[Int]' -> 'List', 'A | B' -> 'A | B'(Union 不拆)"""
+    if type_str is None:
+        return 'Any'
+    for i, ch in enumerate(type_str):
+        if ch in '<[':
+            return type_str[:i]
+    return type_str
+
+
+def _split_union(type_str: str) -> List[str]:
+    """拆 Union: 'A | B' -> ['A', 'B']; 非 Union 返回 [type_str]"""
+    if '|' in type_str:
+        return [p.strip() for p in type_str.split('|')]
+    return [type_str]
+
+
+class TypeChecker:
+    """L1 渐进类型静态检查器(mypy-lite)。
+
+    策略(反膨胀的最小切片):
+      - 只查「标注处」: 变量声明/参数传递/return 的标注 vs 可推断出的实际类型;
+      - 「推断处放过」: 推断不出类型的一律不报(显式信任, 不猜);
+      - 容器只查基类: List[Int] 的元素类型不查(留待完整版);
+      - 数值互通: Int/Float 互相接受(spec §2.1);
+      - 泛型参数视为 Any: identity<T>(x: T) 的调用不误报;
+      - 类型别名透明解析: type Meters = Float; let m: Meters = 1.5; 通过。
+    """
+
+    def __init__(self, ast: 'Program', code_name: str = "<input>"):
+        self.ast = ast
+        self.code_name = code_name
+        self.errors: List[str] = []
+        self.aliases: Dict[str, str] = {}
+        self.checked_count = 0    # 标注处检查次数
+        self.inferred_count = 0   # 推断放过次数(无标注/未知)
+        # 预收集类型别名
+        for stmt in ast.statements:
+            if isinstance(stmt, TypeAliasStmt):
+                self.aliases[stmt.name] = stmt.aliased_type
+
+    # ---------- 类型解析与兼容 ----------
+
+    def _resolve_alias(self, type_str: str, depth: int = 0) -> str:
+        """别名透明解析(防环, 深度上限 5)"""
+        if depth > 5 or type_str not in self.aliases:
+            return type_str
+        return self._resolve_alias(self.aliases[type_str], depth + 1)
+
+    def _compatible(self, declared: Optional[str], actual: Optional[str],
+                    type_params: Optional[set] = None) -> bool:
+        """实际类型能否赋给声明标注。actual=None(推断不出) → 放过"""
+        if declared is None or declared == 'Any':
+            return True
+        if actual is None:
+            self.inferred_count += 1
+            return True
+        if type_params and (actual in type_params):
+            self.inferred_count += 1
+            return True
+        declared_r = self._resolve_alias(declared)
+        actual_r = self._resolve_alias(actual)
+        # Union 标注: 任一成员兼容即通过(不二法门)
+        for d in _split_union(declared_r):
+            if self._compatible_one(d, actual_r, type_params):
+                return True
+        return False
+
+    def _compatible_one(self, declared: str, actual: str,
+                        type_params: Optional[set]) -> bool:
+        """单类型兼容判定(基类级)"""
+        if declared == 'Any' or actual == 'Any':
+            return True
+        if type_params and declared in type_params:
+            return True
+        # 数值互通(spec §2.1): Int <-> Float 双向宽松
+        if declared in _NUMERIC_TYPES and actual in _NUMERIC_TYPES:
+            return True
+        # 容器/泛型: 只查基类(最小切片不查元素类型)
+        return _base_type(declared) == _base_type(actual)
+
+    # ---------- 表达式类型推断(轻量) ----------
+
+    def _infer(self, expr: Optional['Expression'],
+               env: Dict[str, str], func: Optional['FunctionDef']) -> Optional[str]:
+        """推断表达式类型; None = 未知(推断处放过)"""
+        if expr is None:
+            return None
+        if isinstance(expr, Literal):
+            mapping = {'int': 'Int', 'float': 'Float', 'string': 'String',
+                       'bool': 'Bool', 'none': 'None'}
+            return mapping.get(expr.literal_type)
+        if isinstance(expr, ListExpr):
+            return 'List'
+        if isinstance(expr, (DictExpr, DictCompExpr)):
+            return 'Dict'
+        if isinstance(expr, ListCompExpr):
+            return 'List'
+        if isinstance(expr, Variable):
+            if expr.name in env:
+                return env[expr.name]
+            return None
+        if isinstance(expr, UnaryOp):
+            if expr.op == 'not':
+                return 'Bool'
+            return self._infer(expr.operand, env, func)  # -x 保留数值类型
+        if isinstance(expr, BinaryOp):
+            return self._infer_binary(expr, env, func)
+        if isinstance(expr, CallExpr):
+            return self._infer_call(expr, env, func)
+        # MemberAccess/SendExpr/RecvExpr/LambdaExpr/SubscriptExpr 等: 不猜
+        return None
+
+    def _infer_binary(self, expr: 'BinaryOp',
+                      env: Dict[str, str], func: Optional['FunctionDef']) -> Optional[str]:
+        lt = self._infer(expr.left, env, func)
+        rt = self._infer(expr.right, env, func)
+        if expr.op in ('==', '!=', '<', '>', '<=', '>=', 'and', 'or'):
+            return 'Bool'
+        if expr.op in ('+', '-', '*', '/', '%'):
+            if lt is None or rt is None:
+                return None
+            if lt == rt and lt in ('Int', 'Float', 'String', 'List'):
+                return lt
+            if lt in _NUMERIC_TYPES and rt in _NUMERIC_TYPES:
+                return 'Float'  # 混合运算提升为 Float
+            return None
+        return None
+
+    def _call_target_name(self, expr: 'CallExpr') -> Optional[str]:
+        """取调用目标名: 裸函数名(str 或 Variable 节点)才返回; 成员访问/表达式返回 None"""
+        f = expr.func
+        if isinstance(f, str):
+            return f
+        if isinstance(f, Variable):
+            return f.name
+        return None
+
+    def _infer_call(self, expr: 'CallExpr',
+                    env: Dict[str, str], func: Optional['FunctionDef']) -> Optional[str]:
+        name = self._call_target_name(expr)
+        if name is None:
+            return None  # 函数位是表达式(如高阶函数传参调用), 不猜
+        # 内置白名单
+        if name in _BUILTIN_RETURN_TYPES:
+            return _BUILTIN_RETURN_TYPES[name]
+        # 本模块函数: 用其返回标注(无标注 = 放过)
+        if '.' not in name and name in self.ast.functions:
+            target = self.ast.functions[name]
+            return target.return_type if target.return_type else None
+        return None
+
+    # ---------- 表达式检查(实参 vs 形参标注) ----------
+
+    def _check_expr(self, expr: Optional['Expression'],
+                    env: Dict[str, str], func: Optional['FunctionDef']) -> None:
+        if expr is None:
+            return
+        if isinstance(expr, CallExpr):
+            self._check_call_args(expr, env, func)
+        # 通用递归: dataclass 字段里的子表达式/子语句自动覆盖
+        for value in vars(expr).values():
+            self._recurse_value(value, env, func)
+
+    def _check_call_args(self, expr: 'CallExpr',
+                         env: Dict[str, str], func: Optional['FunctionDef']) -> None:
+        name = self._call_target_name(expr)
+        if name is None or '.' in name or name not in self.ast.functions:
+            return  # 只查本模块函数调用(裸名)
+        target = self.ast.functions[name]
+        tp_set = set(target.type_params)
+        for i, arg in enumerate(expr.args):
+            if i >= len(target.params):
+                break  # 参数个数错误归语法/运行层, 不属类型检查
+            param_name, param_type, _default = target.params[i]
+            if param_type == 'Any' or param_type is None:
+                self.inferred_count += 1
+                continue
+            actual = self._infer(arg, env, func)
+            if actual is None:
+                self.inferred_count += 1
+                continue
+            self.checked_count += 1
+            if not self._compatible(param_type, actual, tp_set):
+                self.errors.append(
+                    f"{self.code_name}: 调用 {name}() 第 {i + 1} 个参数"
+                    f"({param_name}) 标注为 {param_type}, 实际推断为 {actual}")
+
+    # ---------- 语句检查 ----------
+
+    def _check_stmt(self, stmt, env: Dict[str, str],
+                    func: Optional['FunctionDef']) -> None:
+        if isinstance(stmt, VariableDecl):
+            if stmt.var_type is not None and stmt.value is not None:
+                actual = self._infer(stmt.value, env, func)
+                self.checked_count += 1
+                if not self._compatible(stmt.var_type, actual):
+                    shown = actual if actual is not None else "未知"
+                    self.errors.append(
+                        f"{self.code_name}:{stmt.line}: 变量 {stmt.name} 声明标注"
+                        f"{stmt.var_type}, 实际推断为 {shown}")
+                env[stmt.name] = stmt.var_type  # 标注入环境, 供后续引用
+            else:
+                self.inferred_count += 1
+                if stmt.value is not None:
+                    inferred = self._infer(stmt.value, env, func)
+                    if inferred is not None and stmt.name not in env:
+                        env[stmt.name] = inferred  # 无标注声明也进环境(推断值)
+            self._check_expr(stmt.value, env, func)
+            return
+        if isinstance(stmt, ReturnStmt):
+            if func is not None and func.return_type is not None:
+                actual = self._infer(stmt.value, env, func)
+                self.checked_count += 1
+                if not self._compatible(func.return_type, actual, set(func.type_params)):
+                    shown = actual if actual is not None else "未知"
+                    self.errors.append(
+                        f"{self.code_name}:{stmt.line}: 函数 {func.name} 返回标注"
+                        f"{func.return_type}, 实际推断为 {shown}")
+            elif stmt.value is not None:
+                self.inferred_count += 1
+            self._check_expr(stmt.value, env, func)
+            return
+        # 通用递归: 语句体内的子语句/子表达式自动覆盖
+        # (If/While/For/Try/With/Defer/Scope 等, 新语句类型零成本受益)
+        for value in vars(stmt).values():
+            self._recurse_value(value, env, func)
+
+    # ---------- 通用递归 ----------
+
+    def _recurse_value(self, value, env: Dict[str, str],
+                       func: Optional['FunctionDef']) -> None:
+        if isinstance(value, ASTNode):
+            if isinstance(value, Expression):
+                self._check_expr(value, env, func)
+            else:
+                # 语句: 分支体复制环境(分支内声明不污染外层)
+                self._check_stmt(value, dict(env), func)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                self._recurse_value(item, env, func)
+
+    # ---------- 主入口 ----------
+
+    def check(self) -> List[str]:
+        """执行检查, 返回错误列表(空 = 通过)"""
+        # 全局语句
+        for stmt in self.ast.statements:
+            self._check_stmt(stmt, {}, None)
+        # 函数体(参数标注入环境)
+        for func in self.ast.functions.values():
+            env: Dict[str, str] = {}
+            tp_set = set(func.type_params)
+            for name, ptype, _default in func.params:
+                if ptype != 'Any' and ptype is not None and name not in tp_set:
+                    env[name] = ptype
+            for stmt in func.body:
+                self._check_stmt(stmt, dict(env), func)
+        return self.errors
+
+
+def type_check_code(code: str, code_name: str) -> None:
+    """--types: L1 渐进类型静态检查(mypy-lite)。
+
+    标注处检查 + 推断处放过。通过 → 退出0; 有类型错误 → 逐条报告退出1;
+    语法错误 → 退出2(类型检查以语法干净为前提)。
+    """
+    try:
+        tokens = Lexer(code).tokenize()
+        parser = Parser(tokens, code)
+        ast = parser.parse()
+    except SyntaxError as e:
+        print(f"❌ 类型检查中止: {code_name} 存在语法错误")
+        print(f"   {e}")
+        sys.exit(2)
+    if parser.errors:
+        print(f"❌ 类型检查中止: {code_name} ({len(parser.errors)} 个语法错误)")
+        for err in parser.errors:
+            print(f"   • {err}")
+        sys.exit(2)
+    checker = TypeChecker(ast, code_name)
+    errors = checker.check()
+    if errors:
+        print(f"❌ 类型错误: {code_name} ({len(errors)} 处)")
+        for err in errors:
+            print(f"   • {err}")
+        sys.exit(1)
+    print(f"✅ 类型检查通过: {code_name} "
+          f"(标注处检查 {checker.checked_count} 处, 推断处放过 {checker.inferred_count} 处)")
+    sys.exit(0)
+
+
 def check_code(code: str, code_name: str) -> None:
     """--check: 只解析不执行。
 
@@ -7998,6 +10416,84 @@ def collect_test_files(path: str) -> List[str]:
                 files.append(os.path.join(root, name))
     return sorted(files)
 
+def run_postmortem(code: str, code_name: str):
+    """EX2: 事后调试 — 崩溃即存档, 停机后进场检视
+
+    执行程序; 一旦抛出错误:
+      1. 渲染完整诊断(D3: 消息 + 源码行 + Intent 调用链)
+      2. 帧快照链写盘 .intent_postmortem.json(跨进程可捡回)
+      3. 打印帧检视(每帧: 函数/位置/局部变量)
+      4. 进入 (intent-pm) 命令循环; stdin EOF(非交互)自动收尾
+    正常结束则报告无事可检。退出码 0 — postmortem 的职责是
+    接住崩溃, 不是复制失败(崩溃的退出码在存档里, 不在进程上)。
+    """
+    interpreter = Interpreter()
+    interpreter._set_source(code)
+    interpreter.current_filename = code_name
+    file_dir = os.path.dirname(os.path.abspath(code_name)) if code_name != "<-c>" else "."
+    interpreter.add_module_search_path(file_dir)
+    pm = Postmortem(interpreter)
+    try:
+        lexer = Lexer(code, code_name)
+        tokens = lexer.tokenize()
+        parser = Parser(tokens, code)
+        program = parser.parse()
+        if parser.errors:
+            print(f"❌ 语法错误, 无法进入事后调试: {parser.errors[0]}")
+            sys.exit(2)
+        interpreter.execute_program(program)
+        print("✅ 程序正常结束, 无事可检(没有崩溃)")
+        sys.exit(0)
+    except DebuggerQuit:
+        print("[事后调试] 会话结束 (quit)")
+    except Exception as e:
+        err = wrap_intent_error(e, interpreter)
+        print()
+        print(render_intent_error(err, interpreter))
+        frames = getattr(e, '_intent_frames', None) or []
+        pm.save_snapshot(err, frames)
+        # 默认停在出错帧(最内层) — 事后调试第一眼要看见的是崩溃现场
+        pm.current = max(0, len(frames) - 1)
+        pm.show_frames(frames)
+        try:
+            pm.command_loop(frames)
+        except DebuggerQuit:
+            print("[事后调试] 会话结束 (quit)")
+    sys.exit(0)
+
+
+def run_debug(code: str, code_name: str):
+    """C7: 调试模式执行 — 断点/单步/变量检视/调用栈
+
+    非交互(stdin EOF/管道)时命令循环自动放行, 程序跑完 exit 0 —
+    与普通执行的唯一差别是 banner 与断点位置信息。
+    quit 命令抛 DebuggerQuit 至此收尾, 同样 exit 0。
+    """
+    interpreter = Interpreter()
+    interpreter._set_source(code)
+    interpreter.current_filename = code_name
+    file_dir = os.path.dirname(os.path.abspath(code_name)) if code_name != "<-c>" else "."
+    interpreter.add_module_search_path(file_dir)
+    dbg = Debugger(interpreter)
+    interpreter.debugger = dbg
+    dbg.show_banner()
+    try:
+        lexer = Lexer(code, code_name)
+        tokens = lexer.tokenize()
+        parser = Parser(tokens, code)
+        program = parser.parse()
+        if parser.errors:
+            print(f"❌ 语法错误, 无法调试: {parser.errors[0]}")
+            sys.exit(2)
+        # 启动即暂停在起点(pdb 风格) — 否则断点未设, 程序一泻千里
+        print(f"🛑 起点 {code_name}  (输入 break N 设断点, help 查看命令)")
+        dbg.command_loop()
+        interpreter.execute_program(program)
+    except DebuggerQuit:
+        print("[调试器] 会话结束 (quit)")
+    sys.exit(0)
+
+
 def run_tests(path: str):
     """P0.2 测试框架: 发现并执行 test_* 函数
 
@@ -8010,7 +10506,7 @@ def run_tests(path: str):
         print(f"❌ 在 {path} 下没有找到测试文件(*.intent, _ 开头的文件被跳过)")
         sys.exit(2)
 
-    total = passed = 0
+    total = passed = skipped = 0
     failures = []  # (rel_path, test_name, IntentError, interpreter)
     t0 = time.time()
 
@@ -8040,13 +10536,38 @@ def run_tests(path: str):
             continue
         # 执行所有 test_* 函数; 无测试函数的文件是库文件, 静默跳过
         test_names = sorted(n for n in interp.functions if n.startswith('test_'))
+        # TQ1: fixture 约定 — setup 每个用例前跑, teardown 每个用例后跑
+        # (用例失败/skip 也要清理; teardown 自身失败即用例失败)
+        setup_fn = interp.functions.get('setup')
+        teardown_fn = interp.functions.get('teardown')
         for tname in test_names:
             total += 1
+            teardown_done = False
             try:
+                if setup_fn is not None:
+                    interp.execute_function(setup_fn, [])
                 interp.execute_function(interp.functions[tname], [])
+                if teardown_fn is not None:
+                    interp.execute_function(teardown_fn, [])
+                    teardown_done = True
                 passed += 1
                 print(f"  ✅ {rel} :: {tname}")
+            except SkipTest as sk:
+                # TQ1: skip(reason) — 既非通过也非失败, 单独计数
+                skipped += 1
+                if teardown_fn is not None and not teardown_done:
+                    try:
+                        interp.execute_function(teardown_fn, [])
+                    except Exception:
+                        pass
+                reason = f" ({sk})" if str(sk) else ""
+                print(f"  ⏭️  {rel} :: {tname}{reason}")
             except Exception as e:
+                if teardown_fn is not None and not teardown_done:
+                    try:
+                        interp.execute_function(teardown_fn, [])
+                    except Exception:
+                        pass
                 err = wrap_intent_error(e, interp)
                 failures.append((rel, tname, err, interp))
                 print(f"  ❌ {rel} :: {tname}")
@@ -8054,7 +10575,10 @@ def run_tests(path: str):
     elapsed = time.time() - t0
     print()
     print("=" * 56)
-    print(f"  测试结果: {passed}/{total} 通过, {total - passed} 失败 ({elapsed:.2f}s)")
+    summary = f"  测试结果: {passed}/{total} 通过, {total - passed - skipped} 失败"
+    if skipped:
+        summary += f", {skipped} 跳过"
+    print(summary + f" ({elapsed:.2f}s)")
     print("=" * 56)
     # 失败详情统一渲染 — 复用 P0.1 的错误诊断
     for rel, tname, err, interp in failures:

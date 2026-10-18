@@ -66,6 +66,14 @@ python3 src/mini_intent.py examples/hello.intent
 python3 contract_skill/intent_contract.py contract_skill/contract_demo.py -v
 ```
 
+## 路线图与社区
+
+项目已重新激活，进入 **LangForge DAG 驱动的持续开发**：
+
+- **四期路线图**：[`docs/ROADMAP_LONGTERM.md`](docs/ROADMAP_LONGTERM.md) — v3.0 生产基座（渐进类型/依赖解析/结构化并发/内存管理/事后调试/测试深化）→ v3.5 元编程与互操作 → v4.0-beta 生态冷启动 → v4.0 LTS 生产就绪
+- **行为规范**：[`docs/spec.md`](docs/spec.md) 是唯一事实来源；贡献前读 [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **问题反馈**：缺陷/特性提议走 Issue（模板已配好）；使用讨论待 GitHub Discussions 开启
+
 ## 许可
 
 MIT © J-intent

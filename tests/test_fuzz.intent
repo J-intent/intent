@@ -1,0 +1,160 @@
+// 边界回归测试（D4）— fuzz 边界
+// 判定哲学：边界输入必须得到「可捕获的 Intent 错误」或「确定的值」——
+//           解释器永不崩溃（无未捕获 Python 异常、无段错误）。
+// 行为快照来源：2026-10-18 边界探测（neg-index / div0 / None / sqrt / key / deep / bigint）。
+// 坑位记录：// 是行注释——整除运算符 // 在源码中不可达（已know 语言限制，本轮不测）。
+
+import std.random;
+
+def test_index_bounds() {
+    let data = [10, 20, 30];
+    assert data[0] == 10, "首元素";
+    assert data[-1] == 30, "负下标取尾(Python 语义)";
+    assert data[-3] == 10, "负下标取首";
+    let mut caught = "";
+    try { let x = data[3]; } catch e { caught = e.type; };
+    assert caught == "IndexError", "越界抛 IndexError";
+    let mut caught2 = "";
+    try { let x = data[-4]; } catch e { caught2 = e.type; };
+    assert caught2 == "IndexError", "负越界同样 IndexError";
+};
+
+def test_division_edges() {
+    let mut c1 = "";
+    try { let a = 5 / 0; } catch e { c1 = e.type; };
+    assert c1 == "ZeroDivisionError", "整数除零";
+    let mut c2 = "";
+    try { let b = 5 % 0; } catch e { c2 = e.type; };
+    assert c2 == "ZeroDivisionError", "模零";
+    let mut c3 = "";
+    try { let c = 1.0 / 0.0; } catch e { c3 = e.type; };
+    assert c3 == "ZeroDivisionError", "浮点除零";
+    // 真除法语义(Python 3): 7/2 = 3.5; 取余是 floor 语义: -7 % 2 = 1
+    assert 7 / 2 == 3.5, "真除法";
+    assert -7 % 2 == 1, "负数取余 floor 语义";
+    assert 0 / 5 == 0, "零被除";
+};
+
+def test_none_edges() {
+    let mut c1 = "";
+    try { let a = None + 1; } catch e { c1 = e.type; };
+    assert c1 == "TypeError", "None 参与运算 TypeError";
+    let mut c2 = "";
+    try { let b = len(None); } catch e { c2 = e.type; };
+    assert c2 == "AttributeError", "len(None) AttributeError 可捕获";
+    assert None == None, "None 自等";
+    assert (None == 1) == false, "None 与数不等";
+};
+
+def test_type_confusion() {
+    let mut c1 = "";
+    try { let a = int("abc"); } catch e { c1 = e.type; };
+    assert c1 == "ValueError", "int(非数字串) ValueError";
+    assert int("42") == 42, "int(数字串)";
+    let mut c2 = "";
+    try { let b = true + 1; } catch e { c2 = e.type; };
+    assert c2 == "TypeError", "Bool 不参与算术";
+};
+
+def test_string_edges() {
+    assert len("") == 0, "空串长度";
+    assert "" + "x" == "x", "空串拼接";
+    assert "ab" * 3 == "ababab", "串重复";
+    let mut c1 = "";
+    try { let ch = "abc"[10]; } catch e { c1 = e.type; };
+    assert c1 == "IndexError", "字符串越界 IndexError";
+    // 超长拼接不崩(O(n^2) 但 5000 规模可接受)
+    let mut s = "";
+    for i in range(0, 5000) {
+        s = s + "x";
+    };
+    assert len(s) == 5000, "五千次拼接后长度正确";
+};
+
+def test_math_edges() {
+    let mut c1 = "";
+    try { let a = sqrt(-1); } catch e { c1 = e.type; };
+    assert c1 == "ValueError", "sqrt(负数) ValueError";
+    let mut c2 = "";
+    try { let b = log(0); } catch e { c2 = e.type; };
+    assert c2 == "ValueError", "log(0) ValueError";
+    assert sqrt(0) == 0, "sqrt(0)";
+    // 浮点溢出 → inf → 打印时 int(inf) OverflowError, 必须可捕获
+    let mut c3 = "";
+    try { let inf_str = str(1e308 * 10); } catch e { c3 = e.type; };
+    assert c3 == "OverflowError", "无穷大转字符串 OverflowError 可捕获";
+};
+
+def test_dict_edges() {
+    let d = {"a": 1};
+    assert len({}) == 0, "空字典长度";
+    assert d["a"] == 1, "存在键";
+    let mut c1 = "";
+    try { let v = d["zz"]; } catch e { c1 = e.type; };
+    assert c1 == "RuntimeError", "缺键抛 RuntimeError(KeyError 转译)";
+    d["a"] = 2;
+    assert d["a"] == 2, "覆盖写";
+};
+
+def test_recursion_edge() {
+    def deep(n: Int): Int {
+        if n <= 0 { return 0; };
+        return 1 + deep(n - 1);
+    };
+    assert deep(200) == 200, "中等深度正常返回";
+    // 超深递归: 必须得到可捕获错误而非进程崩溃
+    let mut caught = "";
+    try {
+        let r = deep(100000);
+    } catch e {
+        caught = e.type;
+    };
+    assert caught != "", "深递归错误可捕获";
+};
+
+def test_bigint_edges() {
+    let big = 1000000000000000;
+    assert big * big == 1000000000000000000000000000000, "大整数乘法精确";
+    let mut acc = 1;
+    for i in range(1, 21) {
+        acc = acc * i;
+    };
+    assert acc == 2432902008176640000, "20! 精确(超出 32 位)";
+};
+
+def test_empty_containers() {
+    assert len([]) == 0, "空列表长度";
+    assert len([1] + []) == 1, "空列表拼接单位元";
+    let joined = [1] + [2, 3];
+    assert len(joined) == 3, "非空拼接";
+    assert joined[1] == 2, "拼接后索引";
+};
+
+def test_random_sampling() {
+    // 半随机边界: 不设 seed(Intent 无 seed 内置), 断言范围契约——确定性成立
+    for i in range(0, 100) {
+        let r = random_val();
+        assert r >= 0.0 and r < 1.0, "random_val 落在 [0,1)";
+    };
+    for i in range(0, 100) {
+        let d = dice(6);
+        assert d >= 1 and d <= 6, "dice(6) 落在 [1,6]";
+    };
+    for i in range(0, 100) {
+        let n = rand_int(5, 5);
+        assert n == 5, "rand_int 退化区间返回边界值";
+    };
+    let u = uniform(1.0, 2.0);
+    assert u >= 1.0 and u <= 2.0, "uniform 契约区间";
+};
+
+def test_contract_edge() {
+    // requires 违约 → 定向可捕获, 不是崩溃
+    let mut caught = "";
+    try {
+        let c = choice([]);
+    } catch e: ContractError {
+        caught = e.type;
+    };
+    assert caught == "ContractError", "choice(空表) 契约违约可捕获";
+};

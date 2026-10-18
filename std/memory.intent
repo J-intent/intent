@@ -1,0 +1,44 @@
+// std/memory.intent — 内存观测与循环回收(MM1)
+// 心学为体：知一行代码牵动多少内存，是造物者的自觉
+// 禅道为翼：生者灭矣，cycle 不灭——回收是给循环的慈悲
+// 马哲为用：mem_live/alloc_total/mem_stats/gc_collect/ref_count
+//            内置(mem_*_count/gc_collect_now/ref_count_of)支撑
+//
+// 设计文档: docs/memory_design.md
+// 策略(寄生期 v3.0): 容器创建即登记弱引用; 循环垃圾委托宿主分代 GC。
+// ref_count 是宿主引用计数观测值(含解释器内部引用)，用于诊断不做精确契约。
+
+export mem_live, alloc_total, mem_stats, gc_collect, ref_count;
+
+// mem_live() → Int  当前存活容器对象数
+def mem_live() -> Int
+    ensures result >= 0
+{
+    return mem_live_count();
+}
+
+// alloc_total() → Int  累计创建容器对象数
+def alloc_total() -> Int
+    ensures result >= 0
+{
+    return mem_alloc_total();
+}
+
+// mem_stats() → Dict  统计字典(live/alloc_total/reclaim_total/by_type)
+def mem_stats() {
+    return mem_stats_info();
+}
+
+// gc_collect() → Int  触发循环垃圾回收, 返回本次回收容器数
+def gc_collect() -> Int
+    ensures result >= 0
+{
+    return gc_collect_now();
+}
+
+// ref_count(obj) → Int  对象的宿主引用计数(诊断观测值)
+def ref_count(obj) -> Int
+    ensures result >= 1
+{
+    return ref_count_of(obj);
+}

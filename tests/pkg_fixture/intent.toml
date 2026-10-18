@@ -3,4 +3,5 @@ name = "pkg-fixture"
 version = "0.1.0"
 
 [deps]
-mathkit = "../lib"
+alpha = { path = "lib/alpha", version = "^1.0" }
+beta = { path = "lib/beta", version = "^1.0" }

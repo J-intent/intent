@@ -1,0 +1,11 @@
+// mathkit — 测试用本地依赖包(PK1 fixture, 钻石依赖的汇聚点)
+export double;
+export triple;
+
+def double(x: Int): Int requires true {
+    return x * 2;
+};
+
+def triple(x: Int): Int requires true {
+    return x * 3;
+};

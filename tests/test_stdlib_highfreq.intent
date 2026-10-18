@@ -1,0 +1,257 @@
+// 标准库回归测试(SL1) — 高频标准库十二模块
+// glob/shutil/tempfile/uuid/hashlib/hmac/secrets/decimal/statistics/
+// textwrap/csv/argparse/pathlib。
+// 纪律一：Intent 字符串无转义——引号走 chr(34)，换行走 chr(10)。
+// 纪律二：随机类(uuid/secrets)只断言长度与形态，不断言具体值。
+// 纪律三：浮点断言一律走 epsilon 比较。
+
+import std.glob;
+import std.shutil;
+import std.tempfile;
+import std.uuid;
+import std.hashlib;
+import std.hmac;
+import std.secrets;
+import std.decimal;
+import std.statistics;
+import std.textwrap;
+import std.csv;
+import std.argparse;
+import std.pathlib;
+
+// ══ std/glob ══
+
+def test_glob_matches_project_stdlib() {
+    let hits = std.glob.glob("std/*.intent");
+    assert len(hits) >= 30, "项目自身 std 目录应匹配到 30+ 模块";
+};
+
+def test_glob_no_match_empty() {
+    let hits = std.glob.glob("std/*.nonexistent_ext");
+    assert len(hits) == 0, "无匹配返回空表";
+};
+
+// ══ std/shutil ══
+
+def test_shutil_copy_and_rmtree() {
+    let d = std.tempfile.mkdtemp();
+    let src = std.pathlib.join_path(d, "src.txt");
+    let dst = std.pathlib.join_path(d, "dst.txt");
+    write_file(src, "心学为体");
+    assert std.shutil.copy_file(src, dst), "复制成功";
+    assert file_exists(dst), "副本存在";
+    assert std.shutil.rmtree(d), "目录删除成功";
+    assert !file_exists(d), "删除后不存在";
+};
+
+def test_shutil_move() {
+    let d = std.tempfile.mkdtemp();
+    let src = std.pathlib.join_path(d, "a.txt");
+    let dst = std.pathlib.join_path(d, "b.txt");
+    write_file(src, "禅道为翼");
+    assert std.shutil.move(src, dst), "移动成功";
+    assert !file_exists(src), "源已不在";
+    assert file_exists(dst), "目标已在";
+    std.shutil.rmtree(d);
+};
+
+// ══ std/tempfile ══
+
+def test_tempfile_paths() {
+    let d = std.tempfile.mkdtemp();
+    assert is_dir(d), "mkdtemp 建的是目录";
+    let f = std.tempfile.mkstemp("probe_");
+    assert starts_with(path_basename(f), "probe_"), "mkstemp 带前缀";
+    assert is_dir(std.tempfile.tempdir()), "系统临时目录存在";
+    std.shutil.rmtree(d);
+};
+
+// ══ std/uuid ══
+
+def test_uuid_shapes() {
+    let u = std.uuid.uuid4();
+    assert len(u) == 36, "UUID 36 字符";
+    assert len(split(u, "-")) == 5, "UUID 四连字符五段";
+    let h = std.uuid.uuid4_hex();
+    assert len(h) == 32, "UUID hex 32 字符";
+    assert len(split(h, "-")) == 1, "hex 无连字符";
+};
+
+// ══ std/hashlib ══
+
+def test_hashlib_known_vectors() {
+    assert std.hashlib.md5("hello") == "5d41402abc4b2a76b9719d911017c592", "md5 hello 向量";
+    assert std.hashlib.sha256("hello") == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "sha256 hello 向量";
+    assert std.hashlib.sha256("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "sha256 空串向量";
+    assert len(std.hashlib.sha1("hello")) == 40, "sha1 40 字符";
+    assert len(std.hashlib.sha512("hello")) == 128, "sha512 128 字符";
+};
+
+def test_hashlib_utf8() {
+    assert std.hashlib.sha256("中文") == std.hashlib.sha256("中文"), "同文同摘要";
+    assert len(std.hashlib.md5("中文")) == 32, "中文摘要定长";
+};
+
+// ══ std/hmac ══
+
+def test_hmac_roundtrip() {
+    let key = "secret-key";
+    let msg = "心学为体，禅道为翼";
+    let sig = std.hmac.sha256(key, msg);
+    assert len(sig) == 64, "HMAC-SHA256 64 字符";
+    assert std.hmac.sha256_verify(key, msg, sig), "签名验证通过";
+    assert !std.hmac.sha256_verify(key, msg, "00"), "错签名验证不过";
+    assert !std.hmac.sha256_verify("wrong-key", msg, sig), "错密钥验证不过";
+};
+
+// ══ std/secrets ══
+
+def test_secrets_shapes() {
+    assert len(std.secrets.token_hex(8)) == 16, "8 字节 → 16 hex 字符";
+    assert len(std.secrets.token_hex(0)) == 0, "0 字节 → 空串";
+    let mut i = 0;
+    while i < 20 {
+        let r = std.secrets.rand_below(10);
+        assert r >= 0 and r < 10, "rand_below 落界";
+        i = i + 1;
+    }
+    assert std.secrets.choice([42]) == 42, "单元素列表只能选它";
+};
+
+def test_secrets_empty_choice_raises() {
+    let mut caught = "";
+    try {
+        let x = std.secrets.choice([]);
+    } catch e: ContractError {
+        caught = e.message;
+    }
+    assert caught != "", "空列表违反 requires 契约抛 ContractError";
+};
+
+// ══ std/decimal ══
+
+def test_decimal_exact_arithmetic() {
+    assert std.decimal.add("0.1", "0.2") == "0.3", "精确加法无浮点误差";
+    assert std.decimal.sub("1", "0.9") == "0.1", "精确减法";
+    assert std.decimal.mul("1.1", "1.1") == "1.21", "精确乘法";
+    assert std.decimal.compare("1.5", "1.50") == 0, "1.5 与 1.50 精确相等";
+    assert std.decimal.compare("2", "1") == 1, "大于返回 1";
+    assert std.decimal.compare("1", "2") == -1, "小于返回 -1";
+    assert std.decimal.div("1", "8") == "0.125", "精确整除";
+};
+
+def test_decimal_invalid_raises() {
+    let mut caught = "";
+    try {
+        let x = std.decimal.add("abc", "1");
+    } catch e: ValueError {
+        caught = e.message;
+    }
+    assert caught != "", "非法数字抛 ValueError";
+};
+
+def test_decimal_div_zero_raises() {
+    let mut caught = "";
+    try {
+        let x = std.decimal.div("1", "0");
+    } catch e: ZeroDivisionError {
+        caught = e.message;
+    }
+    assert caught != "", "除零抛 ZeroDivisionError";
+};
+
+// ══ std/statistics ══
+
+def test_statistics_mean_median() {
+    assert abs(std.statistics.mean([1, 2, 3]) - 2) < 0.0001, "均值";
+    assert abs(std.statistics.mean([2, 4, 4, 4, 5, 5, 7, 9]) - 5) < 0.0001, "经典均值";
+    assert abs(std.statistics.median([1, 2, 3, 4]) - 2.5) < 0.0001, "偶数中位数";
+    assert abs(std.statistics.median([3, 1, 2]) - 2) < 0.0001, "奇数中位数";
+    assert abs(std.statistics.median([5, 1]) - 3) < 0.0001, "二元素中位数";
+};
+
+def test_statistics_variance_stdev() {
+    assert abs(std.statistics.variance([2, 4, 4, 4, 5, 5, 7, 9]) - 4) < 0.0001, "总体方差 4";
+    assert abs(std.statistics.stdev([2, 4, 4, 4, 5, 5, 7, 9]) - 2) < 0.0001, "总体标准差 2";
+    assert abs(std.statistics.variance([7]) - 0) < 0.0001, "单元素方差 0";
+};
+
+def test_statistics_empty_raises() {
+    let mut caught = "";
+    try {
+        let x = std.statistics.mean([]);
+    } catch e: ContractError {
+        caught = e.message;
+    }
+    assert caught != "", "空表违约抛 ContractError";
+};
+
+// ══ std/textwrap ══
+
+def test_textwrap_wrap_fill() {
+    let lines = std.textwrap.wrap("a b c d", 5);
+    assert len(lines) == 2, "两行";
+    assert lines[0] == "a b c", "首行贪心填满";
+    assert lines[1] == "d", "次行余词";
+    let filled = std.textwrap.fill("a b c d", 5);
+    assert filled == "a b c" + chr(10) + "d", "fill 以换行重接";
+};
+
+def test_textwrap_indent_shorten() {
+    assert std.textwrap.indent("x" + chr(10) + "y", "> ") == "> x" + chr(10) + "> y", "逐行加前缀";
+    assert std.textwrap.shorten("abcdefghij", 8) == "abcde...", "超长截断加省略号";
+    assert std.textwrap.shorten("abc", 8) == "abc", "不长则原样";
+};
+
+// ══ std/csv ══
+
+def test_csv_plain_line() {
+    let fields = std.csv.parse_line("a,b,c");
+    assert len(fields) == 3, "三字段";
+    assert fields[0] == "a", "字段一";
+    assert fields[2] == "c", "字段三";
+};
+
+def test_csv_quoted_comma_and_escape() {
+    let q = chr(34);
+    let fields = std.csv.parse_line("a," + q + "b,c" + q + ",d");
+    assert len(fields) == 3, "引号内逗号不切分";
+    assert fields[1] == "b,c", "引号字段保逗号";
+    let esc = std.csv.parse_line(q + "he said " + q + q + "hi" + q + q + q);
+    assert esc[0] == "he said " + q + "hi" + q, "双引号转义为单引号";
+};
+
+def test_csv_serialize_roundtrip() {
+    let row = std.csv.serialize_row(["plain", "has,comma", "has" + chr(34) + "quote"]);
+    let back = std.csv.parse_line(row);
+    assert back[0] == "plain", "round-trip 普通字段";
+    assert back[1] == "has,comma", "round-trip 逗号字段";
+    assert back[2] == "has" + chr(34) + "quote", "round-trip 引号字段";
+};
+
+// ══ std/argparse ══
+
+def test_argparse_pairs_and_flags() {
+    let opts = std.argparse.parse(["--name", "intent", "--fast"]);
+    assert opts["--name"] == "intent", "键值对";
+    assert opts["--fast"] == "true", "行尾裸开关置真";
+    assert std.argparse.get(opts, "--missing", "dflt") == "dflt", "缺失走默认";
+    assert std.argparse.get(opts, "--name", "dflt") == "intent", "存在取值";
+};
+
+// ══ std/pathlib ══
+
+def test_pathlib_components() {
+    assert std.pathlib.name("a/b/c.intent") == "c.intent", "取文件名";
+    assert std.pathlib.stem("a/b/c.intent") == "c", "取干名";
+    assert std.pathlib.suffix("a/b/c.intent") == ".intent", "取扩展名";
+    assert std.pathlib.parent("a/b/c.intent") == "a/b", "取父目录";
+    assert std.pathlib.parent("toplevel") == "", "顶层父目录为空";
+};
+
+def test_pathlib_join_and_suffix() {
+    assert std.pathlib.join_path("a/", "b") == "a/b", "尾分隔符不重复";
+    assert std.pathlib.join_path("a", "b") == "a/b", "补分隔符";
+    assert std.pathlib.with_suffix("x/y.txt", ".md") == "x/y.md", "替换扩展名";
+    assert std.pathlib.with_suffix("note", ".txt") == "note.txt", "无扩展名则追加";
+};

@@ -1,0 +1,21 @@
+// std/hmac.intent — 消息认证码(SL1)
+// 心学为体：带钥的摘要是盟约——无钥者只见指纹，有钥者验其真心
+// 禅道为翼：签与验之间，是信任的过门
+// 马哲为用：hmac_* 内置支撑（Python hmac 语义，常量时间比对）
+
+export sha256, sha256_verify;
+
+// sha256(key: String, msg: String) → String  HMAC-SHA256 十六进制摘要
+def sha256(key: String, msg: String) -> String
+    requires len(key) > 0
+{
+    return hmac_sha256(key, msg);
+}
+
+// sha256_verify(key: String, msg: String, sig: String) → Bool
+// 常量时间比对签名——防时序侧信道，不等即假
+def sha256_verify(key: String, msg: String, sig: String) -> Bool
+    requires len(key) > 0 and len(sig) > 0
+{
+    return hmac_sha256_verify(key, msg, sig);
+}

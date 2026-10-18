@@ -105,7 +105,8 @@ class Resolver:
         from mini_intent import (
             VariableDecl, Assignment, ReturnStmt, PrintStmt,
             IfStmt, WhileStmt, ForStmt, BreakStmt, ContinueStmt,
-            ImportStmt, ExportStmt, Expression, FunctionDef, SliceExpr, TernaryExpr, Program, ClassStmt, AssertStmt
+            ImportStmt, ExportStmt, Expression, FunctionDef, SliceExpr, TernaryExpr, Program, ClassStmt, AssertStmt,
+            RaiseStmt, SpawnStmt, ScopeStmt
         )
 
         if isinstance(stmt, Program):
@@ -157,6 +158,23 @@ class Resolver:
             self._resolve_expr(stmt.condition)
             if stmt.message:
                 self._resolve_expr(stmt.message)
+
+        elif isinstance(stmt, RaiseStmt):
+            # EX1: raise 值 / from 原因都是表达式, 照常解析作用域深度
+            self._resolve_expr(stmt.value)
+            if stmt.cause:
+                self._resolve_expr(stmt.cause)
+
+        elif isinstance(stmt, SpawnStmt):
+            # CC1: spawn 的调用表达式(线程在解释执行层派生)
+            self._resolve_expr(stmt.expr)
+
+        elif isinstance(stmt, ScopeStmt):
+            # CC1: scope 块是独立词法作用域
+            self._begin_scope()
+            for s in stmt.body:
+                self._resolve_stmt(s)
+            self._end_scope()
 
         else:
             # 未知语句类型,跳过(可能来自模块或其他扩展)
@@ -299,6 +317,7 @@ class Resolver:
             Literal, Variable, BinaryOp, UnaryOp, CallExpr,
             MemberAccess, ListExpr, DictExpr, SubscriptExpr, PipeExpr, IfExpr,
             MatchExpr, TryExpr, ThisExpr, SetExpr, GetExpr, ThisExpr, SetExpr, GetExpr,
+            SendExpr, RecvExpr,
             LiteralPattern, VariablePattern, WildcardPattern, OrPattern, ConstructorPattern
         )
 
@@ -353,6 +372,15 @@ class Resolver:
         elif isinstance(expr, PipeExpr):
             self._resolve_expr(expr.left)
             self._resolve_expr(expr.right)
+
+        elif isinstance(expr, SendExpr):
+            # CC2: ch <- v — 通道与值两侧都要解析(闭包变量要标注深度)
+            self._resolve_expr(expr.chan)
+            self._resolve_expr(expr.value)
+
+        elif isinstance(expr, RecvExpr):
+            # CC2: <- ch — 通道表达式解析
+            self._resolve_expr(expr.chan)
 
         elif isinstance(expr, IfExpr):
             self._resolve_expr(expr.condition)

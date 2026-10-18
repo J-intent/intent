@@ -1,0 +1,89 @@
+// 异常链回归测试(EX1) — raise X from Y + __cause__ 链
+// 错误是一等值: 先构造(error), 再抛出(raise), 因果显式(from)
+
+def test_raise_catches_typed_error() {
+    try {
+        raise error("ValueError", "坏值");
+    } catch e {
+        assert e.type == "ValueError", "raise 的错误值可被定向捕获";
+        assert e.message == "坏值", "消息原样保留";
+    };
+};
+
+def test_raise_from_sets_cause() {
+    let mut outer_type = "";
+    let mut cause_type = "";
+    let mut cause_msg = "";
+    try {
+        try {
+            raise error("KeyError", "缺键 name");
+        } catch inner {
+            raise error("RuntimeError", "包装: 读取字段失败") from inner;
+        };
+    } catch outer {
+        outer_type = outer.type;
+        cause_type = outer.__cause__.type;
+        cause_msg = outer.__cause__.message;
+    };
+    assert outer_type == "RuntimeError", "外层错误类型";
+    assert cause_type == "KeyError", "__cause__ 链条到内层";
+    assert cause_msg == "缺键 name", "__cause__ 消息保留";
+};
+
+def test_raise_err_result() {
+    // Err("boom") 也可 raise — Result 的失败值即错误值
+    let mut msg = "";
+    try {
+        raise Err("boom");
+    } catch e {
+        msg = e.message;
+    };
+    assert msg == "boom", "Err 值可 raise";
+};
+
+def test_raise_string_shorthand() {
+    let mut t = "";
+    try {
+        raise "简单消息";
+    } catch e {
+        t = e.type;
+    };
+    assert t == "RuntimeError", "字符串简写 → RuntimeError";
+};
+
+def test_cause_absent_is_none() {
+    try {
+        raise error("ValueError", "x");
+    } catch e {
+        assert e.__cause__ == None, "无 from 时 __cause__ 为空";
+    };
+};
+
+def test_raise_non_error_rejected() {
+    // raise 非错误值 → 明确 TypeError, 不静默猜测
+    let mut caught = 0;
+    try {
+        raise 42;
+    } catch e {
+        caught = 1;
+        assert e.type == "TypeError", "raise 42 被拒绝为 TypeError";
+    };
+    assert caught == 1, "非法 raise 目标可捕获";
+};
+
+def test_raise_inside_function_chain() {
+    // 异常穿帧: 栈快照不丢, 类型可定向捕获
+    def inner(x: Int): Int {
+        if x < 0 {
+            raise error("ValueError", "负数不接受");
+        };
+        return x * 2;
+    };
+    let mut msg = "";
+    try {
+        let y = inner(-1);
+    } catch e: ValueError {
+        msg = e.message;
+    };
+    assert msg == "负数不接受", "函数内 raise 穿帧到调用方";
+};

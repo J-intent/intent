@@ -1,0 +1,65 @@
+// std/textwrap.intent — 文本换行与缩进(SL1, 纯 Intent 实现)
+// 心学为体：宽度是一种纪律——在限中见自由
+// 禅道为翼：长句短句，皆是呼吸的节律
+// 马哲为用：wrap/fill/indent/shorten，内置 split/join/substr 支撑
+//
+// 纪律：Intent 字符串无转义——换行符一律走 chr(10)。
+
+export wrap, fill, indent, shorten;
+
+// wrap(text: String, width: Int) → List[String]  按词贪心换行
+def wrap(text: String, width: Int) -> List[String]
+    requires len(text) > 0 and width > 0
+{
+    let words = split(trim(text), " ");
+    let mut lines = [];
+    let mut cur = "";
+    for w in words {
+        if len(w) > 0 {
+            if len(cur) == 0 {
+                cur = w;
+            } else if len(cur) + 1 + len(w) <= width {
+                cur = cur + " " + w;
+            } else {
+                lines = lines + [cur];
+                cur = w;
+            }
+        }
+    }
+    if len(cur) > 0 {
+        lines = lines + [cur];
+    }
+    return lines;
+}
+
+// fill(text: String, width: Int) → String  换行后用 chr(10) 重接
+def fill(text: String, width: Int) -> String
+    requires len(text) > 0 and width > 0
+{
+    return join(chr(10), wrap(text, width));
+}
+
+// indent(text: String, prefix: String) → String  每行加前缀
+def indent(text: String, prefix: String) -> String
+    requires len(text) > 0
+{
+    let lines = split(text, chr(10));
+    let mut out = [];
+    for ln in lines {
+        out = out + [prefix + ln];
+    }
+    return join(chr(10), out);
+}
+
+// shorten(text: String, width: Int) → String  超长截断加省略号
+def shorten(text: String, width: Int) -> String
+    requires len(text) > 0 and width > 0
+{
+    if len(text) <= width {
+        return text;
+    }
+    if width <= 3 {
+        return substr(text, 0, width);
+    }
+    return substr(text, 0, width - 3) + "...";
+}

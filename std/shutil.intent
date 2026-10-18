@@ -1,0 +1,27 @@
+// std/shutil.intent — 高级文件操作(SL1)
+// 心学为体：文件的来去，是信息在世界中的迁徙
+// 禅道为翼：复制留痕，移动不昧，删除不留
+// 马哲为用：shutil_* 内置支撑（Python shutil 语义）
+
+export copy_file, move, rmtree;
+
+// copy_file(src: String, dst: String) → Bool  复制文件(覆盖式, 保留权限)
+def copy_file(src: String, dst: String) -> Bool
+    requires len(src) > 0 and len(dst) > 0
+{
+    return shutil_copy_file(src, dst);
+}
+
+// move(src: String, dst: String) → Bool  移动文件或目录(跨盘则复制后删)
+def move(src: String, dst: String) -> Bool
+    requires len(src) > 0 and len(dst) > 0
+{
+    return shutil_move(src, dst);
+}
+
+// rmtree(path: String) → Bool  递归删除目录(不存在抛 RuntimeError)
+def rmtree(path: String) -> Bool
+    requires len(path) > 0
+{
+    return shutil_rmtree(path);
+}

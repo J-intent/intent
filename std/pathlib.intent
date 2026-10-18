@@ -1,0 +1,100 @@
+// std/pathlib.intent — 路径构件操作(SL1, 纯 Intent 实现)
+// 心学为体：路径是名字的层级——一物之名，含其所来处
+// 禅道为翼：抽文件名如抽出自我，剩下的都是来历
+// 马哲为用：name/stem/suffix/parent/join/with_suffix
+//
+// 表示法约定：内部先把反斜杠规范为斜杠（chr(92) → "/"），
+// 两个分隔符语义等价；返回路径不带尾分隔符。
+
+export name, stem, suffix, parent, join_path, with_suffix;
+
+// _norm(path) → String  分隔符规范化(内部函数, 不导出)
+def _norm(path: String) -> String {
+    return replace(path, chr(92), "/");
+}
+
+// name(path: String) → String  末段文件名("a/b/c.intent" → "c.intent")
+def name(path: String) -> String
+    requires len(path) > 0
+{
+    let parts = split(_norm(path), "/");
+    return parts[len(parts) - 1];
+}
+
+// stem(path: String) → String  去扩展名的文件名(隐藏文件保全)
+def stem(path: String) -> String
+    requires len(path) > 0
+{
+    let n = name(path);
+    let mut last = -1;
+    let mut i = 0;
+    while i < len(n) {
+        if substr(n, i, i + 1) == "." {
+            last = i;
+        }
+        i = i + 1;
+    }
+    if last <= 0 {
+        return n;
+    }
+    return substr(n, 0, last);
+}
+
+// suffix(path: String) → String  末段扩展名(含点, 无则空串)
+def suffix(path: String) -> String
+    requires len(path) > 0
+{
+    let n = name(path);
+    let mut last = -1;
+    let mut i = 0;
+    while i < len(n) {
+        if substr(n, i, i + 1) == "." {
+            last = i;
+        }
+        i = i + 1;
+    }
+    if last <= 0 {
+        return "";
+    }
+    return substr(n, last, len(n));
+}
+
+// parent(path: String) → String  父目录(顶层返回 "")
+def parent(path: String) -> String
+    requires len(path) > 0
+{
+    let parts = split(_norm(path), "/");
+    if len(parts) <= 1 {
+        return "";
+    }
+    let mut out = parts[0];
+    let mut i = 1;
+    while i < len(parts) - 1 {
+        out = out + "/" + parts[i];
+        i = i + 1;
+    }
+    return out;
+}
+
+// join_path(a: String, b: String) → String  拼接两段(不重复尾分隔符)
+// 命名避坑: 不叫 join — import 符号注入会遮蔽核心内置 join(sep, parts)
+def join_path(a: String, b: String) -> String
+    requires len(a) > 0 and len(b) > 0
+{
+    if ends_with(_norm(a), "/") {
+        return a + b;
+    }
+    return a + "/" + b;
+}
+
+// with_suffix(path: String, ext: String) → String  替换扩展名(ext 含点)
+def with_suffix(path: String, ext: String) -> String
+    requires len(path) > 0 and len(ext) > 0
+{
+    let p = parent(path);
+    let s = stem(path) + ext;
+    if len(p) == 0 {
+        return s;
+    }
+    return p + "/" + s;
+}

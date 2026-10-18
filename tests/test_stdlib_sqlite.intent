@@ -1,0 +1,57 @@
+// 标准库回归测试（B7）— std/sqlite
+// 内存库 CRUD round-trip：建表 → 插入 → 查询 → 更新 → 删除 → 关闭
+
+import std.sqlite;
+
+def test_crud_roundtrip() {
+    let db = std.sqlite.open(":memory:");
+    std.sqlite.exec(db, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+    let n1 = std.sqlite.exec(db, "INSERT INTO t (name) VALUES ('Alice')");
+    assert n1 == 1, "插入一行影响 1 行";
+    let n2 = std.sqlite.exec(db, "INSERT INTO t (name) VALUES ('Bob')");
+    assert n2 == 1, "再插一行";
+    let rows = std.sqlite.query(db, "SELECT id, name FROM t ORDER BY id");
+    assert len(rows) == 2, "两行在手";
+    assert rows[0]["name"] == "Alice", "首行 Alice";
+    assert rows[1]["name"] == "Bob", "次行 Bob";
+    std.sqlite.close(db);
+};
+
+def test_update_delete() {
+    let db = std.sqlite.open(":memory:");
+    std.sqlite.exec(db, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+    std.sqlite.exec(db, "INSERT INTO t (name) VALUES ('旧名')");
+    let u = std.sqlite.exec(db, "UPDATE t SET name = '新名' WHERE id = 1");
+    assert u == 1, "更新影响 1 行";
+    let rows = std.sqlite.query(db, "SELECT name FROM t");
+    assert rows[0]["name"] == "新名", "更新生效";
+    let d = std.sqlite.exec(db, "DELETE FROM t WHERE id = 1");
+    assert d == 1, "删除影响 1 行";
+    let left = std.sqlite.query(db, "SELECT name FROM t");
+    assert len(left) == 0, "表已空";
+    std.sqlite.close(db);
+};
+
+def test_query_types() {
+    let db = std.sqlite.open(":memory:");
+    std.sqlite.exec(db, "CREATE TABLE t (i INTEGER, f REAL, s TEXT)");
+    std.sqlite.exec(db, "INSERT INTO t VALUES (42, 3.5, '文本')");
+    let rows = std.sqlite.query(db, "SELECT i, f, s FROM t");
+    assert rows[0]["i"] == 42, "整数列";
+    assert rows[0]["f"] == 3.5, "实数列";
+    assert rows[0]["s"] == "文本", "文本列";
+    std.sqlite.close(db);
+};
+
+def test_multiple_handles() {
+    let db1 = std.sqlite.open(":memory:");
+    let db2 = std.sqlite.open(":memory:");
+    std.sqlite.exec(db1, "CREATE TABLE a (v INTEGER)");
+    std.sqlite.exec(db1, "INSERT INTO a VALUES (1)");
+    std.sqlite.exec(db2, "CREATE TABLE b (v INTEGER)");
+    std.sqlite.exec(db2, "INSERT INTO b VALUES (2)");
+    assert std.sqlite.query(db1, "SELECT v FROM a")[0]["v"] == 1, "库1独立";
+    assert std.sqlite.query(db2, "SELECT v FROM b")[0]["v"] == 2, "库2独立";
+    std.sqlite.close(db1);
+    std.sqlite.close(db2);
+};

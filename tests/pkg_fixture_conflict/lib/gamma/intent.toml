@@ -1,0 +1,6 @@
+[project]
+name = "gamma"
+version = "1.0.0"
+
+[deps]
+mathkit = { path = "../../../pkg_fixture/lib/mathkit", version = "^2.0" }

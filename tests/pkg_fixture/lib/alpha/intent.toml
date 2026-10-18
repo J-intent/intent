@@ -1,0 +1,6 @@
+[project]
+name = "alpha"
+version = "1.0.0"
+
+[deps]
+mathkit = { path = "../mathkit", version = "^1.0" }

@@ -1,0 +1,218 @@
+// std/itertools2.intent — 组合数学与高级容器模块(SL2)
+// 心学为体：排列组合是可能性的立法——有限中穷尽秩序
+// 禅道为翼：堆之沉浮、双端之出入，皆有时序
+// 马哲为用：permutations/combinations/product/heapq/bisect/deque/defaultdict/ChainMap
+//
+// 表示法约定（与 Python 语义对齐，差异处文档化）：
+//   - permutations/combinations 返回 List[List]，元素保序
+//   - heappop 返回 [最小值, 新堆] 对；空堆返回 Err
+//   - MinHeap/Deque/DefaultDict/ChainMap 为类，方法即语义
+//   - heapq 本模块以有序插入实现（演示级，语义与二叉堆等价，O(n) 插入）
+//   - bisect 以线性定位实现（演示级，语义与二分一致）
+
+export permutations, combinations, product, heappush, heappop,
+       bisect_left, bisect_right, insort, MinHeap, Deque, DefaultDict, ChainMap;
+
+// ══ 组合生成 ══
+
+// permutations — 全排列：每个元素都曾领头，物各有其位
+def permutations(lst) {
+    if len(lst) <= 1 { return [lst]; }
+    let mut out = [];
+    let mut i = 0;
+    while i < len(lst) {
+        let rest = lst[0:i] + lst[i + 1:];
+        for p in permutations(rest) {
+            out = out + [[lst[i]] + p];
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// combinations — k 组合：选与不选之间，穷尽所有 subsets
+def combinations(lst, k: Int) {
+    if k == 0 { return [[]]; }
+    if len(lst) < k { return []; }
+    let head = lst[0];
+    let mut with_head = [];
+    for c in combinations(lst[1:], k - 1) {
+        with_head = with_head + [[head] + c];
+    }
+    let without = combinations(lst[1:], k);
+    return with_head + without;
+}
+
+// product — 笛卡尔积：两集合的所有姻缘
+def product(a, b) {
+    let mut out = [];
+    for x in a {
+        for y in b {
+            out = out + [[x, y]];
+        }
+    }
+    return out;
+}
+
+// ══ heapq（有序插入实现，演示级）══
+
+// heappush — 入堆：小者浮前
+def heappush(heap, x) {
+    let mut i = 0;
+    while i < len(heap) and heap[i] < x {
+        i = i + 1;
+    }
+    return heap[0:i] + [x] + heap[i:];
+}
+
+// heappop — 出堆：返回 [最小值, 剩余堆]；空堆返回 Err
+def heappop(heap) {
+    if len(heap) == 0 { return Err("堆为空"); }
+    return [heap[0], heap[1:]];
+}
+
+// ══ bisect（线性定位，演示级）══
+
+// bisect_left — x 的左插入点（相等元素之前）
+def bisect_left(lst, x) -> Int {
+    let mut i = 0;
+    while i < len(lst) and lst[i] < x {
+        i = i + 1;
+    }
+    return i;
+}
+
+// bisect_right — x 的右插入点（相等元素之后）
+def bisect_right(lst, x) -> Int {
+    let mut i = 0;
+    while i < len(lst) and lst[i] <= x {
+        i = i + 1;
+    }
+    return i;
+}
+
+// insort — 有序插入：位定而后安
+def insort(lst, x) {
+    let i = bisect_left(lst, x);
+    return lst[0:i] + [x] + lst[i:];
+}
+
+// ══ 最小堆类 ══
+
+class MinHeap {
+    def init() {
+        this.items = [];
+    }
+    def push(x) {
+        let mut i = 0;
+        while i < len(this.items) and this.items[i] < x {
+            i = i + 1;
+        }
+        this.items = this.items[0:i] + [x] + this.items[i:];
+    }
+    def pop() {
+        if len(this.items) == 0 { return Err("堆为空"); }
+        let top = this.items[0];
+        this.items = this.items[1:];
+        return Ok(top);
+    }
+    def peek() {
+        if len(this.items) == 0 { return Err("堆为空"); }
+        return Ok(this.items[0]);
+    }
+    def size() -> Int {
+        return len(this.items);
+    }
+    def is_empty() -> Bool {
+        return len(this.items) == 0;
+    }
+}
+
+// ══ 双端队列 ══
+
+class Deque {
+    def init() {
+        this.items = [];
+    }
+    def append(x) {
+        this.items = this.items + [x];
+    }
+    def appendleft(x) {
+        this.items = [x] + this.items;
+    }
+    def pop() {
+        if len(this.items) == 0 { return Err("队列为空"); }
+        let last = this.items[len(this.items) - 1];
+        this.items = this.items[0:len(this.items) - 1];
+        return Ok(last);
+    }
+    def popleft() {
+        if len(this.items) == 0 { return Err("队列为空"); }
+        let head = this.items[0];
+        this.items = this.items[1:];
+        return Ok(head);
+    }
+    def size() -> Int {
+        return len(this.items);
+    }
+    def is_empty() -> Bool {
+        return len(this.items) == 0;
+    }
+}
+
+// ══ 默认字典 ══
+
+class DefaultDict {
+    def init(factory) {
+        this.data = {};
+        this.factory = factory;
+    }
+    def get(key) {
+        if this.data.has_key(key) { return this.data[key]; }
+        let v = this.factory();
+        this.data[key] = v;
+        return v;
+    }
+    def set(key, value) {
+        this.data[key] = value;
+    }
+    def has(key) -> Bool {
+        return this.data.has_key(key);
+    }
+    def keys() {
+        return keys(this.data);
+    }
+    def size() -> Int {
+        return len(this.data);
+    }
+}
+
+// ══ 链式字典 — 前-map 遮蔽后-map，如目光层层透窗 ══
+
+class ChainMap {
+    def init() {
+        this.maps = [];
+    }
+    def push(d) {
+        this.maps = this.maps + [d];
+    }
+    def get(key) {
+        let mut i = 0;
+        while i < len(this.maps) {
+            if this.maps[i].has_key(key) { return this.maps[i][key]; }
+            i = i + 1;
+        }
+        return None;
+    }
+    def has(key) -> Bool {
+        let mut i = 0;
+        while i < len(this.maps) {
+            if this.maps[i].has_key(key) { return true; }
+            i = i + 1;
+        }
+        return false;
+    }
+    def size() -> Int {
+        return len(this.maps);
+    }
+}

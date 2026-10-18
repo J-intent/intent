@@ -1,0 +1,85 @@
+// 标准库回归测试（B8）— std/re
+// 匹配/切分/替换/捕获组 round-trip。
+// 纪律一：列表值逐元素断言（VM 侧 ListValue == 走身份比较，不用整体相等）。
+// 纪律二：Intent 字符串不做转义处理——正则模式在源文件里写单反斜杠，
+//         文件中的 "\d" 运行时即 \d（2 字符），与 Python re 语义对齐。
+
+import std.re;
+
+def test_literal_and_search() {
+    assert std.re.test("hello", "say hello world") == true, "search 字面匹配";
+    assert std.re.test("xyz", "say hello world") == false, "不匹配返回 false";
+    assert std.re.test("^hello", "hello world") == true, "锚点开头";
+    assert std.re.test("world$", "hello world") == true, "锚点结尾";
+};
+
+def test_full_match_anchors() {
+    assert std.re.full_match("hello", "hello") == true, "整串相等";
+    assert std.re.full_match("hello", "hello world") == false, "拖尾拒绝";
+    assert std.re.full_match("h.llo", "hello") == true, "通配单字符";
+};
+
+def test_char_class_quantifier() {
+    assert std.re.test("[0-9]+", "abc123") == true, "数字字符类";
+    assert std.re.test("^[a-z]+$", "abc123") == false, "全集类拒绝数字";
+    assert std.re.test("colou?r", "color") == true, "可选字符 color";
+    assert std.re.test("colou?r", "colour") == true, "可选字符 colour";
+    let hits = std.re.find_all("[0-9]+", "a1b22c333");
+    assert len(hits) == 3, "找到三段数字";
+    assert hits[0] == "1", "第一段 1";
+    assert hits[1] == "22", "第二段 22";
+    assert hits[2] == "333", "第三段 333";
+};
+
+def test_groups_capture() {
+    let g = std.re.groups("(\d{4})-(\d{2})-(\d{2})", "日期 2026-10-17 发布");
+    assert len(g) == 3, "三个捕获组";
+    assert g[0] == "2026", "年";
+    assert g[1] == "10", "月";
+    assert g[2] == "17", "日";
+    let none = std.re.groups("(a)|(b)", "zzz");
+    assert len(none) == 0, "无匹配返回空列表";
+    let optional = std.re.groups("(a)(b)?", "a");
+    assert optional[0] == "a", "首组参与";
+    assert optional[1] == None, "未参与的组为 None";
+};
+
+def test_replace_backref() {
+    let swapped = std.re.replace("(\w+)@(\w+)", "\2:\1", "用户@域名");
+    assert swapped == "域名:用户", "反向引用交换";
+    let masked = std.re.replace("\d", "*", "电话 13800138000");
+    assert masked == "电话 ***********", "全局替换计数";
+    let kept = std.re.replace("xyz", "-", "无匹配则原样");
+    assert kept == "无匹配则原样", "无匹配原样返回";
+};
+
+def test_split_pattern() {
+    let parts = std.re.split("\s+", "心学为体  禅道为翼	马哲为用");
+    assert len(parts) == 3, "空白切三段";
+    assert parts[0] == "心学为体", "第一段";
+    assert parts[1] == "禅道为翼", "第二段";
+    assert parts[2] == "马哲为用", "第三段";
+    let fields = std.re.split(",", "a,b,,c");
+    assert len(fields) == 4, "空段保留";
+    assert fields[2] == "", "空段为空串";
+};
+
+def test_invalid_pattern_raises() {
+    // 非法模式 → ValueError，可被定向捕获
+    let mut caught = "";
+    try {
+        let ok = std.re.test("[unclosed", "text");
+    } catch e: ValueError {
+        caught = e.message;
+    };
+    assert caught != "", "非法正则抛 ValueError 且带消息";
+};
+
+def test_flags_and_multiline() {
+    assert std.re.test("(?i)intent", "INTENT 语言") == true, "内联忽略大小写";
+    let lines = std.re.find_all("(?m)^\w+", "abc
+def");
+    assert len(lines) == 2, "多行锚点两行都匹配";
+    assert lines[0] == "abc", "首行词";
+    assert lines[1] == "def", "次行词";
+};

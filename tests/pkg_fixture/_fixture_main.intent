@@ -1,12 +1,18 @@
-// 包管理回归测试(P2.1) — import 本地 lib 模块
+// 包管理运行时回归(PK1) — import 解析后的本地 lib 模块
+// 运行方式(工作目录 = 本 fixture 目录, 让 intent.toml 的 lib 注入生效):
+//   cd tests/pkg_fixture && python ../../src/mini_intent.py _fixture_main.intent
+import alpha;
+import beta;
 import mathkit;
 
-def test_import_lib_module() {
+def test_import_pkg_modules() {
     assert mathkit.double(21) == 42, "lib 模块函数可用";
     assert mathkit.triple(3) == 9, "lib 模块导出";
+    assert alpha.scale(21) == 105, "传递依赖可用(2x+3x=5x)";
+    assert beta.quadruple(10) == 40, "beta 经 mathkit 计算";
 };
 
-def test_manifest_parses() {
-    // 意图清单可读(经 run_code 前的 manifest 注入验证)
-    assert 1 == 1, "占位";
+def test_diamond_versions_merge() {
+    // alpha 要 ^1.0, beta 要 >=1.2.0 → 解析器选 1.2.0(钻石依赖合并)
+    assert mathkit.double(2) == 4, "合并约束后的 mathkit 行为一致";
 };

@@ -1,0 +1,14 @@
+// std/glob.intent — 通配符路径匹配(SL1)
+// 心学为体：模式是心对文件世界的立法——星号问号皆有法度
+// 禅道为翼：匹配到的留下，没匹配的不强求
+// 马哲为用：glob_match 内置支撑（Python glob 语义）
+
+export glob;
+
+// glob(pattern: String) → List[String]  通配符匹配(空表=无匹配)
+// 支持 * ? [seq]; 递归 ** 留待真实需求，反膨胀不做
+def glob(pattern: String) -> List[String]
+    requires len(pattern) > 0
+{
+    return glob_match(pattern);
+}

@@ -1,0 +1,38 @@
+// std/re — 正则表达式模块（B8）
+// 心学为体：模式是心的预先形成——未见文本，先有法度
+// 禅道为翼：匹配即缘起，替换即放下，切分即分别心
+// 马哲为用：文本结构化提取的地面部队（内置 re_* 支撑）
+//
+// 注意：match 是语言关键字，锚定整串的匹配名为 full_match。
+// 编译由解释器内置层完成（Python re 模块自带编译缓存），
+// 非法模式抛 ValueError，可用 try/catch 接住。
+
+// test(pattern: String, text: String) → Bool  是否存在匹配（search，不锚定）
+def test(pattern: String, text: String) -> Bool {
+    return re_test(pattern, text);
+}
+
+// full_match(pattern: String, text: String) → Bool  整串匹配（两端锚定）
+def full_match(pattern: String, text: String) -> Bool {
+    return re_full_match(pattern, text);
+}
+
+// find_all(pattern: String, text: String) → List  所有匹配子串（完整匹配）
+def find_all(pattern: String, text: String) -> List {
+    return re_find_all(pattern, text);
+}
+
+// groups(pattern: String, text: String) → List  首个匹配的捕获组（无匹配为空列表）
+def groups(pattern: String, text: String) -> List {
+    return re_groups(pattern, text);
+}
+
+// replace(pattern: String, repl: String, text: String) → String  全局替换（\1 反向引用）
+def replace(pattern: String, repl: String, text: String) -> String {
+    return re_replace(pattern, repl, text);
+}
+
+// split(pattern: String, text: String) → List  按模式切分
+def split(pattern: String, text: String) -> List {
+    return re_split(pattern, text);
+}

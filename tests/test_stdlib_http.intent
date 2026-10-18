@@ -1,0 +1,47 @@
+// 标准库回归测试（B6）— std/http
+// 本地测试服务器 round-trip：GET 文本 / GET JSON / POST 回声 / POST JSON
+
+import std.http;
+
+def test_serve_get_text() {
+    let port = std.http.serve_start(0);
+    let url = "http://127.0.0.1:" + str(port) + "/hello";
+    let body = std.http.get(url);
+    assert body == "hello from intent test server", "GET 文本 round-trip";
+    std.http.serve_stop(port);
+};
+
+def test_serve_get_json() {
+    let port = std.http.serve_start(0);
+    let url = "http://127.0.0.1:" + str(port) + "/json";
+    let data = std.http.get_json(url);
+    assert data["lang"] == "intent", "GET JSON 字段 lang";
+    assert data["ok"] == true, "GET JSON 字段 ok";
+    std.http.serve_stop(port);
+};
+
+def test_serve_post_echo() {
+    let port = std.http.serve_start(0);
+    let url = "http://127.0.0.1:" + str(port) + "/echo";
+    let body = std.http.post(url, "知行合一");
+    assert body == "知行合一", "POST 文本回声";
+    std.http.serve_stop(port);
+};
+
+def test_serve_post_json() {
+    let port = std.http.serve_start(0);
+    let url = "http://127.0.0.1:" + str(port) + "/echo";
+    let resp = std.http.post_json(url, {"msg": "格物", "n": 1});
+    let back = json_parse(resp);
+    assert back["msg"] == "格物", "POST JSON 回声字段 msg";
+    assert back["n"] == 1, "POST JSON 回声字段 n";
+    std.http.serve_stop(port);
+};
+
+def test_404_status() {
+    let port = std.http.serve_start(0);
+    let url = "http://127.0.0.1:" + str(port) + "/missing";
+    let body = std.http.get(url);
+    assert body == "not found", "404 路由回 not found";
+    std.http.serve_stop(port);
+};

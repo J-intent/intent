@@ -1,0 +1,21 @@
+// std/tempfile.intent — 临时文件与目录(SL1)
+// 心学为体：临时是相对的——此刻的过客，曾是可用的路
+// 禅道为翼：来了又去，不留住处
+// 马哲为用：tempfile_* 内置支撑（Python tempfile 语义，系统临时目录）
+
+export mkdtemp, mkstemp, tempdir;
+
+// mkdtemp() → String  创建唯一临时目录(调用方负责清理)
+def mkdtemp() -> String {
+    return tempfile_mkdtemp();
+}
+
+// mkstemp(prefix: String) → String  创建唯一临时文件, 返回路径
+def mkstemp(prefix: String) -> String {
+    return tempfile_mkstemp(prefix);
+}
+
+// tempdir() → String  系统临时目录路径
+def tempdir() -> String {
+    return tempfile_tempdir();
+}

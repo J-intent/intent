@@ -33,3 +33,46 @@ def test_for_dict() {
     };
     assert total == 3, "for 遍历字典";
 };
+
+def test_else_if_chain() {
+    // else if 链回归(解析器修复: 原 else 后只接受 '{', else if 触发 panic 错位)
+    let mut r = 0;
+    let n = 2;
+    if n == 1 {
+        r = 1;
+    } else if n == 2 {
+        r = 2;
+    } else if n == 3 {
+        r = 3;
+    } else {
+        r = 4;
+    }
+    assert r == 2, "else if 命中中段";
+    let m = 9;
+    let mut r2 = 0;
+    if m == 1 {
+        r2 = 1;
+    } else if m == 2 {
+        r2 = 2;
+    } else {
+        r2 = 4;
+    }
+    assert r2 == 4, "else if 落 else";
+};
+
+def test_else_if_nested_in_loop() {
+    // else if 在循环体内的组合(模块加载错位事故的回归形态)
+    let mut hits = 0;
+    let mut i = 0;
+    while i < 6 {
+        if i == 0 {
+            hits = hits + 1;
+        } else if i == 3 {
+            hits = hits + 10;
+        } else {
+            hits = hits + 100;
+        }
+        i = i + 1;
+    }
+    assert hits == 411, "循环内 else if 链(1 + 10 + 4*100)";
+};

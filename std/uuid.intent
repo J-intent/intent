@@ -1,0 +1,16 @@
+// std/uuid.intent — 通用唯一识别码(SL1)
+// 心学为体：每一个uuid都是世界对一件新事物的命名
+// 禅道为翼：128 位随机中，碰撞是尘缘未了
+// 马哲为用：uuid_* 内置支撑（Python uuid4 语义）
+
+export uuid4, uuid4_hex;
+
+// uuid4() → String  随机 UUID(带连字符, 36 字符)
+def uuid4() -> String {
+    return uuid_uuid4();
+}
+
+// uuid4_hex() → String  随机 UUID(32 位无连字符)
+def uuid4_hex() -> String {
+    return uuid_uuid4_hex();
+}

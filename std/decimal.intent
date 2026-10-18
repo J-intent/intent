@@ -1,0 +1,35 @@
+// std/decimal.intent — 十进制精确算术(SL1)
+// 心学为体：0.1 + 0.2 的冤屈——二进制浮点说不清的账，十进制来算
+// 禅道为翼：算清楚的是账，算不清的是执
+// 马哲为用：decimal_* 内置支撑（Python decimal，28 位有效精度）
+//
+// 表示法约定：Decimal 一律以字符串承载("12.34")，杜绝宿主浮点误差
+// 从入口渗入；运算结果返回规范化字符串；非法数字抛 ValueError，
+// 除零抛 ZeroDivisionError。
+
+export add, sub, mul, div, compare;
+
+// add(a: String, b: String) → String  精确加法
+def add(a: String, b: String) -> String {
+    return decimal_add(a, b);
+}
+
+// sub(a: String, b: String) → String  精确减法
+def sub(a: String, b: String) -> String {
+    return decimal_sub(a, b);
+}
+
+// mul(a: String, b: String) → String  精确乘法
+def mul(a: String, b: String) -> String {
+    return decimal_mul(a, b);
+}
+
+// div(a: String, b: String) → String  精确除法(28 位精度, 除零抛错)
+def div(a: String, b: String) -> String {
+    return decimal_div(a, b);
+}
+
+// compare(a: String, b: String) → Int  a>b→1, a<b→-1, 相等→0
+def compare(a: String, b: String) -> Int {
+    return decimal_compare(a, b);
+}

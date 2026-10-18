@@ -1,0 +1,82 @@
+// 标准库回归测试（B4）— std/datetime
+// 运算/格式化/时区 round-trip。断言全部用固定日期，不依赖运行时时钟。
+
+import std.datetime;
+
+def test_parse_normalize() {
+    assert std.datetime.parse("2026-10-17") == "2026-10-17 00:00:00", "纯日期补零点";
+    assert std.datetime.parse("2026-10-17 13:14:15") == "2026-10-17 13:14:15", "日期时间原样";
+    assert std.datetime.parse(" 2026-10-17 ") == "2026-10-17 00:00:00", "容忍首尾空白";
+};
+
+def test_add_days_boundaries() {
+    assert std.datetime.add_days("2026-01-31", 1) == "2026-02-01 00:00:00", "月末进下月";
+    assert std.datetime.add_days("2026-12-31", 1) == "2027-01-01 00:00:00", "年末进次年";
+    assert std.datetime.add_days("2024-02-28", 1) == "2024-02-29 00:00:00", "闰日 2/29";
+    assert std.datetime.add_days("2026-03-01", -1) == "2026-02-28 00:00:00", "负天数退上月";
+};
+
+def test_add_hours_crosses_day() {
+    assert std.datetime.add_hours("2026-10-17 22:30:00", 2) == "2026-10-18 00:30:00", "跨日";
+    assert std.datetime.add_hours("2026-10-17 00:30:00", -1) == "2026-10-16 23:30:00", "负跨日";
+};
+
+def test_diff() {
+    assert std.datetime.diff_days("2026-10-17", "2026-10-01") == 16, "整天数差";
+    assert std.datetime.diff_days("2026-10-01", "2026-10-17") == -16, "负差向下取整";
+    assert std.datetime.diff_seconds("2026-10-17 00:01:00", "2026-10-17 00:00:00") == 60, "秒差";
+    assert std.datetime.diff_seconds("2026-10-17 01:00:00", "2026-10-16 23:30:00") == 5400, "跨小时秒差";
+};
+
+def test_weekday() {
+    assert std.datetime.weekday("2026-10-17") == 5, "2026-10-17 是周六";
+    assert std.datetime.weekday("2026-01-01") == 3, "2026-01-01 是周四";
+    assert std.datetime.weekday("2026-10-19") == 0, "2026-10-19 是周一";
+};
+
+def test_parts() {
+    let p = std.datetime.parts("2026-10-17 13:14:15");
+    assert p["year"] == 2026, "年";
+    assert p["month"] == 10, "月";
+    assert p["day"] == 17, "日";
+    assert p["hour"] == 13, "时";
+    assert p["minute"] == 14, "分";
+    assert p["second"] == 15, "秒";
+};
+
+def test_format() {
+    assert std.datetime.format("2026-10-17", "%Y/%m/%d") == "2026/10/17", "自定义格式";
+    assert std.datetime.format("2026-10-17 13:14:15", "%H:%M") == "13:14", "时分格式";
+    assert std.datetime.format("2026-10-17", "%A") == "Saturday", "星期全称";
+};
+
+def test_timestamp_roundtrip() {
+    let ts = std.datetime.timestamp("2026-10-17 12:00:00");
+    assert std.datetime.from_timestamp(ts) == "2026-10-17 12:00:00", "时间戳往返";
+    assert std.datetime.from_timestamp(0) == "1970-01-01 08:00:00", "epoch 零点即东八区八点";
+};
+
+def test_timezone_shift() {
+    assert std.datetime.to_timezone("2026-10-17 14:00:00", 8) == "2026-10-17 22:00:00", "UTC+8";
+    assert std.datetime.to_timezone("2026-10-17 23:00:00", -5) == "2026-10-17 18:00:00", "UTC-5";
+    assert std.datetime.to_timezone("2026-10-17 20:00:00", 5) == "2026-10-18 01:00:00", "跨日平移";
+};
+
+def test_now_roundtrip() {
+    // now/today 只验往返与形态，不断言具体值（时钟是流动的）
+    let iso = std.datetime.now();
+    let normalized = std.datetime.parse(iso);
+    assert len(normalized) >= 19, "now() 往返后形态合法";
+    let today = std.datetime.today();
+    assert std.datetime.parse(today) != "", "today() 可解析";
+};
+
+def test_invalid_raises() {
+    let mut caught = "";
+    try {
+        let x = std.datetime.parse("2026-13-45");
+    } catch e: ValueError {
+        caught = e.message;
+    };
+    assert caught != "", "非法日期抛 ValueError 且带消息";
+};

@@ -1,0 +1,38 @@
+// std/argparse.intent — 命令行参数解析(SL1, 纯 Intent 实现)
+// 心学为体：参数是程序与人对暗号——约好则两不猜
+// 禅道为翼：认不出的，原样放过
+// 马哲为用：parse/get，--key value 对 + 裸 --flag 置真
+//
+// 演示级约定：--key value 取后续值为字符串；裸 --flag（后随另一
+// --开关或行尾）取 "true"；位置参数忽略（留待真实需求）。
+
+export parse, get;
+
+// parse(args: List[String]) → Dict  解析参数列表为字典
+def parse(args: List[String]) {
+    let mut out = {};
+    let mut i = 0;
+    while i < len(args) {
+        let a = args[i];
+        if starts_with(a, "--") {
+            if i + 1 < len(args) and !starts_with(args[i + 1], "--") {
+                out[a] = args[i + 1];
+                i = i + 2;
+            } else {
+                out[a] = "true";
+                i = i + 1;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
+// get(opts: Dict, key: String, default: String) → String  带默认取值
+def get(opts, key: String, default: String) -> String {
+    if opts.has_key(key) {
+        return opts[key];
+    }
+    return default;
+}

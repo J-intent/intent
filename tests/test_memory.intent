@@ -1,0 +1,68 @@
+// 内存管理回归测试(MM1) — std/memory
+// 注册表观测 + 循环引用回收 + 引用计数诊断。
+// 设计文档: docs/memory_design.md
+// 纪律一：随机/时序相关断言只走不等式与形态，不绑定具体值。
+// 纪律二：循环必须在函数作用域内制造并丢弃——顶层变量活到程序结束。
+
+import std.memory;
+
+// make_cycles — 制造 10 个自引用循环后丢弃(作用域退出即失达)
+def make_cycles() {
+    let mut i = 0;
+    while i < 10 {
+        let mut c = [i];
+        push(c, c);
+        i = i + 1;
+    }
+};
+
+def test_mem_live_nonneg_and_observable() {
+    let before = std.memory.mem_live();
+    assert before >= 0, "存活数非负";
+    let mut box = [];
+    let mut i = 0;
+    while i < 20 {
+        push(box, [i, i + 1]);
+        i = i + 1;
+    }
+    let after = std.memory.mem_live();
+    assert after >= before + 20, "20 个被持有列表可观测";
+};
+
+def test_alloc_total_monotonic() {
+    let a = std.memory.alloc_total();
+    let mut junk = [];
+    junk = junk + [1];
+    junk = junk + [2];
+    let b = std.memory.alloc_total();
+    assert b > a, "累计分配单调增";
+};
+
+def test_ref_count_self_cycle() {
+    let mut a = [1, 2, 3];
+    push(a, a);
+    // 直调内置: Intent 函数形参复制传值, ListValue.copy() 不处理环
+    // (自引用列表经函数调用会无限递归 — 已知限制, 见 docs/memory_design.md)
+    let rc = ref_count_of(a);
+    assert rc > 2, "自引用使宿主引用计数超过 2";
+};
+
+def test_cycle_reclaimed_by_gc() {
+    let baseline = std.memory.mem_live();
+    make_cycles();
+    let leaked = std.memory.mem_live();
+    assert leaked >= baseline + 10, "循环引用暂存(引用计数不归零)";
+    std.memory.gc_collect();
+    let after = std.memory.mem_live();
+    assert after <= leaked - 10, "分代 GC 回收循环引用";
+};
+
+def test_mem_stats_shape() {
+    let st = std.memory.mem_stats();
+    assert st.has_key("live"), "统计含 live";
+    assert st.has_key("alloc_total"), "统计含 alloc_total";
+    assert st.has_key("reclaim_total"), "统计含 reclaim_total";
+    assert st.has_key("by_type"), "统计含 by_type";
+    assert st["live"] >= 0, "live 非负";
+    assert st["alloc_total"] > 0, "alloc_total 已计数";
+};

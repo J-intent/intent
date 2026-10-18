@@ -1,0 +1,132 @@
+// 标准库回归测试(SL2) — std/itertools2
+// 排列组合/堆/双端队列/默认字典/链式字典。
+// 纪律一：Intent 字符串不做转义——本文件无模式串。
+// 纪律二：列表不做整体相等断言（身份比较语义），逐元素断言。
+
+import std.itertools2;
+
+def test_permutations_count_and_first() {
+    let ps = std.itertools2.permutations([1, 2, 3]);
+    assert len(ps) == 6, "3 个元素 6 种排列";
+    assert ps[0][0] == 1, "首排列领头是 1";
+    assert ps[0][1] == 2, "首排列次位是 2";
+    assert ps[0][2] == 3, "首排列末位是 3";
+};
+
+def test_permutations_single_and_empty() {
+    let one = std.itertools2.permutations([7]);
+    assert len(one) == 1, "单元素仅一种排列";
+    assert one[0][0] == 7, "排列内容保持";
+    let none = std.itertools2.permutations([]);
+    assert len(none) == 1, "空列表有一种排列(空排列)";
+};
+
+def test_combinations_count() {
+    let cs = std.itertools2.combinations([1, 2, 3, 4], 2);
+    assert len(cs) == 6, "C(4,2)=6";
+    assert cs[0][0] == 1, "首组合含 1";
+    assert cs[0][1] == 2, "首组合是 [1,2]";
+};
+
+def test_combinations_edge() {
+    assert len(std.itertools2.combinations([1, 2], 0)) == 1, "C(n,0)=1 空组合";
+    assert len(std.itertools2.combinations([1, 2], 5)) == 0, "k 越界为空";
+    assert len(std.itertools2.combinations([1], 1)) == 1, "C(1,1)=1";
+};
+
+def test_product() {
+    let ps = std.itertools2.product([1, 2], ["a", "b"]);
+    assert len(ps) == 4, "2x2 积";
+    assert ps[0][0] == 1, "积首对左元";
+    assert ps[0][1] == "a", "积首对右元";
+    assert ps[3][0] == 2, "积末对左元";
+    assert ps[3][1] == "b", "积末对右元";
+};
+
+def test_heap_functions_order() {
+    let mut h = [];
+    h = std.itertools2.heappush(h, 5);
+    h = std.itertools2.heappush(h, 1);
+    h = std.itertools2.heappush(h, 3);
+    assert h[0] == 1, "堆顶最小";
+    let pair = std.itertools2.heappop(h);
+    assert pair[0] == 1, "先出最小";
+    assert len(pair[1]) == 2, "出堆后余二";
+    assert pair[1][0] == 3, "剩余堆序";
+};
+
+def test_heap_pop_empty_err() {
+    let r = std.itertools2.heappop([]);
+    assert !r.is_ok, "空堆 pop 返回 Err";
+};
+
+def test_minheap_class() {
+    let h = std.itertools2.MinHeap();
+    h.push(9);
+    h.push(2);
+    h.push(7);
+    assert h.peek()? == 2, "堆类 peek 最小";
+    assert h.pop()? == 2, "堆类先出 2";
+    assert h.pop()? == 7, "堆类再出 7";
+    assert h.size() == 1, "堆类余一";
+    assert !h.is_empty(), "堆类非空";
+    h.pop();
+    assert h.is_empty(), "堆类空";
+};
+
+def test_bisect_positions() {
+    let lst = [1, 3, 3, 5, 7];
+    assert std.itertools2.bisect_left(lst, 3) == 1, "左插点在相等元素前";
+    assert std.itertools2.bisect_right(lst, 3) == 3, "右插点在相等元素后";
+    assert std.itertools2.bisect_left(lst, 4) == 3, "中间值左插点";
+    assert std.itertools2.bisect_right(lst, 0) == 0, "小于全部";
+    assert std.itertools2.bisect_left(lst, 9) == 5, "大于全部";
+};
+
+def test_insort_keeps_order() {
+    let sorted = std.itertools2.insort([1, 3, 5], 4);
+    assert len(sorted) == 4, "插入后长度";
+    assert sorted[0] == 1, "insort 位一";
+    assert sorted[1] == 3, "insort 位二";
+    assert sorted[2] == 4, "insort 新元素入位";
+    assert sorted[3] == 5, "insort 后移";
+};
+
+def test_deque_both_ends() {
+    let d = std.itertools2.Deque();
+    d.append(1);
+    d.append(2);
+    d.appendleft(0);
+    assert d.popleft()? == 0, "双端左出";
+    assert d.pop()? == 2, "双端右出";
+    assert d.size() == 1, "双端余一";
+    assert d.popleft()? == 1, "双端出尽";
+    assert d.is_empty(), "双端空";
+};
+
+def test_deque_empty_err() {
+    let d = std.itertools2.Deque();
+    assert !d.pop().is_ok, "空队列 pop 返回 Err";
+    assert !d.popleft().is_ok, "空队列 popleft 返回 Err";
+};
+
+def test_defaultdict_factory() {
+    let d = std.itertools2.DefaultDict(fn() { return 0; });
+    assert d.get("a") == 0, "缺失键走工厂";
+    assert d.get("a") == 0, "二次读取一致";
+    d.set("b", 5);
+    assert d.get("b") == 5, "显式设置优先";
+    assert d.size() == 2, "默认字典两项";
+};
+
+def test_chainmap_shadowing() {
+    let cm = std.itertools2.ChainMap();
+    cm.push({"x": 1, "y": 2});
+    cm.push({"y": 20, "z": 3});
+    assert cm.get("x") == 1, "链取前层独有键";
+    assert cm.get("y") == 2, "前层遮蔽后层";
+    assert cm.get("z") == 3, "链取后层独有键";
+    assert cm.has("z"), "链含后层键";
+    assert !cm.has("nope"), "链不含缺失键";
+    assert cm.get("nope") == None, "缺失键返回 None";
+};

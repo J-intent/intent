@@ -1,0 +1,58 @@
+// 类型标注运行期测试(L1) — 标注是提示, 不是枷锁
+// 静态检查见 tools/typecheck_selftest.py; 本文件证明标注不破坏执行
+
+def add(a: Int, b: Int) -> Int
+    requires a >= 0
+    requires b >= 0
+    ensures result >= a
+{
+    return a + b;
+};
+
+def identity<T>(x: T) -> T {
+    return x;
+};
+
+def describe(x: Int | String) -> String {
+    if type_of(x) == "Int" {
+        return "number";
+    };
+    return "text";
+};
+
+def test_annotation_ok() {
+    // 带标注函数正常运行
+    let s = add(1, 2);
+    assert s == 3, "Int 标注参数与返回";
+};
+
+def test_annotation_contract() {
+    // 标注与契约共存: requires 在运行期把守
+    let mut caught = 0;
+    try {
+        let bad = add(-1, 2);
+    } catch e: ContractError {
+        caught = 1;
+    };
+    assert caught == 1, "契约优先于类型: 负参仍被拒";
+};
+
+def test_generic_annotation() {
+    // 泛型标注: T 是信任的占位
+    let a = identity(42);
+    let b = identity("text");
+    assert a == 42, "泛型实例化 Int";
+    assert b == "text", "泛型实例化 String";
+};
+
+def test_union_annotation() {
+    // Union 标注: 任一成员合法
+    assert describe(42) == "number", "Union 收 Int";
+    assert describe("hi") == "text", "Union 收 String";
+};
+
+def test_numeric_interop() {
+    // 数值互通(spec §2.1): Int 标注接受 Float 值
+    let x: Int = 1.5;
+    assert x == 1.5, "Int 标注不收紧运行时值";
+};

@@ -1,0 +1,106 @@
+// 测试框架深化回归测试(TQ1) — fixture/mock/参数化/skip/预期异常
+// pytest 子集的 Intent 原生等价物(无装饰器语法前的约法)
+// 约定: setup/teardown 是 fixture 钩子, 由运行器在每个用例前后调用
+
+let mut fixture_log = [];
+
+def setup() {
+    push(fixture_log, "setup");
+};
+
+def teardown() {
+    push(fixture_log, "teardown");
+};
+
+// ── fixture: setup→用例→teardown 环绕(运行器约定) ──
+
+def test_a_fixture_setup_runs_first() {
+    assert fixture_log[len(fixture_log) - 1] == "setup", "用例执行前 setup 已跑";
+    push(fixture_log, "test");
+};
+
+def test_b_fixture_wraps_each_case() {
+    // a 用例: setup/test/teardown 已发生; 此刻轮到 b 的 setup
+    assert len(fixture_log) == 4, "fixture 环绕顺序: setup/test/teardown/setup";
+    assert fixture_log[0] == "setup" and fixture_log[1] == "test" and fixture_log[2] == "teardown" and fixture_log[3] == "setup", "setup→用例→teardown 环绕每个用例";
+    push(fixture_log, "test");
+};
+
+// ── 预期异常: 坏路径也是契约的一部分 ──
+
+def test_expect_error_catches_index_error() {
+    let err = expect_error(fn() {
+        let items = [1, 2, 3];
+        let v = items[99];
+    }, "IndexError");
+    assert err.type == "IndexError", "expect_error 返回捕获的错误值(类型可断言)";
+};
+
+def test_expect_error_on_intent_raise() {
+    let err = expect_error(fn() {
+        raise error("ValueError", "主动爆炸");
+    }, "ValueError");
+    assert err.message == "主动爆炸", "raise 的错误值经 expect_error 原样取出";
+};
+
+def test_expect_error_asserts_when_no_error() {
+    let mut caught = 0;
+    try {
+        let err = expect_error(fn() {
+            let x = 1 + 1;
+        }, "ValueError");
+    } catch e {
+        caught = 1;
+    };
+    assert caught == 1, "函数没抛错却预期异常 → expect_error 自身报错(不蒙混)";
+};
+
+// ── mock: 测试替身记录调用序列 ──
+
+def test_mock_records_calls() {
+    let m = mock("svc");
+    m(1, "a");
+    m(2);
+    assert mock_call_count(m) == 2, "mock 记录调用次数";
+    let calls = mock_calls(m);
+    assert len(calls) == 2, "mock_calls 取到两次调用记录";
+    assert len(calls[0]) == 2 and calls[0][0] == 1, "首次调用的参数原样记录";
+    assert len(calls[1]) == 1 and calls[1][0] == 2, "第二次调用单参数";
+};
+
+def test_mock_return_value() {
+    let m = mock("cfg");
+    mock_return(m, 42);
+    let r = m("ignored");
+    assert r == 42, "mock_return 预设返回值";
+    assert mock_call_count(m) == 1, "取返回值也算一次调用";
+};
+
+// ── 参数化: 数据驱动, 用例展开传参 ──
+
+def test_param_cases_runs_every_case() {
+    let mut seen = 0;
+    param_cases([[1, 2], [3, 4], [5, 6]], fn(a, b) {
+        seen = seen + a + b;
+    });
+    assert seen == 21, "参数化: 每个用例跑一次(1+2+3+4+5+6 = 21)";
+};
+
+def test_param_cases_reports_failing_case() {
+    let mut caught = 0;
+    try {
+        param_cases([[1], [2], [3]], fn(a) {
+            assert a != 2, "用例 2 故意失败";
+        });
+    } catch e {
+        caught = 1;
+    };
+    assert caught == 1, "参数化失败带上用例序号(定位到个案, 不沉没)";
+};
+
+// ── skip: 诚实的中间态 ──
+
+def test_skip_is_honest_middle_state() {
+    skip("演示跳过语义: 环境不具备时诚实标记, 不假装通过");
+    assert 1 == 2, "这行永远不会执行(skip 在中途离开)";
+};

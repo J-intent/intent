@@ -1,0 +1,37 @@
+// std/http — 网络 HTTP 客户端模块（B6）
+// 心学为体：请求发出去了，响应回来了——心与物的往返
+// 禅道为翼：GET/POST 各安其位，JSON 是通用的书信格式
+// 马哲为用：连通外部世界的桥梁（内置 http_get/http_post 等支撑）
+//
+// 测试与演示用 http_serve_start/http_serve_stop 起本地服务器 —
+// 闭环球桌，不依赖外网。
+
+// get(url: String) → String  GET 请求，返回响应体
+def get(url: String) -> String {
+    return http_get(url);
+}
+
+// post(url: String, body: String) → String  POST 文本，返回响应体
+def post(url: String, body: String) -> String {
+    return http_post(url, body);
+}
+
+// get_json(url: String)  GET 并解析 JSON 响应为 Dict/List
+def get_json(url: String) {
+    return http_get_json(url);
+}
+
+// post_json(url: String, value) → String  POST JSON 体，返回响应体
+def post_json(url: String, value) -> String {
+    return http_post_json(url, value);
+}
+
+// serve_start(port: Int) → Int  启动本地测试服务器，返回实际端口（0=系统分配）
+def serve_start(port: Int) -> Int {
+    return http_serve_start(port);
+}
+
+// serve_stop(port: Int)  关闭测试服务器
+def serve_stop(port: Int) {
+    http_serve_stop(port);
+}

@@ -1,0 +1,8 @@
+// beta — 依赖 mathkit 的演示包(PK1 fixture, 钻石依赖的另一极)
+// 约束 >=1.2.0 与 alpha 的 ^1.0 合并 → 公共兼容集 {1.2.0}
+import mathkit;
+export quadruple;
+
+def quadruple(x: Int): Int requires x >= 0 {
+    return mathkit.double(x) * 2;
+};

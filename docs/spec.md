@@ -1,4 +1,4 @@
-# Intent 语言规范 v1.2.0
+# Intent 语言规范 v1.8.0
 
 > 心学为体，禅道为翼，马哲为用
 > **本文档是 Intent 的权威规范**，从实现（`src/mini_intent.py`）反向提取，每个条目标注源码锚点。
@@ -27,12 +27,14 @@
 
 **关键字**（`Lexer.KEYWORDS` mini_intent.py:203）按支持度分三档：
 
-| 已实现 ✅ | let, def, return, if, else, elif, for, while, break, continue, match, requires, ensures, import, as, class, this, mut, fn, try, catch, finally, defer, assert, enum, yield, and, or, not, in |
+| 已实现 ✅ | let, def, return, if, else, elif, for, while, break, continue, match, requires, ensures, import, as, class, this, mut, fn, try, catch, finally, defer, assert, enum, yield, and, or, not, in, raise, spawn, scope |
 |---|---|
 | 字面量关键字 ✅ | true, false, null（None/True/False 同义接受） |
 | 记录性注解 ✅ | pure（`func.is_pure`，仅记录不强制）, effect `[...]`（效果列表，仅记录） |
 | 别名（兼容，推荐用主形式） | var, const ≡ let |
-| 预留未实现 🔜 | func（用 def/fn）, from（用 import）, is（用 ==）, invariant（契约扩展） |
+| 预留未实现 🔜 | func（用 def/fn）, is（用 ==）, invariant（契约扩展） |
+
+> `from` 已在 EX1 启用：`raise <错误值> from <原因>`（非 import 的 from）。
 
 **内置类型标识符**（非关键字，`Lexer.BUILTIN_TYPES` mini_intent.py:212）：`Int` `Float` `String` `Bool` `List` `Dict`
 
@@ -61,7 +63,7 @@
 | 位运算 🔜 | `&` `|` `^` `~` `<<` `>>`（词法接受，语义未实现） |
 | 赋值 | `=` `+=` `-=` `*=` `/=` `%=` `**=` `//=` 等 🔜（除 `=` 外预留） |
 | 结构 | `(` `)` `{` `}` `[` `]` `,` `:` `;` `.` |
-| 箭头 | `->`（返回类型） `=>`（match 分支/λ） |
+| 箭头 | `->`（返回类型） `=>`（match 分支/λ） `<-`（CC2 通道发送/接收） |
 | 管道 | `|>` |
 | 其他 | `@`（装饰器） `:=` `++` `--` 🔜 |
 
@@ -85,6 +87,17 @@ let x: Int = 10;              // 显式标注(可选)
 def f(a: Float, b: Float): Float { ... }   // 参数与返回类型
 def g<T>(x: T): T { ... }     // 泛型函数(类型参数从实参推断)
 ```
+
+标注是提示，不是枷锁：`intent check --types`（`--types`）做渐进类型静态检查——**标注处检查 + 推断处放过**（mypy-lite，L1）：
+
+- 变量声明 `let x: T = expr`、调用实参 vs 形参标注、`return` vs 返回标注，三处可推断即检查；
+- 推断不出类型的一律放过（显式信任，不猜）；
+- 数值互通（§2.1）：Int/Float 双向接受；
+- Union 标注任一成员合法；泛型参数视为 Any；类型别名透明解析；
+- 容器只查基类（`List[Int]` 的元素类型不查，留待完整版）；
+- 契约优先于类型：`requires/ensures` 是运行时可验证的主防线，类型是静态副防线。
+
+正反例判定自测：`tools/typecheck_selftest.py`（21/21）。已知边界：`std/itertools2.intent` 的多行 `export` 语法不被 parser 接受（`--check` 同拒，宽松执行模式容忍）——类型检查以语法干净为前提。
 
 ### 2.3 内建类型
 
@@ -167,6 +180,8 @@ break; continue;
 "sub" in "string";                 // in 右侧支持 String(子串归属)
 ```
 
+> `else if` 链 2026-10-18 落地：parser 将 `else` 后随的 `if` 解析为嵌套 IfStmt（与 `elif` 语义等价）——规范先立、实现补票（tests/test_control_flow.intent 回归）。
+
 ### 3.3b with 语句（P1.1，块级资源管理）
 
 ```intent
@@ -248,7 +263,7 @@ export my_func, my_const;     // 显式导出(P2.1): 无 export 声明的模块�
 模块查找优先级：`<base>/<name>.intent` → `<base>/<name>/__init__.intent` → `<base>/<name>/<name>.intent`（npm 风格）。
 模块 = 文件；循环导入检测（`_import_stack`）；每个模块独立执行，导入时注册其导出符号。
 
-### 3.9 包管理（P2.1，V0.1 本地优先）
+### 3.9 包管理（P2.1 + PK1 依赖解析，V0.2 本地优先）
 
 项目清单 `intent.toml`：
 
@@ -258,20 +273,119 @@ name = "myproj"
 version = "0.1.0"
 
 [deps]
-mathkit = { git = "https://github.com/x/mathkit.git" }  # git 依赖
-utils   = "../utils"                                     # 本地路径依赖
+mathkit = { path = "lib/mathkit", version = "^1.2" }   # 路径依赖 + 语义化约束
+utils   = "../utils"                                   # 路径依赖(无约束)
+web     = { git = "https://github.com/x/web.git", version = ">=2.0, <3.0" }
 ```
 
 - `--install <url>`：安装单个依赖（git clone --depth 1 到 `./lib/<name>`）
-- `--install`（无参）：按 intent.toml 的 `[deps]` 批量安装（本地路径复制、git  pull --ff-only 更新）
+- `--install <dir>`：`<dir>` 含 intent.toml → 按该项目批量解析安装（否则视为单个依赖源）
+- `--install`（无参）：按当前目录 intent.toml 的 `[deps]` 批量安装
+- `--install --dry-run [dir]`：**依赖解析预演**——约束合并/冲突检测/解析计划，不安装不写锁（PK1 判定入口）
 - 启动时：`./lib` 与 `~/.intent/lib`（全局库）自动加入模块搜索路径
-- **刻意不做版本求解器**：依赖值即源地址（git url / 本地路径），clone HEAD；版本约束冲突人工裁决
+
+**PK1 依赖解析器**（`resolve_dependencies` mini_intent.py:8550）：
+
+- 约束语法：`*`（任意）/ `^1.2`（兼容：≥1.2.0 <2.0.0）/ `~1.2`（补丁级：≥1.2.0 <1.3.0）/ `>=` `<=` `>` `<` `=` / 逗号分隔多段（AND 语义）；语义化版本三段式，缺段补 0，正式版高于预发布版
+- 解析算法：BFS 走依赖图 → 约束累积（钻石依赖合并）→ 候选枚举（路径依赖单候选；本地注册表 `registry/` 多版本候选）→ **公共兼容集取最高版本**（最新不满足自动回退次高）→ 无解报 `依赖冲突`（退出码 1，不写锁）
+- `intent.lock`（JSON）：锁定每包 version/source/deps/required_by；非 dry-run 安装前写入
+- 刻意不做：全局 SAT 求解；git 依赖的 tag 枚举（未克隆无版本可读，install 后校验）
+
+### 3.10 错误处理：raise 与异常链（EX1）
+
+```intent
+try {
+    raise error("KeyError", "缺键 name") from inner_err;   // 显式因果链
+} catch e {
+    print(e.type);            // "KeyError" — 定向捕获
+    print(e.__cause__.type);  // 起因类型(无 from 时为 None)
+    print(e.message);         // 消息
+    print(e.stack);           // Intent 调用链快照
+};
+```
+
+- `error(type, message)` 内置：构造一等错误值（raise 的原料）
+- `raise <错误值>`：ErrorValue 原样抛；`Err("boom")` 取内层消息；字符串简写 → `RuntimeError`；其余类型明确拒绝（TypeError）
+- `raise X from Y`：`X.__cause__ = Y`——因果显式化，不猜
+- 未捕获到顶层：渲染含「异常链(__cause__, 从起因到外层)」段（`render_intent_error`）
+- 刻意不做：`__context__`（隐式上下文，异常处理中再抛新错的自动挂链）
+
+### 3.11 结构化并发：spawn 与 scope（CC1）
+
+```intent
+let mut results = [];
+def work(lo: Int, hi: Int) { ... push(results, partial_sum); };
+
+scope {
+    spawn work(0, 50);        // 派生任务(调用点求值)
+    spawn work(50, 100);
+};                            // 块退出 = 汇合点: 全部任务自动 join
+// 此处两个任务必已完成
+```
+
+- `spawn <可调用>;` / `spawn f(args);`：Python threading 演示级实现；每个任务跑在独立 Interpreter 上，闭包作用域经 FunctionValue 共享
+- `scope { ... }`：并发作用域——块内 spawn 的任务在块退出时统一 join；任务异常在 join 处重抛（第一个，不沉没）
+- scope 外的 spawn 被拒绝（RuntimeError）——**没有孤儿线程**
+- 词法作用域：scope 块是独立词法作用域（Resolver 同 try 块语义）
+- 刻意不做：async/await（A3）、自由线程安全（A4）；channel 已由 CC2 交付（§3.12）
+
+### 3.12 channel 通信（CC2）
+
+```intent
+let ch = chan();        // 无界缓冲; chan(n) = 容量 n(满则发送阻塞)
+scope {
+    spawn producer(ch); // 任务间经通道握手 — 不共享内存, 传递消息
+    spawn consumer(ch);
+};
+ch <- 42;               // 发送: 阻塞直至入队; 通道已关闭则报错
+let v = <- ch;          // 接收: 空则阻塞等待
+close(ch);              // 关闭: 发送此后再报错; 接收排空剩余即止
+```
+
+- `ch <- v`（SendExpr）/ `<- ch`（RecvExpr）：与 Go channel 同形的词法（`<-` 是最优先级外的最低优先级运算符——`a<-b` 无空格即通道发送，比较请留空格）
+- 线程安全由底层 `queue.Queue` 保证，不自己造锁；阻塞/关闭语义：缓冲满发送阻塞、空接收阻塞、关闭后排空再接收抛 `ChannelClosedError`（显式失败，不返回哑值）
+- 通道是引用语义：传参/赋值共享同一通道（`copy()` 返回自身）
+- 刻意不做：select 多路复用、带超时的 receive（A3 async 期再议）
+
+### 3.13 测试框架深化（TQ1）
+
+在 D1（`--test` + `test_*` 函数 + `assert`）之上的 pytest 子集等价物——无装饰器语法前的约法：
+
+```intent
+def setup() { ... };    // fixture 钩子: 每个用例前由运行器调用
+def teardown() { ... };// fixture 钩子: 每个用例后调用(失败/skip 也清理)
+
+def test_x() {
+    let err = expect_error(fn() { items[99]; }, "IndexError");  // 预期异常
+    skip("环境不具备");                                          // 诚实跳过
+    param_cases([[1, 2], [3, 4]], fn(a, b) { ... });            // 参数化
+    let m = mock("svc"); m(1);                                  // 测试替身
+    assert mock_call_count(m) == 1, "调用被记录";
+};
+```
+
+- `expect_error(fn, type)`：断言 fn() 抛出指定类型——返回捕获的 ErrorValue；未抛错或类型不符 → AssertionError（坏路径也是契约的一部分）
+- `skip(reason)`：抛出 SkipTest，运行器计为「跳过」——既非通过也非失败，摘要单独计数（`9/10 通过, 0 失败, 1 跳过`）
+- `param_cases(cases, fn)`：cases 是用例列表，每项展开传给 fn；失败带用例序号（定位到个案）
+- `mock(name)` / `mock_return(m, v)` / `mock_calls(m)` / `mock_call_count(m)`：记录调用序列的测试替身，可直接调用 `m(args)`
+- setup/teardown 是文件级约定（与 test_* 同文件定义），运行器负责环绕；teardown 自身失败即用例失败
+
+### 3.14 帧快照与事后调试（EX2）
+
+```intent
+python src/mini_intent.py --postmortem tests/_demo_error_stack.intent
+```
+
+- 异常穿帧时，每层 `execute_function`/`_execute_method` 把本帧局部变量快照挂上异常（`_intent_frames`，从外到内）——帧快照取自建帧时挂在 `CallFrame.scope` 上的本帧作用域，各帧各的本地人
+- `--postmortem`：渲染完整诊断（D3）→ 帧快照写盘 `.intent_postmortem.json`（停机后可捡回）→ 帧检视 + 命令循环（`frames` / `frame N` / `vars` / `where` / `quit`）；默认停在出错帧（最内层）
+- 非交互（stdin EOF）自动收尾，退出码 0——postmortem 的职责是接住崩溃，不是复制失败
+- 与 C7 `--debug` 的分工：debugger 事前（打断点逐步走），postmortem 事后（栈已冻结，只检视不执行）
 
 ---
 
 ## 4. 标准库
 
-### 4.1 内置函数（70+，`_setup_builtins` mini_intent.py:3481）
+### 4.1 内置函数（156，`_setup_builtins` mini_intent.py:4305）
 
 | 类别 | 函数（签名） |
 |---|---|
@@ -280,10 +394,26 @@ utils   = "../utils"                                     # 本地路径依赖
 | 类型转换 | `int(x)` `float(x)` `str(x)` `bool(x)` `type_of(x)` `type(x)` |
 | 数学 | `abs(x)` `min(...)` `max(...)` `sum(l)` `sqrt(x)` `pow(a, b)` `floor/ceil/round(x)` `log/exp/cos/sin/tan/acos/asin/atan(x)` `atan2(a, b)` `pi` `random()` `randint(a, b)` |
 | 字符串 | `split(s, sep)` `join(l, sep)` `trim(s)` `ord(c)` `chr(n)` `starts_with/ends_with(s, p)` `replace(s, a, b)` `to_upper/to_lower(s)` `substr(s, start, end)` |
-| Result | `ok(v)` `err(e)` |
+| Result | `ok(v)` `err(e)` `error(type, message)`（构造一等错误值，EX1） |
 | 文件 | `read_file(p)` `write_file(p, c)` `list_dir(p)` `file_exists(p)` `is_dir/is_file(p)` `make_dir(p)` `delete_file(p)` `file_size(p)` `file_modified(p)` |
 | 系统 | `env(k)` `cwd()` `ch_dir(p)` `shell(cmd)` `platform()` `path_join/basename/dirname/ext(p)` `now()` `sleep(ms)` `input(prompt)` `version()` `args()` |
 | 序列化 | `json_parse(s)` `json_dump(v)` |
+| HTTP（B6） | `http_get(url)` `http_post(url, body)` `http_get_json(url)` `http_post_json(url, v)` `http_serve_start(port)` `http_serve_stop(port)`（本地测试服务器，不依赖外网） |
+| SQLite（B7） | `sqlite_open(path)` `sqlite_exec(h, sql)` `sqlite_query(h, sql)` `sqlite_close(h)`（句柄式；查询返回行字典列表） |
+| 正则（B8） | `re_test(p, t)` `re_full_match(p, t)` `re_find_all(p, t)` `re_groups(p, t)` `re_replace(p, r, t)` `re_split(p, t)`（非法模式抛 ValueError） |
+| 日期时间（B4） | `datetime_now()` `datetime_today()` `datetime_parse(iso)` `datetime_format(iso, fmt)` `datetime_add_days/hours(iso, n)` `datetime_diff_days/seconds(a, b)` `datetime_weekday(iso)` `datetime_parts(iso)` `datetime_timestamp(iso)` `datetime_from_timestamp(ts)` `datetime_to_timezone(iso, off)`（ISO 字符串表示；非法输入抛 ValueError） |
+| 压缩编码（B9） | `enc_base64_encode(s)` `enc_base64_decode(s)` `enc_gzip_compress(s)` `enc_gzip_decompress(s)` `enc_urlencode(s)` `enc_urldecode(s)`（gzip 二进制以 base64 文本承载；非法输入抛 ValueError） |
+| 文件通配（SL1） | `glob_match(pattern)`（Python glob 语义，空表=无匹配） |
+| 高级文件（SL1） | `shutil_copy_file(src, dst)` `shutil_move(src, dst)` `shutil_rmtree(path)`（失败抛 RuntimeError） |
+| 临时文件（SL1） | `tempfile_mkdtemp()` `tempfile_mkstemp(prefix)` `tempfile_tempdir()` |
+| UUID（SL1） | `uuid_uuid4()` `uuid_uuid4_hex()` |
+| 摘要（SL1） | `hash_md5/sha1/sha256/sha512(text)`（UTF-8 输入，十六进制摘要） |
+| 消息认证（SL1） | `hmac_sha256(key, msg)` `hmac_sha256_verify(key, msg, sig)`（常量时间比对） |
+| 安全随机（SL1） | `secrets_token_hex(n)` `secrets_rand_below(n)` `secrets_choice(lst)`（CSPRNG；空表选择抛 ValueError） |
+| 十进制（SL1） | `decimal_add/sub/mul/div(a, b)` `decimal_compare(a, b)`（字符串承载，28 位精度；非法数字抛 ValueError，除零抛 ZeroDivisionError） |
+| 内存观测（MM1） | `mem_live_count()` `mem_alloc_total()` `mem_stats_info()` `gc_collect_now()` `ref_count_of(obj)`（设计文档 docs/memory_design.md） |
+| 通道（CC2） | `chan()` `chan(n)`（创建无界/容量 n 通道） `close(ch)`（关闭：发送报错、接收排空即止） |
+| 测试框架（TQ1） | `skip(reason)` `expect_error(fn, type)` `param_cases(cases, fn)` `mock(name)` `mock_return(m, v)` `mock_calls(m)` `mock_call_count(m)` |
 
 ### 4.2 std 模块（`std/*.intent`）
 
@@ -301,15 +431,56 @@ utils   = "../utils"                                     # 本地路径依赖
 | `os` | getenv, curdir, chdir, run, sys_platform, home_dir |
 | `sys` | read_file, write_file, timestamp, debug, exit |
 | `contract` | assert, require_positive, require_non_negative, require_in_range, require_divisor_non_zero, require_non_empty, ensure_result_not_null, ensure_result_in_range, ensure_length_le_original, ensure_result_positive, mut |
+| `http` | get, post, get_json, post_json, serve_start, serve_stop |
+| `sqlite` | open, exec, query, close |
+| `re` | test, full_match, find_all, groups, replace, split |
+| `datetime` | now, today, parse, format, add_days, add_hours, diff_days, diff_seconds, weekday, parts, timestamp, from_timestamp, to_timezone |
+| `encoding` | base64_encode, base64_decode, gzip_compress, gzip_decompress, urlencode, urldecode（gzip 二进制以 base64 文本承载；非法输入抛 ValueError） |
+| `itertools2`（SL2） | permutations, combinations, product, heappush, heappop, bisect_left, bisect_right, insort, class MinHeap, class Deque, class DefaultDict, class ChainMap（纯 Intent；heap/bisect 为有序插入/线性定位的演示级实现，语义与 Python 一致） |
+| `glob`（SL1） | glob（通配符匹配） |
+| `shutil`（SL1） | copy_file, move, rmtree |
+| `tempfile`（SL1） | mkdtemp, mkstemp, tempdir |
+| `uuid`（SL1） | uuid4, uuid4_hex |
+| `hashlib`（SL1） | md5, sha1, sha256, sha512（md5/sha1 仅校验和与兼容用途） |
+| `hmac`（SL1） | sha256, sha256_verify |
+| `secrets`（SL1） | token_hex, rand_below, choice（密码学安全随机） |
+| `decimal`（SL1） | add, sub, mul, div, compare（字符串承载的精确十进制） |
+| `statistics`（SL1） | mean, median, variance, stdev（纯 Intent；总体方差，契约封门） |
+| `textwrap`（SL1） | wrap, fill, indent, shorten（纯 Intent；换行走 chr(10)） |
+| `csv`（SL1） | parse_line, serialize_row, parse（RFC 4180 子集；引号走 chr(34)） |
+| `argparse`（SL1） | parse, get（--key value 对 + 裸 --flag 置真；演示级） |
+| `pathlib`（SL1） | name, stem, suffix, parent, join_path, with_suffix（纯 Intent；不叫 join——避让核心内置） |
+| `memory`（MM1） | mem_live, alloc_total, mem_stats, gc_collect, ref_count（寄生策略：弱引用注册表 + 宿主分代 GC；docs/memory_design.md） |
 | `bim/*` | unit(单位换算) / geometry(Vector3D 等) / transform(矩阵) / solid / polygon / pipe / pipe_fittings / pipe_routing(A* 3D 寻路) |
 
 字典方法（P3.1）：`d.has_key(k)` / `d.keys()` / `d.values()`；dict 键统一为 Python 标量形态（`DictValue._norm_key`），int/float/str/bool 键均可，`{1: "a"}` 与 `squares[3]` 自然工作。
 
-### 4.3 字节码编译器（M10, V0.1 核心子集）
+### 4.3 字节码编译器与栈式 VM（V0.3）
 
-`src/intent_bytecode.py`：AST → 字节码 → 栈式 VM。V0.1 覆盖 let/let mut、算术与比较、print、if/else、while、函数定义与调用（含递归）、return；指令集 20 条（LOAD_CONST/LOAD_VAR/STORE_VAR/算术比较/JUMP/JUMP_IF_FALSE/CALL/RET/PRINT/POP）。跳转用回填（两遍补齐）。VM 有 100 万步死循环熔断。其余特性（闭包/管道/match/Result/契约/with/生成器）属 M11。
-输出约定：编译元信息走 stderr，程序输出走 stdout——`--compile --run-vm` 的 stdout 与解释器 stdout 可直接 diff 对照（tests/vm_check.intent + CI 步骤）。
+`src/intent_bytecode.py`：AST → 字节码 → 栈式 VM。
+
+**原生字节码覆盖**：let/let mut、算术与比较、not、print、if/else、while、break/continue、函数定义与调用（含递归）、return、**闭包**（MAKE_CLOSURE 捕获定义时环境，Env 链实现词法作用域）、**管道**（编译期 desugar 为嵌套调用）、**Result ? 传播**（UNWRAP_OK：Err 跳函数末尾 RET 提前返回）、**契约检查**（requires 进门验收 / ensures 经 return 重写验收，违约抛 ContractViolation）。函数体末条为表达式时其值即返回值（与解释器隐式返回一致）。
+
+**委托通道（RUN_AST）**：match / 类与对象 / with / 方法调用 / for / try / 生成器 / 装饰器 / 泛型 / 默认参数等重特性——AST 节点原样交给树遍历解释器执行，与 VM 共享同一环境（VMScope 适配器：`symbols` 与 `Env.vars` 为同一 dict，双向可见）。VMScope 是 Scope 的真子类，VM 启动时将解释器 `global_scope` 桥接为 VM 全局环境——嵌套 import 沿作用域链找到 VM 里的正版模块树。对象运算符重载（`__add__`/`__eq__`…）经 `_binary_op` 委托，零重复实现。任何未原生覆盖的节点都走委托通道——**任意 Intent 程序可编译**。
+
+**架构**：Emitter（回填跳转/委托上下文）→ VM（值栈 + 帧栈 + 环境链）；VMClosure 是 FunctionValue 子类——解释器侧调用分发零改动。委托块内的 return 经 `_VMReturn` 信号回传 VM 调用链；break/continue 经流控标志回传原生循环。
+
+**V0.3 性能（T7）**：主循环热指令全内联——`stack/push/pop/frames/env/code/ip` 驻留局部变量；LOAD_VAR/STORE_VAR/ASSIGN_VAR 直接走环境链；双侧 IntValue 的算术/比较走快路径（bool 不是 IntValue 子类，`type() is` 精确匹配不误吞）；argc≤1 的闭包调用免列表构造。委托点前同步 `self.env`，慢路径仍走原方法。基准：fib(25) VM ≈788ms vs 解释器 ≈3415ms ≈ **4.3x**（`tests/perf_check.intent`，`Time:` 计时行走 vm_diff 归一化）。
+
+**已知边界**：委托块外的 break/continue 宽松忽略；VM 错误抛原生异常（无 P0.1 诊断渲染）；程序级「返回值」 CLI 摘要行两侧暂不一致。
+
+输出约定：编译元信息走 stderr，程序输出走 stdout——`--compile --run-vm` 的 stdout 与解释器 stdout 可直接 diff 对照。
+差分测试工具：`python tools/vm_diff.py`（默认跑 examples/ + tests/test_*，逐位归一化比对，退出码 1 表示有语义分歧）。
 注：`src/mini_intent.py` 作为 `__main__` 运行时会把自身注册进 `sys.modules['mini_intent']`——辅助模块 `from mini_intent import ...` 才不会重新加载出第二套类定义。
+
+### 4.4 内存管理（MM1，寄生策略）
+
+容器值（List/Dict/Instance）在 `__init__` 即登记进模块级 `_ObjectRegistry`（弱引用表，不拉长寿命）。
+循环垃圾委托宿主 CPython 分代 GC；`gc_collect_now()` = 快照 → `gc.collect()` → 快照，差值即回收容器数。
+语义：`mem_live()` 存活容器数；`alloc_total()` 累计创建（单调增）；`mem_stats()` 含 by_type 分布；
+`ref_count(obj)` 为宿主观测值（含解释器内部引用，只做诊断）。
+设计文档：`docs/memory_design.md`（含 M2/M3 演进与四条已知限制）。
+已知限制：`ListValue.copy()` 不处理环——自引用列表作为 Intent 函数实参会无限递归（形参复制传值语义，M2 期修）。
 
 ---
 
@@ -320,13 +491,18 @@ python src/mini_intent.py <file>           # 执行
 python src/mini_intent.py <file> [args...] # 执行, 额外参数经 args() 读取
 python src/mini_intent.py -c "code"        # 直接执行代码串
 python src/mini_intent.py --check [file]   # 只解析不执行: 干净退出0, 错误退出2
+python src/mini_intent.py --types [file]   # L1: 渐进类型静态检查(mypy-lite: 标注处检查+推断处放过)
 python src/mini_intent.py --compile file.intent [--run-vm]  # M10: 编译字节码(可选 VM 执行)
 python src/mini_intent.py --emit tokens|ast <file>   # 分析结果写文件
 python src/mini_intent.py --test [path]    # 测试(默认 tests/, _ 开头跳过)
 python src/mini_intent.py --lint file.intent         # 静态检查(let 重赋值/空 catch/无契约/未用 import)
 python src/mini_intent.py --doc file.intent          # 生成 markdown 模块文档
 python src/mini_intent.py --fmt file.intent         # 格式化, 输出到 stdout(重定向即写回)
-python src/mini_intent.py --install [url]     # 安装依赖(不带 url 按 intent.toml 批量)
+python src/mini_intent.py --install [url|dir]  # 安装依赖(url 单个; dir 含 intent.toml 按项目批量; 无参按当前目录批量)
+python src/mini_intent.py --install --dry-run [dir]  # PK1: 依赖解析预演(约束合并/冲突检测, 不安装)
+python src/mini_intent.py --debug file.intent  # C7: 调试模式(断点/单步/变量检视/调用栈)
+python src/mini_intent.py --postmortem file.intent  # EX2: 事后调试(帧快照存档 + 崩溃后进场检视)
+python tools/venv.py create|install|list|activate  # PK2: 虚拟环境(.venv 隔离 + 全局缓存 + PATH)
 python src/mini_intent.py --version        # 版本
 python src/mini_intent.py -t / -a          # 只看 tokens / AST
 python src/mini_intent.py -r               # REPL
@@ -334,7 +510,7 @@ python src/mini_intent.py -d               # 演示
 python src/mini_intent.py -p               # 哲学视角翻译
 ```
 
-退出码：0 成功 ｜ 1 运行时/测试失败 ｜ 2 用法/语法错误（`--check`）。
+退出码：0 成功 ｜ 1 运行时/测试失败/类型错误（`--types`）｜ 2 用法/语法错误（`--check`/`--types`）。
 banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景输出纯净）。
 ⚠️ 文件模式当前为**宽松执行**（语法错误警告后继续，退出码 0）——测试模式与 `--check` 严格。CI 请用 `--check` + `--test`。
 
@@ -344,16 +520,22 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 | # | 限制 | 状态 |
 |---|------|------|
-| 1 | 树遍历解释器，无字节码/JIT | 设计选择（清晰优先） |
-| 2 | 并发（async/thread/channel）完全缺失 | 路线图 P3.2 |
-| 3 | 包管理（intent.toml/注册表）缺失，import 仅文件级 | V0.1 ✅ 已实现（2026-10-16：intent.toml + --install + lib 搜索路径；注册表待真实需求） |
+| 1 | 执行引擎 | 双轨：树遍历解释器 + 字节码 VM（V0.3，fib25 ≈4.3x）；无 JIT |
+| 2 | 并发（async/channel） | 🔜 部分实现（2026-10-18 CC1：spawn + scope 结构化并发，Python threading 演示级；CC2：channel 通信原语 `ch <- v` / `<- ch` / close；async/await（A3）排队） |
+| 3 | 包管理（intent.toml/注册表）缺失，import 仅文件级 | ✅ 已实现（2026-10-16：intent.toml + --install + lib 搜索路径；2026-10-18：本地目录注册表 publish/list/install；PK1 依赖解析器 semver 约束 + 冲突解决 + intent.lock，--dry-run 预演） |
 | 4 | 位运算、复合赋值、`:=`/`++`/`--` 词法接受但语义未实现 | 预留 |
 | 5 | match range 模式、类型别名/Union 未实现 | ~~路线图 P1.3~~ ✅ 已实现（2026-10-16，match range 仍未实现） |
-| 6 | 静态类型检查缺失（Resolver 只做作用域分析） | 设计选择（契约优先） |
+| 6 | 静态类型检查缺失（Resolver 只做作用域分析） | ✅ 已实现（2026-10-18 L1：`--types` 渐进类型检查——标注处检查 + 推断处放过，mypy-lite 最小切片；容器元素类型/全量推断留待完整版） |
 | 7 | f-string/多行字符串：插值 `${}` 已支持；`f"..."` 前缀与 `"""` 三引号未实现 | ✅ 已实现（2026-10-16） |
-| 8 | formatter/linter/LSP 缺失 | formatter ✅ linter ✅ doc ✅ 已实现（2026-10-16）；LSP 仍缺 |
+| 8 | formatter/linter/LSP 缺失 | formatter ✅ linter ✅ doc ✅ 已实现（2026-10-16）；LSP ✅ 已实现（2026-10-18，tools/lsp/） |
 | 9 | with 语句 | ✅ 已实现（2026-10-16） |
 | 10 | yield from / 泛型约束 | ✅ 已实现（2026-10-16） |
+| 11 | `//` 是行注释——整除运算符在源码中不可达（`5 // 0` 被词法吞为注释） | 已知语言限制（用 `/` 真除法；修法需词法上下文歧义消解，排队） |
+| 12 | `str(inf)` 抛 OverflowError（1e308*10 → inf 时）；字典缺键抛 RuntimeError（KeyError 转译）；`len(None)` 抛 AttributeError | 行为快照，均可被 catch 捕获（见 tests/test_fuzz.intent） |
+| 13 | 内置无方法式调用：`lst.push(x)` 不被支持，须写自由函数 `push(lst, x)`（成员访问不回退内置） | 语法选择（类方法才行）； |
+| 14 | `ListValue.copy()` 不处理环：自引用列表作 Intent 函数实参 → 无限递归（形参复制传值） | M2 期修（copy 带 memo 表）；诊断路径直调内置绕行 |
+| 15 | `import std.X` 将模块全部符号注入当前作用域，可能遮蔽核心内置（如 pathlib.join 曾遮蔽 join） | 命名避让（join_path）；根治需改 import 语义，排队 |
+| 16 | `and`/`or` 原为两侧 eager 求值（`i < len(l) and l[i] < x` 边界越界） | ✅ 已修复（2026-10-18：短路求值，返回类型保持 BoolValue；VM 经委托通道同受益） |
 
 ---
 
@@ -368,4 +550,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.2.0 · 2026-10-16 从实现提取 · 与 mini_intent.py @ c93cd68+ 对齐*
+*规范版本 v1.5.0 · 2026-10-18 从实现提取 · 与 mini_intent.py 工作区对齐（v2.5.0：SL1 高频标准库 / SL2 组合数学 / MM1 内存管理 / else if / and-or 短路）*

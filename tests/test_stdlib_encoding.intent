@@ -1,0 +1,89 @@
+// 标准库回归测试（B9）— std/encoding
+// base64/gzip/urlencode round-trip + 已知向量 + 非法输入。
+// 纪律一：Intent 字符串不做转义处理——本文件无模式串，无此顾虑。
+// 纪律二：gzip 头部含时间戳，不断言压缩结果跨调用相等，只断言 round-trip 与长度收敛。
+
+import std.encoding;
+
+def test_base64_known_vector() {
+    assert std.encoding.base64_encode("hello") == "aGVsbG8=", "hello 向量";
+    assert std.encoding.base64_encode("") == "", "空串编码为空";
+    assert std.encoding.base64_encode("中文") == "5Lit5paH", "UTF-8 中文向量";
+    assert std.encoding.base64_decode("aGVsbG8=") == "hello", "解码 hello";
+    assert std.encoding.base64_decode("5Lit5paH") == "中文", "解码中文";
+};
+
+def test_base64_roundtrip() {
+    let samples = ["心学为体，禅道为翼，马哲为用", "Hello, Intent!", "a+b/c=d", "混合 mix 123 中英文"];
+    for s in samples {
+        assert std.encoding.base64_decode(std.encoding.base64_encode(s)) == s, "round-trip 保持";
+    };
+};
+
+def test_base64_invalid_raises() {
+    let mut caught = "";
+    try {
+        let bad = std.encoding.base64_decode("!!!not-base64!!!");
+    } catch e: ValueError {
+        caught = e.message;
+    };
+    assert caught != "", "非法 base64 抛 ValueError 且带消息";
+};
+
+def test_gzip_roundtrip() {
+    let text = "心学为体，禅道为翼，马哲为用——知行合一，事上磨炼。";
+    let packed = std.encoding.gzip_compress(text);
+    assert std.encoding.gzip_decompress(packed) == text, "gzip round-trip";
+    assert std.encoding.gzip_decompress(std.encoding.gzip_compress("")) == "", "空串 round-trip";
+};
+
+def test_gzip_shrinks_repetitive() {
+    let mut text = "";
+    for i in range(0, 60) {
+        text = text + "Intent语言";
+    };
+    let packed = std.encoding.gzip_compress(text);
+    assert len(packed) < len(text), "高重复文本压缩后显著变小";
+};
+
+def test_gzip_invalid_raises() {
+    let mut caught = "";
+    try {
+        // 合法 base64 但不是 gzip 流
+        let bad = std.encoding.gzip_decompress("aGVsbG8=");
+    } catch e: ValueError {
+        caught = e.message;
+    };
+    assert caught != "", "非 gzip 数据抛 ValueError 且带消息";
+};
+
+def test_urlencode_known_vector() {
+    assert std.encoding.urlencode(" ") == "%20", "空格编码";
+    assert std.encoding.urlencode("a b&c?d=e") == "a%20b%26c%3Fd%3De", "特殊字符编码";
+    assert std.encoding.urlencode("中文") == "%E4%B8%AD%E6%96%87", "UTF-8 中文编码";
+    assert std.encoding.urlencode("") == "", "空串编码为空";
+};
+
+def test_urldecode_known_vector() {
+    assert std.encoding.urldecode("%20") == " ", "空格解码";
+    assert std.encoding.urldecode("a%20b%26c") == "a b&c", "混合解码";
+    assert std.encoding.urldecode("%E4%B8%AD%E6%96%87") == "中文", "UTF-8 中文解码";
+};
+
+def test_urlencode_roundtrip() {
+    let samples = ["心学为体 禅道为翼", "query=意图&lang=zh", "100% #hash", "路径/带斜杠"];
+    for s in samples {
+        assert std.encoding.urldecode(std.encoding.urlencode(s)) == s, "round-trip 保持";
+    };
+};
+
+def test_urldecode_invalid_raises() {
+    let mut caught = "";
+    try {
+        // %FF 不是合法 UTF-8 序列
+        let bad = std.encoding.urldecode("%FF");
+    } catch e: ValueError {
+        caught = e.message;
+    };
+    assert caught != "", "非法 UTF-8 百分号序列抛 ValueError 且带消息";
+};

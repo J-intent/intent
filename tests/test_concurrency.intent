@@ -1,0 +1,91 @@
+// 结构化并发回归测试(CC1) — spawn + scope: 作用域退出自动 join
+// 演示级(Python threading): 任务跑在独立解释器上, 闭包作用域共享
+
+def test_scope_joins_all_tasks() {
+    let mut results = [];
+    def work(lo: Int, hi: Int) {
+        let mut s = 0;
+        for i in range(lo, hi) {
+            s = s + i;
+        };
+        push(results, s);
+    };
+    scope {
+        spawn work(0, 50);
+        spawn work(50, 100);
+    };
+    let mut total = 0;
+    for v in results {
+        total = total + v;
+    };
+    assert total == 4950, "scope 退出即 join: 两个任务结果到齐(0..99 求和)";
+};
+
+def test_scope_joins_before_next_stmt() {
+    // join 的时序保证: 出 scope 后任务必已完成
+    let mut done = 0;
+    def slow() {
+        let mut i = 0;
+        while i < 50000 {
+            i = i + 1;
+        };
+        done = 1;
+    };
+    scope {
+        spawn slow();
+    };
+    assert done == 1, "作用域退出时任务已完成(结构化并发的核心承诺)";
+};
+
+def test_spawn_error_propagates_at_join() {
+    let mut caught_type = "";
+    def boom() {
+        raise error("ValueError", "任务内爆炸");
+    };
+    try {
+        scope {
+            spawn boom();
+        };
+    } catch e {
+        caught_type = e.type;
+    };
+    assert caught_type == "ValueError", "任务异常在 join 处重抛(不沉没)";
+};
+
+def test_spawn_outside_scope_rejected() {
+    let mut caught = 0;
+    def noop() {
+        return 1;
+    };
+    try {
+        spawn noop();
+    } catch e {
+        caught = 1;
+    };
+    assert caught == 1, "scope 外的 spawn 被拒绝(没有孤儿线程)";
+};
+
+def test_nested_scopes_join_independently() {
+    let mut log = [];
+    def rec(tag: String) {
+        push(log, tag);
+    };
+    scope {
+        spawn rec("outer");
+        scope {
+            spawn rec("inner");
+        };
+    };
+    assert len(log) == 2, "嵌套 scope 各自 join";
+};
+
+def test_spawn_lambda() {
+    // inline lambda 也可派生
+    let mut hits = 0;
+    scope {
+        spawn fn() {
+            hits = hits + 1;
+        };
+    };
+    assert hits == 1, "lambda 任务被 join";
+};

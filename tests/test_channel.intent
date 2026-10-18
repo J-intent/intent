@@ -1,0 +1,123 @@
+// channel 通信回归测试(CC2) — ch <- v / <- ch: 线程安全通道
+// Go channel 语义子集: 缓冲/阻塞/关闭排空; 多生产者多消费者
+
+def test_send_recv_basic() {
+    let ch = chan();
+    scope {
+        spawn fn() {
+            ch <- 42;
+        };
+    };
+    let v = <- ch;
+    assert v == 42, "基本收发: spawn 发送, 主线程接收";
+};
+
+def test_buffered_channel_fifo() {
+    let ch = chan(3);
+    // 缓冲未满不阻塞: 连发 3 个不必等接收方
+    ch <- 1;
+    ch <- 2;
+    ch <- 3;
+    let a = <- ch;
+    let b = <- ch;
+    let c = <- ch;
+    assert a == 1 and b == 2 and c == 3, "缓冲通道 FIFO 顺序(容量 3)";
+};
+
+def test_multi_producer_multi_consumer() {
+    let ch = chan();
+    let mut received = [];
+    def producer(id: Int) {
+        for i in range(0, 5) {
+            ch <- id * 10 + i;
+        };
+    };
+    def consumer() {
+        let mut n = 0;
+        while n < 5 {
+            let v = <- ch;
+            push(received, v);
+            n = n + 1;
+        };
+    };
+    scope {
+        spawn producer(1);
+        spawn producer(2);
+        spawn consumer();
+        spawn consumer();
+    };
+    assert len(received) == 10, "多生产者多消费者: 10 条消息全部到达";
+    let mut total = 0;
+    for v in received {
+        total = total + v;
+    };
+    // 1x 系: 10+11+12+13+14 = 60; 2x 系: 20+21+22+23+24 = 110
+    assert total == 170, "消息内容无损(1x 系 60 + 2x 系 110)";
+};
+
+def test_close_drains_then_errors() {
+    let ch = chan();
+    scope {
+        spawn fn() {
+            ch <- 7;
+            close(ch);
+        };
+    };
+    let v = <- ch;
+    assert v == 7, "关闭前发送的数据仍可读出(排空语义)";
+    let mut closed_seen = 0;
+    try {
+        let x = <- ch;
+    } catch e {
+        closed_seen = 1;
+    };
+    assert closed_seen == 1, "排空后从关闭通道接收报错(显式失败)";
+};
+
+def test_send_after_close_rejected() {
+    let ch = chan();
+    close(ch);
+    let mut rejected = 0;
+    try {
+        ch <- 1;
+    } catch e {
+        rejected = 1;
+    };
+    assert rejected == 1, "向已关闭通道发送被拒绝(Go 语义)";
+};
+
+def test_recv_on_non_channel_rejected() {
+    let mut caught = 0;
+    try {
+        let x = <- 42;
+    } catch e {
+        caught = 1;
+    };
+    assert caught == 1, "对非通道接收报 TypeError";
+};
+
+def test_send_on_non_channel_rejected() {
+    let mut caught = 0;
+    try {
+        42 <- 1;
+    } catch e {
+        caught = 1;
+    };
+    assert caught == 1, "向非通道发送报 TypeError";
+};
+
+def test_worker_to_worker_channel() {
+    // 通道作为跨任务通信的中介: 两个 worker 经 channel 传递
+    let ch = chan();
+    let mut got = 0;
+    scope {
+        spawn fn() {
+            let v = <- ch;
+            got = v + 1;
+        };
+        spawn fn() {
+            ch <- 99;
+        };
+    };
+    assert got == 100, "worker 间经 channel 握手(99 过通道 +1)";
+};

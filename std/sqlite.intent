@@ -1,0 +1,26 @@
+// std/sqlite — SQLite 数据库模块（B7）
+// 心学为体：增删查改是心的四种动作——创、改、删、问
+// 禅道为翼：事务提交如落叶归土，连接关闭如关门就寝
+// 马哲为用：数据持久化的地面部队（内置 sqlite_* 支撑）
+//
+// 句柄式 API：open 拿句柄，exec/query 用句柄，close 还句柄。
+
+// open(path: String) → Int  打开数据库，返回句柄（":memory:" 为内存库）
+def open(path: String) -> Int {
+    return sqlite_open(path);
+}
+
+// exec(handle: Int, sql: String) → Int  执行写操作（建表/插入/更新/删除），返回影响行数
+def exec(handle: Int, sql: String) -> Int {
+    return sqlite_exec(handle, sql);
+}
+
+// query(handle: Int, sql: String) → List  执行查询，返回行字典列表
+def query(handle: Int, sql: String) -> List {
+    return sqlite_query(handle, sql);
+}
+
+// close(handle: Int)  关闭连接
+def close(handle: Int) {
+    sqlite_close(handle);
+}

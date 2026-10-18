@@ -1,0 +1,7 @@
+// gamma — 冲突场景的另一极(PK1): 要 mathkit ^2.0, 而 mathkit 只有 1.2.0
+// 与 alpha 的 ^1.0 无公共兼容版本 → 解析器必须报冲突
+export sextuple;
+
+def sextuple(x: Int): Int requires x >= 0 {
+    return x * 6;
+};

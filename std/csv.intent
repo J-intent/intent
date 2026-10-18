@@ -1,0 +1,72 @@
+// std/csv.intent — 逗号分隔值(SL1, 纯 Intent 实现)
+// 心学为体：表格是二维的世间法——行列交错处皆有规矩
+// 禅道为翼：引号内的逗号不是逗号，是引号的家事
+// 马哲为用：parse_line/serialize_row/parse，RFC 4180 子集
+//
+// 纪律：Intent 字符串无转义——引号字符走 chr(34)，换行走 chr(10)。
+// 语义对齐：双引号包裹字段、字段内双引号以 "" 转义、引号内逗号不切分。
+
+export parse_line, serialize_row, parse;
+
+// parse_line(line: String) → List[String]  解析单行(引号/转义/空字段)
+def parse_line(line: String) -> List[String] {
+    let q = chr(34);
+    let comma = ",";
+    let mut fields = [];
+    let mut cur = "";
+    let mut in_quotes = false;
+    let mut i = 0;
+    while i < len(line) {
+        let ch = substr(line, i, i + 1);
+        if ch == q {
+            if in_quotes and i + 1 < len(line) and substr(line, i + 1, i + 2) == q {
+                cur = cur + q;          // 双引号 → 单引号
+                i = i + 2;
+            } else {
+                in_quotes = !in_quotes;  // 进出引号态
+                i = i + 1;
+            }
+        } else if ch == comma and !in_quotes {
+            fields = fields + [cur];
+            cur = "";
+            i = i + 1;
+        } else {
+            cur = cur + ch;
+            i = i + 1;
+        }
+    }
+    fields = fields + [cur];
+    return fields;
+}
+
+// serialize_row(fields: List[String]) → String  生成单行(按需加引号)
+// 含逗号/引号/换行的字段加引号包裹, 引号翻倍转义
+def serialize_row(fields: List[String]) -> String {
+    let q = chr(34);
+    let nl = chr(10);
+    let comma = ",";
+    let mut out = [];
+    for f in fields {
+        let has_comma = len(split(f, comma)) > 1;
+        let has_quote = len(split(f, q)) > 1;
+        let has_nl = len(split(f, nl)) > 1;
+        if has_comma or has_quote or has_nl {
+            out = out + [q + replace(f, q, q + q) + q];
+        } else {
+            out = out + [f];
+        }
+    }
+    return join(comma, out);
+}
+
+// parse(text: String) → List[List[String]]  解析多行文本(空文本→空表)
+def parse(text: String) -> List[List[String]] {
+    let lines = split(text, chr(10));
+    let mut out = [];
+    for ln in lines {
+        if len(ln) > 0 {
+            out = out + [parse_line(ln)];
+        }
+    }
+    return out;
+}

@@ -1,0 +1,7 @@
+// alpha — 依赖 mathkit 的演示包(PK1 fixture, 钻石依赖的一极)
+import mathkit;
+export scale;
+
+def scale(x: Int): Int requires x >= 0 {
+    return mathkit.double(x) + mathkit.triple(x);
+};

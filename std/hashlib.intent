@@ -1,0 +1,29 @@
+// std/hashlib.intent — 密码学摘要(SL1)
+// 心学为体：摘要是文本的指纹——一叶落而知秋
+// 禅道为翼：单向的变换，去了就不回
+// 马哲为用：hash_* 内置支撑（Python hashlib 语义，UTF-8 编码输入）
+//
+// 已知边界：md5/sha1 已被密码学实践判死刑，此处保留只为校验和与
+//  legacy 兼容；安全场景一律用 sha256 起步。
+
+export md5, sha1, sha256, sha512;
+
+// md5(text: String) → String  MD5 十六进制摘要(32 字符, 仅校验和用途)
+def md5(text: String) -> String {
+    return hash_md5(text);
+}
+
+// sha1(text: String) → String  SHA-1 十六进制摘要(40 字符, 仅兼容用途)
+def sha1(text: String) -> String {
+    return hash_sha1(text);
+}
+
+// sha256(text: String) → String  SHA-256 十六进制摘要(64 字符, 安全起点)
+def sha256(text: String) -> String {
+    return hash_sha256(text);
+}
+
+// sha512(text: String) → String  SHA-512 十六进制摘要(128 字符)
+def sha512(text: String) -> String {
+    return hash_sha512(text);
+}

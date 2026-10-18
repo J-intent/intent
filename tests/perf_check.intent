@@ -1,0 +1,21 @@
+// tests/perf_check.intent — 性能基准（T7 / D5 判定文件）
+// 心学为体：fib(25) 是递归调用的试金石——解释器每访一节点便临场求值，
+//           VM 先沉淀为字节码而后执行。同一段意，两种 Execution 路径。
+// 禅道为翼：编译一次，执行多次；心不再每次都从头想起。
+// 马哲为用：判定标准命令级 — --compile --run-vm 输出须含 fib(25) = 75025。
+//
+// 用法：
+//   解释器:  python src/mini_intent.py tests/perf_check.intent
+//   VM:      python src/mini_intent.py --compile tests/perf_check.intent --run-vm
+// 两者 stdout 应一致（VM 差分纪律），耗时见各自输出末行。
+
+def fib(n: Int): Int {
+    if n < 2 { return n; };
+    return fib(n - 1) + fib(n - 2);
+};
+
+let t0 = now();
+let r = fib(25);
+let ms = (now() - t0) * 1000.0;
+print("fib(25) = " + str(r));
+print("Time: " + str(int(ms)) + " ms");

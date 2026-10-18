@@ -1,0 +1,7 @@
+[project]
+name = "pkg-fixture-conflict"
+version = "0.1.0"
+
+[deps]
+alpha = { path = "../pkg_fixture/lib/alpha", version = "^1.0" }
+gamma = { path = "lib/gamma", version = "^1.0" }
