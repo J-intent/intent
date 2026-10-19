@@ -105,7 +105,7 @@ class Resolver:
         from mini_intent import (
             VariableDecl, Assignment, ReturnStmt, PrintStmt,
             IfStmt, WhileStmt, ForStmt, BreakStmt, ContinueStmt,
-            ImportStmt, ExportStmt, Expression, FunctionDef, SliceExpr, TernaryExpr, Program, ClassStmt, AssertStmt,
+            ImportStmt, ExportStmt, Expression, FunctionDef, SliceExpr, TernaryExpr, WalrusExpr, Program, ClassStmt, AssertStmt,
             RaiseStmt, SpawnStmt, ScopeStmt
         )
 
@@ -318,7 +318,8 @@ class Resolver:
             MemberAccess, ListExpr, DictExpr, SubscriptExpr, PipeExpr, IfExpr,
             MatchExpr, TryExpr, ThisExpr, SetExpr, GetExpr, ThisExpr, SetExpr, GetExpr,
             SendExpr, RecvExpr,
-            LiteralPattern, VariablePattern, WildcardPattern, OrPattern, ConstructorPattern
+            LiteralPattern, VariablePattern, WildcardPattern, OrPattern, ConstructorPattern,
+            YieldExpr
         )
 
         if isinstance(expr, Literal):
@@ -412,6 +413,18 @@ class Resolver:
             self._resolve_expr(expr.condition)
             self._resolve_expr(expr.then_expr)
             self._resolve_expr(expr.else_expr)
+
+        elif isinstance(expr, WalrusExpr):
+            # S2a: 海象 := — 名入当前作用域(与 Assignment 同语义), 值侧照常解析
+            self._declare(expr.name)
+            self._resolve_expr(expr.value)
+
+        elif isinstance(expr, YieldExpr):
+            # S3: yield 表达式 — 产出值/委派源照常解析(闭包变量要标注深度)
+            if expr.value:
+                self._resolve_expr(expr.value)
+            if expr.from_expr:
+                self._resolve_expr(expr.from_expr)
 
     def _resolve_pattern(self, pattern) -> None:
         """解析匹配模式"""

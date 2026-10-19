@@ -1,0 +1,87 @@
+// M2: 实例属性访问缓存(内联缓存的树遍历等价物)回归测试
+// 切片范围: ① 缓存表 ② 命中+正确性 ③ 写透同步 ④ 方法查找缓存 ⑤ 拷贝隔离 ⑥ 微基准命中率
+// (隐藏类/2x 提速为后续迭代, 本版锁定语义与可观测性)
+// 语义: set() 写透 — 写入即同步缓存, 因此 init 赋过的字段读即命中;
+//       未命中只发生在从未写入的属性/首次方法查找。
+
+class Point {
+    def init(x: Int, y: Int) {
+        this.x = x;
+        this.y = y;
+    }
+    def sum(): Int {
+        return this.x + this.y;
+    }
+}
+
+// ── 缓存命中且读回值正确(init 写透, 字段读即命中) ──
+def test_cache_hit_and_correct() {
+    cache_reset();
+    let p = Point(3, 4);
+    let a = p.x;   // 命中(init 写透)
+    let b = p.x;   // 命中
+    let c = p.y;   // 命中
+    let d = p.y;   // 命中
+    let stats = cache_stats();
+    assert stats[0] == 4, "四次缓存命中";
+    assert stats[1] == 0, "零未命中(字段均经 init 写透)";
+    assert a == 3 and b == 3, "x 读回正确";
+    assert c == 4 and d == 4, "y 读回正确";
+}
+
+// ── 方法查找: 首次未命中填缓存, 之后命中 ──
+def test_cache_method_lookup() {
+    cache_reset();
+    let p = Point(5, 6);
+    let s1 = p.sum();  // sum 查找未命中 → 入缓存; this.x/this.y 命中
+    let s2 = p.sum();  // sum 查找命中
+    assert s1 == 11 and s2 == 11, "方法调用结果正确";
+    let stats = cache_stats();
+    assert stats[1] == 1, "方法查找仅首次未命中";
+    assert stats[0] == 5, "其余全命中(2 次查找 + 4 次 this 字段读)";
+}
+
+// ── 写入后缓存同步(写透, 无失效窗口, 不返陈旧值) ──
+def test_cache_write_through() {
+    cache_reset();
+    let p = Point(1, 2);
+    let a = p.x;      // 命中(init 写透)
+    p.x = 10;         // set() 写透 → 缓存 {x: 10}
+    let b = p.x;      // 命中 → 必须是 10, 不是陈旧的 1
+    assert b == 10, "成员赋值后读到新值";
+    p.x += 5;         // 复合赋值同样走 set()
+    let c = p.x;
+    assert c == 15, "复合赋值后读到新值";
+    let stats = cache_stats();
+    assert stats[0] == 3, "三次命中";
+    assert stats[1] == 0, "零未命中";
+}
+
+// ── 微基准: 稳态属性/方法读取的命中率 ──
+def bench_attr_hit_rate() {
+    cache_reset();
+    let p = Point(0, 0);
+    let mut total = 0;
+    let mut i = 0;
+    while i < 2000 {
+        total = total + p.x + p.y;
+        i = i + 1;
+    }
+    // 方法查找链: 100 次调用 = 100 次查找 + 200 次 this 字段读
+    let mut s = 0;
+    let mut j = 0;
+    while j < 100 {
+        s = s + p.sum();
+        j = j + 1;
+    }
+    let stats = cache_stats();
+    let hits = stats[0];
+    let misses = stats[1];
+    let reads = hits + misses;
+    print("微基准: 属性/方法读取 ", reads, " 次, 命中 ", hits, ", 未命中 ", misses, ", 命中率 ", hits * 100 / reads, "%");
+    assert total == 0, "字段读基准结果正确";
+    assert s == 0, "方法调基准结果正确";
+    assert reads == 4300, "2000 轮×2 字段 + 100 次方法查找 + sum 内 2×100 次 this 读";
+    assert misses == 1, "唯一未命中 = sum 的首次查找";
+    assert hits > misses * 100, "稳态命中占绝对多数(>99%)";
+}

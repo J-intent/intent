@@ -50,7 +50,7 @@ except ImportError:
             print("安装命令: pip install pyreadline3", file=sys.stderr)
 
 # ==================== 常量定义 ====================
-VERSION = "2.8.0"
+VERSION = "2.21.0"
 PHILOSOPHY_SLOGAN = "心学为体,禅道为翼,马哲为用"
 
 # ==================== 哲学翻译器 ====================
@@ -304,15 +304,37 @@ class Lexer:
                 self.advance(2)  # 跳过*/
 
     def read_string(self):
-        """读取字符串字面量 — 支持三引号多行字符串(P1.2)"""
+        """读取字符串字面量 — 支持三引号多行字符串(P1.2)
+
+        S2b: 插值区 ${...} 内引号不终止字符串 — "${d["k"]}" 合法
+        (嵌套引号; 插值区内再遇引号按子字符串跳过, 括号深度计数)。
+        """
         quote = self.current_char()
         # 三引号多行字符串: """...""" 或 '''...'''
         if self.code[self.pos:self.pos + 3] == quote * 3:
             self.advance(3)  # 跳过开头的三引号
             start_pos = self.pos
+            interp_depth = 0
             while self.current_char():
-                if self.code[self.pos:self.pos + 3] == quote * 3:
+                if interp_depth == 0 and self.code[self.pos:self.pos + 3] == quote * 3:
                     break
+                c = self.current_char()
+                if c == '\\':  # 处理转义字符
+                    self.advance()
+                    self.advance()
+                    continue
+                if c == '$' and self.peek_char() == '{':
+                    interp_depth += 1
+                    self.advance()
+                    self.advance()
+                    continue
+                if c == '{':
+                    interp_depth += 1
+                elif c == '}' and interp_depth > 0:
+                    interp_depth -= 1
+                elif c in '"\'' and interp_depth > 0:
+                    self._skip_nested_string(c)
+                    continue
                 self.advance()
             if not self.current_char():
                 raise SyntaxError(f"未结束的多行字符串,行 {self.line}")
@@ -326,9 +348,27 @@ class Lexer:
         start_pos = self.pos
         self.advance()  # 跳过开头的引号
 
-        while self.current_char() and self.current_char() != quote:
-            if self.current_char() == '\\':  # 处理转义字符
+        interp_depth = 0
+        while self.current_char():
+            c = self.current_char()
+            if c == '\\':  # 处理转义字符
                 self.advance()
+                self.advance()
+                continue
+            if interp_depth == 0 and c == quote:
+                break
+            if c == '$' and self.peek_char() == '{':
+                interp_depth += 1
+                self.advance()
+                self.advance()
+                continue
+            if c == '{':
+                interp_depth += 1
+            elif c == '}' and interp_depth > 0:
+                interp_depth -= 1
+            elif c in '"\'' and interp_depth > 0:
+                self._skip_nested_string(c)
+                continue
             self.advance()
 
         if not self.current_char():
@@ -340,6 +380,19 @@ class Lexer:
         self._pending_fstring = False
         self.tokens.append(tok)
         self.advance()  # 跳过结尾的引号
+
+    def _skip_nested_string(self, quote_char: str):
+        """插值区内嵌套字符串: 从当前引号跳到收尾引号之后(\\ 转义感知)"""
+        self.advance()  # 过开引号
+        while self.current_char():
+            if self.current_char() == '\\':
+                self.advance()
+                self.advance()
+                continue
+            if self.current_char() == quote_char:
+                self.advance()  # 过收尾引号
+                return
+            self.advance()
 
     def read_number(self):
         """读取数字"""
@@ -393,6 +446,13 @@ class Lexer:
     def read_operator_or_symbol(self):
         """读取运算符或符号"""
         char = self.current_char()
+
+        # S2a: := 海象运算符 — ':' 在单字符快通道里, 提前合并为双字符
+        # (:: 双冒号不受影响: 后字符是 ':' 不是 '=')
+        if char == ':' and self.peek_char() == '=':
+            self.tokens.append(Token(TokenType.OPERATOR, ':=', self.line, self.column, self.filename))
+            self.advance(2)
+            return
 
         # 先检查是否是标点符号
         if char in '(){}[],:;.?@' :
@@ -699,6 +759,29 @@ class ExportStmt(ASTNode):
 class Expression(ASTNode):
     """表达式基类"""
     pass
+
+@dataclass
+class YieldExpr(Expression):
+    """S3: yield 表达式 — `let x = yield v` 的递送点(send 的值即本表达式值)"""
+    value: Optional["Expression"] = None
+    from_expr: Optional["Expression"] = None  # yield from expr 委派转发
+    line: int = 0
+    column: int = 0
+
+
+def _expr_contains_yield(node) -> bool:
+    """S3: 递归检测 AST 节点(含表达式子树)中是否有 YieldExpr"""
+    if isinstance(node, YieldExpr):
+        return True
+    if hasattr(node, '__dataclass_fields__'):
+        for f in node.__dataclass_fields__:
+            if _expr_contains_yield(getattr(node, f, None)):
+                return True
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            if _expr_contains_yield(item):
+                return True
+    return False
 
 @dataclass
 class SendExpr(Expression):
@@ -1086,9 +1169,18 @@ class Parser:
         return func
 
     def _has_yield_in_body(self, body: List[ASTNode]) -> bool:
-        """递归检测函数体中是否包含 yield 语句"""
+        """递归检测函数体中是否包含 yield(语句或表达式 — S3: `let x = yield v`)
+
+        嵌套 FunctionDef 不递归 — 它的 yield 属于它自己(旧版递归进嵌套
+        函数体会把外层误标成生成器: 饿收集时代被掩盖, S3 真惰性后
+        「调用即返回生成器」会直接吃掉外层执行 — 回归已锁)。
+        """
         for stmt in body:
             if isinstance(stmt, YieldStmt):
+                return True
+            if isinstance(stmt, FunctionDef):
+                continue  # 嵌套函数: 它的生成器性在它自己调用时判定
+            if _expr_contains_yield(stmt):
                 return True
             if hasattr(stmt, 'body'):
                 if self._has_yield_in_body(stmt.body):
@@ -1426,14 +1518,17 @@ class Parser:
         saved_token = self.current_token
         expr = self.parse_expression()
         if expr:
-            # 下标赋值检测: SubscriptExpr 后跟赋值操作符
-            if isinstance(expr, SubscriptExpr) and self.current_token and self.current_token.value in ('=', '+=', '-=', '*=', '/=', '%=', '**=', '//='):
+            # 下标/切片赋值检测: SubscriptExpr/SliceExpr 后跟赋值操作符
+            # (S2a: l[a:b] = v — 切片读取的产物是 SliceExpr, 同样可作赋值目标)
+            if isinstance(expr, (SubscriptExpr, SliceExpr)) and self.current_token and self.current_token.value in ('=', '+=', '-=', '*=', '/=', '%=', '**=', '//='):
                 op = self.current_token.value
                 self.advance()
                 value = self.parse_expression()
                 self.expect(TokenType.SYMBOL, ';')
+                # SliceExpr 整体即索引(切片); SubscriptExpr 取内层 index
+                index_expr = expr if isinstance(expr, SliceExpr) else expr.index
                 return SubscriptAssignment(
-                    obj=expr.obj, index=expr.index, value=value, op=op,
+                    obj=expr.obj, index=index_expr, value=value, op=op,
                     line=expr.line, column=expr.column
                 )
             # 跳过后续换行 → 函数体末尾的表达式允许省略分号
@@ -1703,6 +1798,28 @@ class Parser:
 
         self.expect(TokenType.SYMBOL, ';')
         return stmt
+
+    def parse_yield_expr(self) -> YieldExpr:
+        """解析 yield 表达式(S3) — yield [expr] / yield from expr
+
+        语句位 yield 走 parse_yield_stmt; 表达式位(赋值右侧/实参/运算)
+        走本入口 — yield 产出的同时可接收 send 进来的值:
+        `let received = yield produced;`
+        """
+        start_token = self.expect(TokenType.KEYWORD, 'yield')
+        expr = YieldExpr(line=start_token.line, column=start_token.column)
+
+        if self.match(TokenType.KEYWORD, 'from'):
+            self.advance()
+            expr.from_expr = self.parse_expression()
+            return expr
+
+        # 裸 yield: 后面是 ; } 或换行 — 无产出值(对齐语句形语义)
+        if not (self.match(TokenType.SYMBOL, ';')
+                or self.match(TokenType.SYMBOL, '}')
+                or self.match(TokenType.NEWLINE)):
+            expr.value = self.parse_expression()
+        return expr
 
     def parse_print_stmt(self) -> PrintStmt:
         """解析打印语句"""
@@ -2142,6 +2259,16 @@ class Parser:
         与 Go 的 ch <- v 语句位一致。
         """
         expr = self.parse_ternary()
+        # S2a: 海象赋值 := — 表达式级赋值, 左部必须是变量;
+        # 右部递归吃三元级(or/and/管道都低于它), `x := a or b` => `x := (a or b)`
+        if self.match(TokenType.OPERATOR, ':='):
+            op_token = self.current_token
+            self.advance()
+            if not isinstance(expr, Variable):
+                self.error(op_token, "海象赋值 := 左侧必须是变量名(如 (n := f()))")
+            value = self.parse_ternary()
+            expr = WalrusExpr(name=expr.name, value=value,
+                              line=op_token.line, column=op_token.column)
         while self.match(TokenType.OPERATOR) and self.current_token.value == '<-':
             op_token = self.current_token
             self.advance()
@@ -2443,6 +2570,10 @@ class Parser:
         elif self.match(TokenType.KEYWORD, 'fn'):
             return self.parse_lambda_expr()
 
+        # S3: yield 表达式 — let x = yield v; (send 的递送点)
+        elif self.match(TokenType.KEYWORD, 'yield'):
+            return self.parse_yield_expr()
+
         # 变量
         elif self.match(TokenType.IDENTIFIER):
             self.advance()
@@ -2474,72 +2605,159 @@ class Parser:
         else:
             self.error(token, f"无法解析表达式,意外的token: {token.value},期望表达式")
 
+    @staticmethod
+    def _skip_string_in(text: str, i: int) -> int:
+        """text[i] 是引号 — 返回收尾引号之后的位置(引号内括号/冒号不计数)"""
+        q = text[i]
+        i += 1
+        while i < len(text):
+            if text[i] == '\\':
+                i += 2
+                continue
+            if text[i] == q:
+                return i + 1
+            i += 1
+        return i
+
+    def _scan_interpolations(self, raw: str, token):
+        """S2b: 扫描 ${...} 插值段(括号感知 + 字符串感知)
+
+        返回 [(kind, text, spec, debug), ...]:
+          kind='str'  — text 字面量, spec/debug 无意义
+          kind='expr' — text 表达式源码, spec 格式规格(None 或 str),
+                        debug 是否 f"{x=}" 调试格式
+        旧正则 [^}]+ 不敢放嵌套括号(切片 l[1:2]/字典/调用);
+        本扫描器括号深度感知, "${d["k"]}" 类嵌套引号由 lexer 侧放行。
+        """
+        parts = []
+        i, n, last = 0, len(raw), 0
+        while i < n:
+            if raw[i] == '$' and i + 1 < n and raw[i + 1] == '{':
+                depth = 0
+                j = i + 1  # 指向 {
+                while j < n:
+                    c = raw[j]
+                    if c in '([{':
+                        depth += 1
+                    elif c in ')]}':
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    elif c in '"\'':
+                        j = self._skip_string_in(raw, j)
+                        continue
+                    j += 1
+                if depth != 0:
+                    raise SyntaxError(f"未闭合的插值表达式,行 {token.line}")
+                content = raw[i + 2:j]
+                if i > last:
+                    parts.append(('str', raw[last:i], None, False))
+                expr_text, spec, debug = self._split_interp_content(content, token)
+                parts.append(('expr', expr_text, spec, debug))
+                i = j + 1
+                last = i
+            else:
+                i += 1
+        if last < n:
+            parts.append(('str', raw[last:], None, False))
+        return parts
+
+    def _split_interp_content(self, content: str, token):
+        """拆分插值内容: expr [=] [: spec] — 对齐 Python f-string 三形态"""
+        # 深度1 的 ':' 才是规格分隔符(切片 l[1:2]/字典内的不算)
+        depth = 0
+        colon = -1
+        k = 0
+        while k < len(content):
+            c = content[k]
+            if c in '([{':
+                depth += 1
+            elif c in ')]}':
+                depth -= 1
+            elif c in '"\'':
+                k = self._skip_string_in(content, k)
+                continue
+            elif c == ':' and depth == 0:
+                colon = k
+                break
+            k += 1
+        if colon >= 0:
+            expr_text = content[:colon]
+            spec = content[colon + 1:].strip()
+        else:
+            expr_text = content
+            spec = None
+        # 调试格式 f"{x=}": 表达式末尾独立 '='(= 前面不是 =!<> 比较符)
+        stripped = expr_text.rstrip()
+        if (stripped.endswith('=')
+                and not stripped.endswith('==')
+                and not (len(stripped) >= 2 and stripped[-2] in '=!<>')):
+            expr_text = stripped[:-1].rstrip()
+            debug = True
+        else:
+            debug = False
+        if not expr_text.strip():
+            raise SyntaxError(f"空的插值表达式,行 {token.line}")
+        return expr_text, spec, debug
+
     def _parse_string_literal(self, token) -> 'Expression':
-        """解析字符串字面量,支持 ${expr} 插值"""
+        """解析字符串字面量,支持 ${expr} / ${expr=} / ${expr:spec} 插值(S2b)"""
         raw = token.value
         # 检查是否有 ${...} 插值
         if '${' not in raw:
             return Literal(value=raw, literal_type='string', line=token.line, column=token.column)
-        
-        import re
-        # 拆分字符串: "hello ${name}!" -> ["hello ", Var(name), "!"]
-        parts = []
-        last_end = 0
-        for m in re.finditer(r'\$\{([^}]+)\}', raw):
-            # 前面的字符串部分
-            if m.start() > last_end:
-                parts.append(('str', raw[last_end:m.start()]))
-            # 插值表达式 (暂时只支持简单变量名)
-            expr_text = m.group(1).strip()
-            parts.append(('expr', expr_text))
-            last_end = m.end()
-        # 尾部字符串
-        if last_end < len(raw):
-            parts.append(('str', raw[last_end:]))
-        
-        if not parts:
-            return Literal(value=raw, literal_type='string', line=token.line, column=token.column)
-        
-        # 构建 BinaryExpr 链: part1 + str(part2) + part3 + ...
+
+        parts = self._scan_interpolations(raw, token)
+
         def make_str(s):
             return Literal(value=s, literal_type='string', line=token.line, column=token.column)
-        
-        def make_var(name):
-            return Variable(name=name, line=token.line, column=token.column)
-        
+
         def make_expr(text):
             """将插值表达式文本解析为AST"""
             inner_lexer = Lexer(text)
             inner_tokens = inner_lexer.tokenize()
             inner_parser = Parser(inner_tokens, text)
             return inner_parser.parse_expression()
-        
-        # 第一个部分
-        if parts[0][0] == 'str':
-            result = make_str(parts[0][1])
-        else:
-            # 插值表达式 -> str(expr)
-            result = CallExpr(
-                func=Variable(name='str', line=token.line, column=token.column),
-                args=[make_expr(parts[0][1])],
-                line=token.line, column=token.column
-            )
-        
-        # 后续部分用 + 拼接
-        for i in range(1, len(parts)):
-            if parts[i][0] == 'str':
-                right = make_str(parts[i][1])
-            else:
-                right = CallExpr(
-                    func=Variable(name='str', line=token.line, column=token.column),
-                    args=[make_expr(parts[i][1])],
+
+        def make_value_node(expr_text, spec):
+            """插值求值节点: 有规格走 format(v, spec), 否则 str(v)"""
+            inner = make_expr(expr_text)
+            if spec:
+                return CallExpr(
+                    func=Variable(name='format', line=token.line, column=token.column),
+                    args=[inner, make_str(spec)],
                     line=token.line, column=token.column
                 )
-            result = BinaryOp(
-                op='+', left=result, right=right,
+            return CallExpr(
+                func=Variable(name='str', line=token.line, column=token.column),
+                args=[inner],
                 line=token.line, column=token.column
             )
-        
+
+        result = None
+        for kind, text, spec, debug in parts:
+            if kind == 'str':
+                node = make_str(text)
+            else:
+                value_node = make_value_node(text, spec)
+                if debug:
+                    # f"{x=}" → "x=" + str(x) — 调试格式自带表达式原文
+                    node = BinaryOp(
+                        op='+',
+                        left=make_str(text + '='),
+                        right=value_node,
+                        line=token.line, column=token.column
+                    )
+                else:
+                    node = value_node
+            if result is None:
+                result = node
+            else:
+                result = BinaryOp(
+                    op='+', left=result, right=node,
+                    line=token.line, column=token.column
+                )
+
         return result
 
     def parse_call_expr(self, func_name: str) -> CallExpr:
@@ -2719,6 +2937,19 @@ class TernaryExpr(Expression):
     condition: Expression = None
     then_expr: Expression = None
     else_expr: Expression = None
+    line: int = 0
+    column: int = 0
+
+@dataclass
+class WalrusExpr(Expression):
+    """S2a: 海象赋值表达式 name := value
+
+    表达式级赋值: 求值 value → 绑定 name(已存在则赋值, 否则当前作用域声明)
+    → 返回 value 本身。优先级最低(低于三元/管道/逻辑或) —
+    `x := a or b` 解析为 `x := (a or b)`。
+    """
+    name: str = ""
+    value: Expression = None
     line: int = 0
     column: int = 0
 
@@ -3415,15 +3646,22 @@ import gc as _gc
 class _ObjectRegistry:
     """意图运行时容器对象注册表(MM1 首期)"""
 
-    __slots__ = ("_refs", "alloc_total", "reclaim_total")
+    __slots__ = ("_refs", "alloc_total", "reclaim_total", "alloc_by_type")
 
     def __init__(self):
         self._refs = []            # weakref.ref — 目标死亡即失效
         self.alloc_total = 0       # 累计创建容器数
         self.reclaim_total = 0     # 累计回收容器数(观测值)
+        self.alloc_by_type = {}    # M4: 按类型的累计分配数(分配热点)
 
     def register(self, obj) -> None:
         self.alloc_total += 1
+        # M4: 分配热点按容器类型聚合(实例取类名, 其余取类型名)
+        if isinstance(obj, InstanceValue):
+            t = obj.klass.name if obj.klass is not None else 'Instance'
+        else:
+            t = obj.get_type().name if hasattr(obj, 'get_type') else type(obj).__name__
+        self.alloc_by_type[t] = self.alloc_by_type.get(t, 0) + 1
         self._refs.append(_weakref.ref(obj))
         if len(self._refs) > 4096:  # 防膨胀: 定期修剪死亡弱引用
             self._prune()
@@ -3456,6 +3694,149 @@ class _ObjectRegistry:
 
 
 OBJECT_REGISTRY = _ObjectRegistry()
+
+# ── M2: 实例属性访问缓存统计(模块级 — 跨实例/跨类聚合) ──
+# 树遍历执行器的内联缓存等价物: 实例形状(字段+方法集)创建后即稳定,
+# get() 命中走 _cache 免去 fields/methods 两次查找; set() 写透同步。
+# 统计供 cache_stats()/cache_reset() 内置观测(测试与微基准用)。
+# 近似计数: 并发 spawn 下非原子, 仅作诊断不作正确性依据。
+_ATTR_CACHE_STATS = {"hits": 0, "misses": 0}
+
+
+class FunctionProfiler:
+    """M4: 函数级剖析器 — 调用次数/累计时间/自身时间(cProfile 等价切片)
+
+    挂接点: Interpreter.execute_function 与 _execute_method 的帧入出
+    (profiler 为 None 时热路径仅多一次属性判断, 零 instrumentation 开销)。
+    自身时间 = 累计 − 直接子调用耗时(子调用经 _stack 逐层上报)。
+    时间基准 time.perf_counter — 单调时钟, 不受系统时钟调整影响。
+    """
+    __slots__ = ("stats", "_stack")
+
+    def __init__(self):
+        self.stats = {}    # 函数名 → [调用次数, 累计秒, 自身秒]
+        self._stack = []   # [函数名, t0, 子调用累计秒]
+
+    def enter(self, name: str):
+        self._stack.append([name, time.perf_counter(), 0.0])
+
+    def exit(self, name: str):
+        t1 = time.perf_counter()
+        if not self._stack:
+            return  # 防御: 出口多于入口(异常路径理论不可达, finally 保证配对)
+        frame = self._stack.pop()
+        dt = t1 - frame[1]
+        st = self.stats.get(name)
+        if st is None:
+            st = self.stats[name] = [0, 0.0, 0.0]
+        st[0] += 1
+        st[1] += dt
+        st[2] += dt - frame[2]
+        if self._stack:
+            self._stack[-1][2] += dt
+
+    def report(self, wall: float = None) -> str:
+        """渲染函数级报告 — 按累计时间降序"""
+        lines = []
+        lines.append("🔬 函数级剖析报告（M4 — cProfile 等价切片）")
+        lines.append(f"  {'函数':<28}{'调用':>6}{'累计(s)':>12}{'自身(s)':>12}")
+        lines.append("  " + "-" * 58)
+        rows = sorted(self.stats.items(), key=lambda kv: (-kv[1][1], kv[0]))
+        for name, (calls, cum, self_t) in rows:
+            lines.append(f"  {name:<28}{calls:>6}{cum:>12.6f}{self_t:>12.6f}")
+        lines.append("  " + "-" * 58)
+        lines.append(f"  函数总数: {len(rows)}")
+        if wall is not None:
+            lines.append(f"  墙钟总耗时: {wall:.6f}s（含未 instrumentation 的顶层语句）")
+        return "\n".join(lines)
+
+
+def render_mem_profile() -> str:
+    """M4: 内存分配热点报告 — 基于 MM1 对象注册表(OBJECT_REGISTRY)
+
+    分配计数按容器类型聚合(实例/列表/字典); 存活数经弱引用修剪,
+    累计分配反映整个运行期的构造压力 — 分配热点一眼可见。
+    """
+    s = OBJECT_REGISTRY.stats()
+    lines = []
+    lines.append("🧬 内存分配剖析（M4 — MM1 注册表切片）")
+    lines.append(f"  累计分配容器: {s['alloc_total']} | 当前存活: {s['live']} | 已回收: {s['reclaim_total']}")
+    lines.append(f"  {'类型':<20}{'存活':>8}{'累计分配':>10}")
+    lines.append("  " + "-" * 40)
+    live_by_type = s.get("by_type", {})
+    alloc_by_type = OBJECT_REGISTRY.alloc_by_type
+    for t in sorted(alloc_by_type, key=lambda k: -alloc_by_type[k]):
+        lines.append(f"  {t:<20}{live_by_type.get(t, 0):>8}{alloc_by_type[t]:>10}")
+    if not alloc_by_type:
+        lines.append("  （无容器分配记录）")
+    return "\n".join(lines)
+
+
+class CoverageTracker:
+    """E3/Q2: 覆盖率打点器 — 语句覆盖率(E3) + 契约覆盖率(Q2)
+
+    语句口径(与 Python coverage 的语句语义对齐的最小切片):
+    分子 = 执行过的非表达式语句节点行(execute_statement 入口打点);
+    分母 = AST 全量遍历的非表达式语句节点行。裸表达式语句
+    (如 f();)不计分母 — 边界如实记录, 不假装精确。
+    契约口径(Q2, Python 没有的维度): requires/ensures 逐子句计数 —
+    定义即入分母, 求值即入分子(违约子句也算执行过)。
+    """
+    __slots__ = ("stmt_hits", "stmt_total", "req_hit", "req_total",
+                 "ens_hit", "ens_total", "with_contracts")
+
+    def __init__(self, with_contracts: bool = False):
+        self.stmt_hits: set = set()     # (filename, line)
+        self.stmt_total: set = set()
+        self.req_hit: set = set()       # 执行过的 requires 子句(AST 节点 id)
+        self.req_total = 0
+        self.ens_hit: set = set()       # 执行过的 ensures 子句
+        self.ens_total = 0
+        self.with_contracts = with_contracts
+
+    def mark_stmt(self, filename: str, line: int):
+        if line:
+            self.stmt_hits.add((filename, line))
+
+    def mark_contract(self, kind: str, clause) -> None:
+        """Q2: 契约子句按身份计一次(多次调用不重复计 — 覆盖率不是执行次数)"""
+        if kind == 'requires':
+            self.req_hit.add(id(clause))
+        elif kind == 'ensures':
+            self.ens_hit.add(id(clause))
+
+    def count_program(self, program, filename: str):
+        """执行前遍历 AST: 累计语句分母与契约分母"""
+        for node in _walk_ast(program):
+            if isinstance(node, FunctionDef):
+                self.req_total += len(getattr(node, 'requires', None) or [])
+                self.ens_total += len(getattr(node, 'ensures', None) or [])
+            if (isinstance(node, ASTNode) and not isinstance(node, Expression)
+                    and getattr(node, 'line', 0)):
+                self.stmt_total.add((filename, node.line))
+
+    def report(self) -> str:
+        hit_n = len(self.stmt_hits & self.stmt_total)
+        total_n = len(self.stmt_total)
+        pct = (hit_n * 100 // total_n) if total_n else 100
+        missed = sorted(line for (fn, line) in (self.stmt_total - self.stmt_hits))
+        lines = []
+        lines.append("📊 覆盖率报告（E3 语句级切片）")
+        lines.append(f"  语句覆盖率: {hit_n}/{total_n} ({pct}%)")
+        if missed:
+            show = ", ".join(str(m) for m in missed[:20])
+            more = f" ...等{len(missed)}行" if len(missed) > 20 else ""
+            lines.append(f"  未覆盖行: {show}{more}")
+        if self.with_contracts:
+            req_n, ens_n = len(self.req_hit), len(self.ens_hit)
+            total_c = self.req_total + self.ens_total
+            cp = (req_n + ens_n) * 100 // total_c if total_c else 100
+            rp = req_n * 100 // self.req_total if self.req_total else 100
+            ep = ens_n * 100 // self.ens_total if self.ens_total else 100
+            lines.append(f"  契约覆盖率: {req_n + ens_n}/{total_c} ({cp}%)")
+            lines.append(f"    requires 子句: {req_n}/{self.req_total} ({rp}%)")
+            lines.append(f"    ensures  子句: {ens_n}/{self.ens_total} ({ep}%)")
+        return "\n".join(lines)
 
 
 class ListValue(RuntimeValue):
@@ -4093,17 +4474,276 @@ class EnumValue(RuntimeValue):
     def __hash__(self):
         return hash((self.enum_name, self.variant))
 
-@dataclass
-class GeneratorValue(RuntimeValue):
-    """生成器值 — 可迭代的惰性序列"""
-    _gen: object = None  # Python generator object
+# ── S3: 生成器完整化 — 线程协作式协程(threadlet) ──
+# 生成器函数体跑在独立 Python 线程, 经双队列握手实现真惰性:
+#   驱动线程(主线程/外层生成器线程): save-ctx → 发信号 → 阻塞等 out_q
+#   生成器线程:                       唤醒 → 装 ctx → 跑体 → yield 时
+#                                     save-ctx → 出值 → 阻塞等 in_q
+# 任意时刻只有一个线程在跑(阻塞握手), 共享解释器状态靠上下文切换时的
+# 保存/恢复保证(_GEN_CTX_ATTRS 只换执行态, 不换全局表 — global_scope/
+# functions/builtins/modules 本就共享, 正是生成器闭包所见的世界)。
 
-    def __init__(self, gen):
-        super().__init__(AnyType(), None)
-        self._gen = gen
+_GEN_DONE = object()  # 驱动侧哨兵: 生成器耗尽(不是语言值, 不跨边界)
+
+
+class _GenExitSignal(BaseException):
+    """S3: 关闭信号 — BaseException 子类, 用户 catch(Exception) 捕不到
+    (对齐 Python GeneratorExit: close 不可被业务代码吞掉)"""
+
+
+# 上下文切换白名单 — 解释器实例上的执行态属性
+_GEN_CTX_ATTRS = ('current_scope', 'call_stack', 'return_flag', 'return_value',
+                  'break_flag', 'continue_flag', 'current_line', 'current_col',
+                  'current_filename', '_spawn_stack', '_import_stack',
+                  '_active_gen', 'profiler')
+
+
+def _save_gen_ctx(interp: 'Interpreter') -> dict:
+    return {a: getattr(interp, a, None) for a in _GEN_CTX_ATTRS}
+
+
+def _restore_gen_ctx(interp: 'Interpreter', ctx: dict) -> None:
+    for a, v in ctx.items():
+        setattr(interp, a, v)
+
+
+class GeneratorController:
+    """S3: 生成器控制器 — 一个生成器实例 = 一个协程线程 + 一对队列
+
+    驱动侧 API: next() / send(v) / throw(e) / close()
+    生成器线程侧: do_yield(v) — 交出值并返回 send 进来的值
+    (yield 表达式化: `let x = yield v` 的 x 即 do_yield 的返回值)。
+    """
+
+    def __init__(self, interp: 'Interpreter', func, args,
+                 closure_scope=None, instance=None):
+        self.interp = interp
+        self.func = func
+        self.args = args
+        self.closure_scope = closure_scope
+        self.instance = instance  # 生成器方法: this 的注入目标
+        # 创建瞬间定格驱动侧状态(主线程此刻的执行态)
+        self._call_scope = interp.current_scope
+        self._stack_snapshot = list(interp.call_stack)
+        self._filename = interp.current_filename
+        self._line = interp.current_line
+        self._col = interp.current_col
+        self.out_q = queue.Queue()   # 生成器线程 → 驱动线程
+        self.in_q = queue.Queue()    # 驱动线程 → 生成器线程
+        self.closing = False
+        self.finished = False
+        self.started = False
+        self._thread = threading.Thread(target=self._run,
+                                        name="intent-generator", daemon=True)
+        self._thread.start()
+
+    # ── 驱动侧 ──
+
+    def next(self):
+        self.started = True
+        return self._resume('send', None)
+
+    def send(self, value):
+        if not self.started and not isinstance(value, NoneValue):
+            raise TypeError(
+                "无法向刚创建的生成器发送非 None 值"
+                "(首个 next() 或 send(None) 才能启动)")
+        self.started = True
+        return self._resume('send', value)
+
+    def throw(self, exc):
+        if self.finished:
+            raise exc  # 对齐 CPython: 耗尽后 throw 直接把异常给调用方
+        self.started = True
+        return self._resume('throw', exc)
+
+    def close(self):
+        if self.finished:
+            return
+        self.closing = True
+        self._resume('close', None)
+
+    def _resume(self, action, value, owner=None):
+        """驱动侧握手 — 保存驱动线程上下文 → 发信号 → 等结果 → 恢复"""
+        if self.finished:
+            if action == 'throw':
+                raise value
+            return _GEN_DONE
+        interp = self.interp
+        saved = _save_gen_ctx(interp)
+        try:
+            self.in_q.put((action, value))
+            while True:
+                try:
+                    kind, val = self.out_q.get(timeout=0.1)
+                    break
+                except queue.Empty:
+                    # 上层(owner)被关闭 → 本层强制收摊, 关闭信号上抛驱动线程
+                    if owner is not None and owner.closing:
+                        self._shutdown()
+                        raise _GenExitSignal()
+                    if self.closing:
+                        self._shutdown()
+                        kind, val = self.out_q.get()
+                        break
+                    continue
+            if kind == 'yield':
+                return val
+            if kind == 'error':
+                raise val
+            self.finished = True
+            return _GEN_DONE
+        finally:
+            _restore_gen_ctx(interp, saved)
+
+    def _shutdown(self):
+        """强制收摊 — 通知线程结束并有界等待(卡死则留 daemon 线程, 不无限等)"""
+        self.closing = True
+        try:
+            self.in_q.put(('close', None))
+        except Exception:
+            pass
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            try:
+                kind, _ = self.out_q.get(timeout=0.1)
+                if kind in ('done', 'error'):
+                    self.finished = True
+                    return
+            except queue.Empty:
+                continue
+
+    # ── 生成器线程侧 ──
+
+    def _run(self):
+        interp = self.interp
+        # 首信号前绝不碰共享解释器状态(主线程还在跑)
+        kind, val = self.in_q.get()
+        if kind == 'throw':
+            # 未启动就 throw: 异常在启动点抛出(对齐 Python)
+            self.finished = True
+            self.out_q.put(('error', val))
+            return
+        # 安装生成器上下文(从创建瞬间定格的驱动侧状态重建)
+        _restore_gen_ctx(interp, {
+            'current_scope': self._call_scope,
+            'call_stack': list(self._stack_snapshot),
+            'return_flag': False, 'return_value': None,
+            'break_flag': False, 'continue_flag': False,
+            'current_line': self._line, 'current_col': self._col,
+            'current_filename': self._filename,
+            '_spawn_stack': [], '_import_stack': [],
+            '_active_gen': self, 'profiler': None,
+        })
+        try:
+            if self.instance is not None:
+                result = interp._execute_method(self.func, self.instance,
+                                                self.args, gen_mode=True)
+            else:
+                result = interp.execute_function(self.func, self.args,
+                                                 gen_mode=True)
+            self.out_q.put(('done', result))
+        except _GenExitSignal:
+            self.out_q.put(('done', None))
+        except BaseException as e:
+            self.out_q.put(('error', e))
+
+    def do_yield(self, value):
+        """生成器线程侧: 交出值, 阻塞等驱动线程的下一个动作, 返回 send 值"""
+        interp = self.interp
+        ctx = _save_gen_ctx(interp)
+        self.out_q.put(('yield', value))
+        while True:
+            try:
+                kind, val = self.in_q.get(timeout=0.1)
+                break
+            except queue.Empty:
+                if self.closing:
+                    raise _GenExitSignal()
+                continue
+        _restore_gen_ctx(interp, ctx)
+        if kind == 'send':
+            return val if val is not None else NoneValue()
+        if kind == 'throw':
+            raise val
+        raise _GenExitSignal()
+
+
+class _GenIterator:
+    """S3: 生成器的 Python 迭代器适配(for/std 消费)"""
+
+    def __init__(self, ctrl: 'GeneratorController'):
+        self._ctrl = ctrl
 
     def __iter__(self):
-        return self._gen
+        return self
+
+    def __next__(self):
+        v = self._ctrl.next()
+        if v is _GEN_DONE:
+            raise StopIteration()
+        return v
+
+
+def _gen_lazy_items(gen: 'GeneratorValue'):
+    """S3: for 循环的懒求值源 — 逐项 pull 生成器, 不预取
+
+    提前退出(break/return/异常)时 finally 收摊协程线程 —
+    对齐 Python 生成器被 GC 时自动关闭; 线程卡死(如阻塞在 channel)
+    时 close 有界返回(2s), 留 daemon 线程, 不无限等。
+    """
+    ctrl = gen._ctrl
+    try:
+        while True:
+            item = ctrl.next()
+            if item is _GEN_DONE:
+                return
+            yield item
+    finally:
+        ctrl.close()
+
+
+class _GenMethod:
+    """S3: 生成器方法绑定(g.send / g.throw / g.close) — 可调用值"""
+
+    def __init__(self, gen: 'GeneratorValue', name: str):
+        self.gen = gen
+        self.name = name
+
+    def __call__(self, args: list):
+        ctrl = self.gen._ctrl
+        if self.name == 'send':
+            if len(args) != 1:
+                raise TypeError("send() 期望1个参数")
+            v = ctrl.send(args[0])
+            if v is _GEN_DONE:
+                raise RuntimeError("生成器已耗尽, send 没有递送点")
+            return v
+        if self.name == 'throw':
+            if len(args) != 1:
+                raise TypeError("throw() 期望1个参数")
+            err = ctrl.interp._coerce_error_value(args[0])
+            v = ctrl.throw(IntentRaise(err))
+            if v is _GEN_DONE:
+                raise RuntimeError("生成器已退出(throw 后无后续产出)")
+            return v
+        # close
+        if args:
+            raise TypeError("close() 不接受参数")
+        ctrl.close()
+        return NoneValue()
+
+
+class GeneratorValue(RuntimeValue):
+    """S3: 生成器值 — 真惰性序列(线程协作式协程背载)"""
+    _ctrl: object = None  # GeneratorController
+
+    def __init__(self, ctrl):
+        super().__init__(AnyType(), None)
+        self._ctrl = ctrl
+
+    def __iter__(self):
+        return _GenIterator(self._ctrl)
 
     def __str__(self):
         return "<generator>"
@@ -4133,6 +4773,15 @@ class ClassValue(RuntimeValue):
         if self.superclass:
             return self.superclass.find_method(name)
         return None
+
+    def all_method_names(self) -> List[str]:
+        """X2: 全部方法名(含继承链, 子类覆盖不重复列出)"""
+        names = list(self.methods.keys())
+        if self.superclass:
+            for n in self.superclass.all_method_names():
+                if n not in names:
+                    names.append(n)
+        return names
 
     def call(self, interpreter, args: List[RuntimeValue]) -> RuntimeValue:
         """实例化类:创建 InstanceValue,调用 init"""
@@ -4164,21 +4813,32 @@ class InstanceValue(RuntimeValue):
         super().__init__(StringType(), klass.name)
         self.klass = klass
         self.fields = {}
+        # M2: 属性访问缓存 — 实例形状稳定后重复读取走此表
+        self._cache: Dict[str, RuntimeValue] = {}
         OBJECT_REGISTRY.register(self)  # MM1: 创建即登记
 
     def get(self, name: str) -> Optional[RuntimeValue]:
-        """读取字段"""
+        """读取字段(M2: 缓存优先 — 命中免 fields/methods 两级查找)"""
+        cache = self._cache
+        if name in cache:
+            _ATTR_CACHE_STATS["hits"] += 1
+            return cache[name]
+        _ATTR_CACHE_STATS["misses"] += 1
         if name in self.fields:
-            return self.fields[name]
-        # 回退到方法
+            v = self.fields[name]
+            cache[name] = v
+            return v
+        # 回退到方法(类创建后方法表即稳定, 可缓存)
         method = self.klass.find_method(name)
         if method:
+            cache[name] = method
             return method
         return None
 
     def set(self, name: str, value: RuntimeValue):
-        """设置字段"""
+        """设置字段(M2: 写透 — 缓存与 fields 同步, 无失效窗口)"""
         self.fields[name] = value
+        self._cache[name] = value
 
     def copy(self):
         inst = InstanceValue(self.klass)
@@ -4296,6 +4956,10 @@ class ContractVerifier:
         all_passed = True
 
         for i, condition in enumerate(requires):
+            # Q2: 契约覆盖率 — 子句进入验证即计执行(违约/异常也算执行过)
+            tracker = getattr(self.interpreter, 'coverage', None)
+            if tracker is not None:
+                tracker.mark_contract('requires', condition)
             try:
                 result = self.interpreter.evaluate_expression(condition, context)
                 if not (isinstance(result, BoolValue) and result.value):
@@ -4316,6 +4980,10 @@ class ContractVerifier:
         context['result'] = result
 
         for i, condition in enumerate(ensures):
+            # Q2: 契约覆盖率 — 子句进入验证即计执行
+            tracker = getattr(self.interpreter, 'coverage', None)
+            if tracker is not None:
+                tracker.mark_contract('ensures', condition)
             try:
                 eval_result = self.interpreter.evaluate_expression(condition, context)
                 if not (isinstance(eval_result, BoolValue) and eval_result.value):
@@ -4554,6 +5222,13 @@ class Interpreter:
         self._import_stack: List[str] = []
         # ── C7: 调试器挂载点(仅 --debug 模式启用; 普通执行为 None 零开销) ──
         self.debugger = None
+        # ── M4: 函数级剖析器(仅 --profile 模式启用; None 时零开销) ──
+        self.profiler = None
+        # ── E3/Q2: 覆盖率打点器(仅 --coverage 模式启用; None 时零开销) ──
+        self.coverage = None
+        # ── S3: 当前协程线程的生成器控制器(主线程为 None) ──
+        # yield 经它握手; 上下文切换时随 _GEN_CTX_ATTRS 保存/恢复
+        self._active_gen = None
 
     def _exit_scope(self, old_scope: 'Scope'):
         """退出当前作用域，执行 defer 栈"""
@@ -4619,6 +5294,18 @@ class Interpreter:
         return {
             'print': self._builtin_print,
             'len': self._builtin_len,
+            # X3: dunder 协议入口
+            'next': self._builtin_next,
+            'repr': self._builtin_repr,
+            # M2: 属性访问缓存诊断
+            'cache_stats': self._builtin_cache_stats,
+            'cache_reset': self._builtin_cache_reset,
+            # X2: 反射内置
+            'getattr': self._builtin_getattr,
+            'setattr': self._builtin_setattr,
+            'hasattr': self._builtin_hasattr,
+            'dir': self._builtin_dir,
+            'callable': self._builtin_callable,
             'assert': self._builtin_assert,
             'args': self._builtin_args,
             'keys': self._builtin_keys,
@@ -4643,6 +5330,7 @@ class Interpreter:
             'int': self._builtin_int,
             'float': self._builtin_float,
             'str': self._builtin_str,
+            'format': self._builtin_format,
             'bool': self._builtin_bool,
             'type': self._builtin_type,
             'Ok': self._builtin_ok,
@@ -4840,11 +5528,123 @@ class Interpreter:
         value = args[0]
         if isinstance(value, (ListValue, StringValue, DictValue)):
             return IntValue(len(value.value))
+        # S3: 生成器没有长度 — 惰性序列, 拒绝而不是返回 None
+        if isinstance(value, GeneratorValue):
+            raise TypeError("生成器没有长度(惰性序列 — 用 for 消费或 next() 逐个取)")
         # 运算符重载: __len__()
         if isinstance(value, InstanceValue):
             method = value.get('__len__')
             if method and isinstance(method, FunctionValue):
                 return self._execute_method(method, value, [])
+
+    def _builtin_next(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """X3: 内置 next() — 迭代器协议 __next__
+
+        取迭代器下一元素; __next__() 返回 None 即序列耗尽
+        (语言约定: 无 StopIteration 通道, None 为终点信号)。
+        生成器同样支持 — 惰性序列的下一个。
+        """
+        if len(args) != 1:
+            raise TypeError(f"next() 期望1个参数,得到 {len(args)}个")
+        it = args[0]
+        if isinstance(it, InstanceValue):
+            return self._dunder_next(it)
+        if isinstance(it, GeneratorValue):
+            # S3: 真惰性生成器 — 拉一个值; 耗尽按语言约定返回 None
+            v = it._ctrl.next()
+            return NoneValue() if v is _GEN_DONE else v
+        raise TypeError(f"next() 期望迭代器(有__next__的对象或生成器),得到 {it.get_type()}")
+
+    def _builtin_repr(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """X3: 内置 repr() — 调试表示; 实例优先走 __repr__()"""
+        if len(args) != 1:
+            raise TypeError(f"repr() 期望1个参数,得到 {len(args)}个")
+        val = args[0]
+        if isinstance(val, InstanceValue):
+            method = val.get('__repr__')
+            if method is not None and isinstance(method, FunctionValue):
+                result = self._execute_method(method, val, [])
+                return StringValue(self._value_to_str(result))
+        return StringValue(self._value_to_str(val))
+
+    def _builtin_cache_stats(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """M2: 属性缓存统计 — 返回 [命中数, 未命中数](模块级聚合)"""
+        if args:
+            raise TypeError("cache_stats() 不接受参数")
+        return ListValue([IntValue(_ATTR_CACHE_STATS["hits"]),
+                          IntValue(_ATTR_CACHE_STATS["misses"])], IntType())
+
+    def _builtin_cache_reset(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """M2: 清零属性缓存统计 — 微基准/测试的确定性起点"""
+        if args:
+            raise TypeError("cache_reset() 不接受参数")
+        _ATTR_CACHE_STATS["hits"] = 0
+        _ATTR_CACHE_STATS["misses"] = 0
+        return NoneValue()
+
+    def _builtin_getattr(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """X2: getattr(obj, name) — 按名读属性(字段或方法), 不存在抛 AttributeError"""
+        if len(args) != 2:
+            raise TypeError(f"getattr() 期望2个参数(obj, name),得到 {len(args)}个")
+        obj, name = args
+        if not isinstance(name, StringValue):
+            raise TypeError(f"getattr() 属性名期望 String,得到 {name.get_type()}")
+        if isinstance(obj, InstanceValue):
+            v = obj.get(name.value)
+            if v is not None:
+                return v
+            raise AttributeError(f"实例没有属性 '{name.value}'")
+        raise TypeError(f"getattr() 期望实例,得到 {obj.get_type()}")
+
+    def _builtin_setattr(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """X2: setattr(obj, name, value) — 按名写字段(M2: 经 set() 写透缓存)"""
+        if len(args) != 3:
+            raise TypeError(f"setattr() 期望3个参数(obj, name, value),得到 {len(args)}个")
+        obj, name, value = args
+        if not isinstance(name, StringValue):
+            raise TypeError(f"setattr() 属性名期望 String,得到 {name.get_type()}")
+        if not isinstance(obj, InstanceValue):
+            raise TypeError(f"setattr() 期望实例,得到 {obj.get_type()}")
+        obj.set(name.value, value)
+        return NoneValue()
+
+    def _builtin_hasattr(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """X2: hasattr(obj, name) — 属性存在性(字段或方法)"""
+        if len(args) != 2:
+            raise TypeError(f"hasattr() 期望2个参数(obj, name),得到 {len(args)}个")
+        obj, name = args
+        if not isinstance(name, StringValue):
+            raise TypeError(f"hasattr() 属性名期望 String,得到 {name.get_type()}")
+        if not isinstance(obj, InstanceValue):
+            raise TypeError(f"hasattr() 期望实例,得到 {obj.get_type()}")
+        return BoolValue(obj.get(name.value) is not None)
+
+    def _builtin_dir(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """X2: dir(obj) — 属性名清单(字段 + 方法含继承链, 排序)"""
+        if len(args) != 1:
+            raise TypeError(f"dir() 期望1个参数,得到 {len(args)}个")
+        obj = args[0]
+        if not isinstance(obj, InstanceValue):
+            raise TypeError(f"dir() 期望实例,得到 {obj.get_type()}")
+        names = set(obj.fields.keys()) | set(obj.klass.all_method_names())
+        return ListValue([StringValue(n) for n in sorted(names)], StringType())
+
+    def _builtin_callable(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """X2: callable(x) — 是否可调用
+
+        函数/类/FFI 外部函数/Python 桥函数/mock 均可调用;
+        实例定义了 __call__ 亦可调用(X3 协议)。
+        """
+        if len(args) != 1:
+            raise TypeError(f"callable() 期望1个参数,得到 {len(args)}个")
+        x = args[0]
+        if isinstance(x, (FunctionValue, ClassValue, ForeignFuncValue,
+                          PyFuncValue, MockValue)):
+            return BoolValue(True)
+        if isinstance(x, InstanceValue):
+            m = x.get('__call__')
+            return BoolValue(m is not None and isinstance(m, FunctionValue))
+        return BoolValue(False)
 
     def _builtin_keys(self, args: List[RuntimeValue]) -> RuntimeValue:
         """内置keys函数:返回字典所有键"""
@@ -5081,6 +5881,32 @@ class Interpreter:
             raise TypeError(f"str() 期望1个参数,得到 {len(args)}个")
         return StringValue(self._value_to_str(args[0]))
 
+    def _builtin_format(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """S2b: format(value, spec) — f-string 格式规格, 语义对齐 Python
+
+        规格白名单: fill/align(<>^=) sign(+-#) 0 width grouping(,_)
+        precision(.N) type(deenfgxoxXeEs%) — 原样交给 Python format();
+        花括号拒收(规格不是模板)。数字/布尔/字符串直接格式化,
+        容器与 None 先 str 化再套字符串规格(对齐/宽度)。
+        """
+        if len(args) != 2:
+            raise TypeError(f"format() 期望2个参数(值, 规格),得到 {len(args)}个")
+        val, spec = args[0], args[1]
+        if not isinstance(spec, StringValue):
+            raise TypeError("format() 第2个参数必须是格式规格字符串")
+        spec_text = spec.value
+        if '{' in spec_text or '}' in spec_text:
+            raise ValueError(f"非法格式规格(不允许花括号): {spec_text!r}")
+        if isinstance(val, (IntValue, FloatValue, BoolValue, StringValue)):
+            py_val = val.value
+        else:
+            py_val = self._value_to_str(val)
+        try:
+            return StringValue(format(py_val, spec_text))
+        except (ValueError, TypeError) as e:
+            raise ValueError(
+                f"格式规格 {spec_text!r} 不适用于 {val.get_type()}: {e}")
+
     def _value_to_str(self, val: RuntimeValue) -> str:
         """将 RuntimeValue 转为可读字符串"""
         if isinstance(val, StringValue):
@@ -5109,8 +5935,12 @@ class Interpreter:
                 items.append(f"{k_repr}: {self._value_to_str(v)}")
             return "{" + ", ".join(items) + "}"
         elif isinstance(val, InstanceValue):
-            # 运算符重载: 调用 __str__() 方法
+            # 运算符重载: 调用 __str__() 方法; 无则 __repr__(); 再无走结构渲染
             method = val.get('__str__')
+            if method and isinstance(method, FunctionValue):
+                result = self._execute_method(method, val, [])
+                return self._value_to_str(result)
+            method = val.get('__repr__')
             if method and isinstance(method, FunctionValue):
                 result = self._execute_method(method, val, [])
                 return self._value_to_str(result)
@@ -5118,6 +5948,8 @@ class Interpreter:
                 return f"<{val.type}>"
             else:
                 return str(val.value)
+        elif isinstance(val, GeneratorValue):
+            return "<generator>"
         else:
             return str(val.value)
 
@@ -6655,6 +7487,9 @@ class Interpreter:
         # 注册所有函数
         for func in program.functions.values():
             self.functions[func.name] = func
+            # E3: def 行即执行(定义时刻) — 注册处打点, 与语句覆盖口径一致
+            if self.coverage is not None and getattr(func, 'line', 0):
+                self.coverage.mark_stmt(self.current_filename, func.line)
             # 顶层函数同时入全局作用域 — 函数是一等值(可作实参传递),
             # 不能只进 functions 表(那只支持按名调用)。
             # 闭包作用域 = 当前作用域(顶层即全局), 与旧行为一致。
@@ -6694,6 +7529,11 @@ class Interpreter:
     def execute_statement(self, stmt: ASTNode) -> RuntimeValue:
         """执行语句"""
         self._track_node(stmt)
+        # E3: 覆盖率打点 — 语句入口即视为执行(异常路径上的语句也已开始执行)
+        if self.coverage is not None:
+            line = getattr(stmt, 'line', 0)
+            if line:
+                self.coverage.mark_stmt(self.current_filename, line)
         # C7: 调试器 hook — 断点/单步命中即暂停进命令循环
         if self.debugger is not None:
             self.debugger.check(stmt)
@@ -6950,7 +7790,7 @@ class Interpreter:
             raise TypeError(f"无法对非实例类型 {obj_val.get_type()} 进行成员赋值")
         
         if stmt.op == "=":
-            obj_val.fields[stmt.member] = value
+            obj_val.set(stmt.member, value)  # M2: 经 set() 写透缓存
         else:
             # 复合赋值
             old_val = obj_val.fields.get(stmt.member)
@@ -6966,13 +7806,40 @@ class Interpreter:
                 new_val = self._binary_op(old_val, "/", value)
             else:
                 raise RuntimeError(f"不支持的成员赋值操作符: {stmt.op}")
-            obj_val.fields[stmt.member] = new_val
+            obj_val.set(stmt.member, new_val)  # M2: 经 set() 写透缓存
         
+        return value
+
+    def _exec_slice_assignment(self, obj, slice_expr: 'SliceExpr',
+                               value: RuntimeValue, op: str) -> RuntimeValue:
+        """S2a: 切片赋值 — l[a:b] = v
+
+        语义对齐 Python: 步长限 1(扩展切片赋值未实现, 显式拒绝);
+        右侧限列表, 允许增删长度(l[1:3] = [x] 把 2 元素换 1 元素);
+        复合操作符(+= 等)不适用切片 — 显式拒绝不静默。
+        """
+        if op != '=':
+            raise RuntimeError(f"切片赋值不支持复合操作符 '{op}'")
+        if not isinstance(obj, ListValue):
+            raise TypeError(f"不支持对 {obj.get_type()} 类型使用切片赋值")
+        start = self.evaluate_expression(slice_expr.start).value if slice_expr.start else None
+        end = self.evaluate_expression(slice_expr.end).value if slice_expr.end else None
+        step = self.evaluate_expression(slice_expr.step).value if slice_expr.step else None
+        if step is not None and step != 1:
+            raise TypeError("扩展切片(带步长)赋值未实现 — 步长限 1")
+        if not isinstance(value, ListValue):
+            raise TypeError("切片赋值右侧必须是列表(替换语义, 允许增删长度)")
+        obj.value[slice(start, end)] = list(value.value)
         return value
 
     def execute_subscript_assignment(self, stmt: SubscriptAssignment) -> RuntimeValue:
         """执行下标赋值: obj[key] = value"""
         obj_val = self.evaluate_expression(stmt.obj)
+        # S2a: 切片赋值 l[a:b] = v — 索引是 SliceExpr 时不按值求值
+        # (求值会变成切片读取, 语义相反)
+        if isinstance(stmt.index, SliceExpr):
+            value = self.evaluate_expression(stmt.value)
+            return self._exec_slice_assignment(obj_val, stmt.index, value, stmt.op)
         index = self.evaluate_expression(stmt.index)
         value = self.evaluate_expression(stmt.value)
 
@@ -7002,9 +7869,9 @@ class Interpreter:
 
         if isinstance(obj_val, DictValue):
             if stmt.op == "=":
-                obj_val.value[index.value] = value
+                obj_val.value[self._dict_key(index)] = value
             else:
-                old_val = obj_val.value.get(index.value)
+                old_val = obj_val.value.get(self._dict_key(index))
                 if old_val is None:
                     raise KeyError(f"字典中没有键 '{index.value}'")
                 if stmt.op == "+=":
@@ -7017,7 +7884,7 @@ class Interpreter:
                     new_val = self._binary_op(old_val, "/", value)
                 else:
                     raise RuntimeError(f"不支持的下标赋值操作符: {stmt.op}")
-                obj_val.value[index.value] = new_val
+                obj_val.value[self._dict_key(index)] = new_val
             return value
 
         # 运算符重载: __setitem__(key, value)
@@ -7156,6 +8023,31 @@ class Interpreter:
 
         return result
 
+    def _dunder_next(self, iterator: 'InstanceValue') -> RuntimeValue:
+        """X3: 调用迭代器的 __next__(); 返回 None 表示耗尽(语言约定:
+        迭代器没有 StopIteration 异常通道, __next__() 返回 None 即序列终点)"""
+        method = iterator.get('__next__')
+        if method is None or not isinstance(method, FunctionValue):
+            raise TypeError(f"对象没有 __next__() 方法, 不是迭代器")
+        return self._execute_method(method, iterator, [])
+
+    def _drain_iterator(self, iterator: 'InstanceValue') -> 'ListValue':
+        """X3: 预取迭代器全部元素为列表(树遍历执行器的惰性边界)
+
+        解释器无挂起协程式迭代通道, 自定义迭代器在此边界预取;
+        生成器(GeneratorValue)仍是真惰性, 不受此影响。
+        安全上限 100 万项 — 防忘写终止条件时无限循环拖死进程。
+        """
+        items = []
+        while True:
+            nxt = self._dunder_next(iterator)
+            if isinstance(nxt, NoneValue):
+                break
+            items.append(nxt)
+            if len(items) >= 1_000_000:
+                raise TypeError("迭代超过 100 万项仍未结束, 疑似 __next__() 缺少终止条件")
+        return ListValue(items, AnyType())
+
     def execute_for(self, stmt: ForStmt) -> RuntimeValue:
         """执行for循环"""
         result = IntValue(0)
@@ -7195,21 +8087,35 @@ class Interpreter:
             return result
 
         if not isinstance(iterable, ListValue):
-            # 运算符重载: __iter__() 返回 ListValue
-            if isinstance(iterable, InstanceValue):
+            # S3: 生成器 — 真惰性遍历(逐项 pull, 不预取; 无限生成器可用)
+            if isinstance(iterable, GeneratorValue):
+                pass  # 下方统一循环换懒求值源
+            # 运算符重载: __iter__() 返回 ListValue 或迭代器对象
+            elif isinstance(iterable, InstanceValue):
                 method = iterable.get('__iter__')
                 if method and isinstance(method, FunctionValue):
                     result = self._execute_method(method, iterable, [])
                     if isinstance(result, ListValue):
                         iterable = result
+                    elif isinstance(result, InstanceValue) and result.get('__next__') is not None:
+                        # X3: __iter__ 返回迭代器(有 __next__) — 预取为列表后统一遍历
+                        iterable = self._drain_iterator(result)
                     else:
-                        raise TypeError(f"__iter__() 必须返回列表,得到 {result.get_type()}")
+                        raise TypeError(f"__iter__() 必须返回列表或迭代器,得到 {result.get_type()}")
+                elif iterable.get('__next__') is not None:
+                    # X3: 无 __iter__ 但有 __next__ — 自身即迭代器
+                    iterable = self._drain_iterator(iterable)
                 else:
                     raise TypeError(f"for 循环期望 List/Dict/有__iter__的对象,得到 {iterable.type}")
             else:
                 raise TypeError(f"for 循环期望 List/Dict,得到 {iterable.type}")
 
-        for item_idx, item in enumerate(iterable.value):
+        # S3: 生成器走懒源(break/return/异常 提前退出 → 收摊协程线程,
+        # 对齐 Python 生成器被 GC 时关闭); List 原样枚举
+        items_source = (iterable.value if isinstance(iterable, ListValue)
+                        else _gen_lazy_items(iterable))
+
+        for item_idx, item in enumerate(items_source):
             # 进入循环体作用域
             old_scope = self.current_scope
             self.current_scope = self.current_scope.enter()
@@ -7291,27 +8197,49 @@ class Interpreter:
     def execute_with_stmt(self, stmt: 'WithStmt') -> RuntimeValue:
         """执行 with 语句(P1.1) — 块级资源管理
 
-        获取资源 → 绑定 as 名 → 执行块 → finally 释放:
-        资源若提供 close 方法则自动调用。获取与释放在同一对
-        花括号内对称出现 — defer 的块级特化。
+        获取资源 → 绑定 as 名 → 执行块 → finally 释放。
+        X3 协议化: 实例提供 __enter__/__exit__ 时走上下文管理器协议
+        (__enter__ 的返回值绑定 as 名, __exit__ 收退出时的错误值);
+        否则维持原约定 — as 名绑定资源本身, 块退出调 close()。
+        获取与释放在同一对花括号内对称出现 — defer 的块级特化。
         """
         resource = self.evaluate_expression(stmt.resource)
         old_scope = self.current_scope
         self.current_scope = self.current_scope.enter()
+        # X3: __enter__ 优先 — 其返回值才是 as 名绑定的值(Python 语义)
+        entered = resource
+        if isinstance(resource, InstanceValue):
+            enter_method = resource.get('__enter__')
+            if enter_method is not None and isinstance(enter_method, FunctionValue):
+                entered = self._execute_method(enter_method, resource, [])
         if stmt.var_name:
-            self.current_scope.declare(stmt.var_name, resource, False)
+            self.current_scope.declare(stmt.var_name, entered, False)
         result = IntValue(0)
+        exc_val = None
         try:
             for body_stmt in stmt.body:
                 result = self.execute_statement(body_stmt)
                 if self.return_flag or self.break_flag or self.continue_flag:
                     break
+        except Exception as e:
+            # X3: 块内异常打包为错误值交给 __exit__(exc_type, exc_val, tb 的
+            # 最小切片 — 单参传错误值; 返回值暂不承担抑制语义, 异常照常传播)
+            try:
+                exc_val = self._make_error_value(e)
+            except Exception:
+                exc_val = NoneValue()
+            raise
         finally:
-            # 释放: 实例提供 close 方法则调用 — 清理在等待中
+            # 释放: 实例提供 __exit__ 则调用; 否则 close 方法则调用 — 清理在等待中
             if isinstance(resource, InstanceValue):
-                close_method = resource.klass.find_method('close')
-                if close_method is not None:
-                    self._execute_method(close_method, resource, [])
+                exit_method = resource.get('__exit__')
+                if exit_method is not None and isinstance(exit_method, FunctionValue):
+                    self._execute_method(exit_method, resource,
+                                         [exc_val if exc_val is not None else NoneValue()])
+                else:
+                    close_method = resource.klass.find_method('close')
+                    if close_method is not None:
+                        self._execute_method(close_method, resource, [])
             self.current_scope = old_scope
         return result
 
@@ -7578,30 +8506,44 @@ class Interpreter:
         self.break_flag = True
         return IntValue(0)
 
-    def execute_yield(self, stmt: YieldStmt) -> RuntimeValue:
-        """执行 yield 语句 — 将值推入生成器缓冲区
+    def execute_yield(self, stmt) -> RuntimeValue:
+        """S3: 执行 yield — 真惰性握手(线程协作式协程)
 
-        yield from expr(P1.5): 委派转发 — 可迭代对象的每个元素
-        逐个推入当前生成器缓冲区(组合先于发明)。
+        生成器线程内: 值经控制器 out_q 交出, 阻塞等驱动线程的下一个
+        动作; send 进来的值作为 yield 表达式的值返回(`let x = yield v`)。
+        yield from expr(P1.5): 委派转发 — 生成器源逐项 pull 且 send
+        值透传(对齐 Python yield from); 列表/字典源逐项交出。
         """
+        ctrl = getattr(self, '_active_gen', None)
+        if ctrl is None:
+            raise RuntimeError("yield 只能在生成器函数中使用")
+
         if getattr(stmt, 'from_expr', None) is not None:
-            if not hasattr(self, '_yield_buffer') or self._yield_buffer is None:
-                raise RuntimeError("yield from 只能在生成器函数中使用")
             src = self.evaluate_expression(stmt.from_expr)
+            if isinstance(src, GeneratorValue):
+                # 生成器委派: 逐项 pull 内层, send 值透传
+                sent = None
+                while True:
+                    item = src._ctrl._resume('send', sent, owner=ctrl)
+                    if item is _GEN_DONE:
+                        break
+                    sent = ctrl.do_yield(item)
+                return NoneValue()
             if isinstance(src, ListValue):
                 items = list(src.value)
             elif isinstance(src, DictValue):
-                items = [StringValue(k) if not isinstance(k, str) else k for k in src.value.keys()]
+                # 键归一为 Python 标量 — 转回 Intent 值再交出
+                # (旧版直接把 str 键塞缓冲区, len 断言掩盖了类型洞)
+                items = [_py_to_intent(k) for k in src.value.keys()]
             else:
-                raise TypeError(f"yield from 期望列表或字典,得到 {src.type}")
+                raise TypeError(f"yield from 期望列表/字典/生成器,得到 {src.type}")
             for item in items:
-                self._yield_buffer.append(item)
-            return ListValue(items, AnyType())
-        value = self.evaluate_expression(stmt.value) if stmt.value else IntValue(0)
-        if not hasattr(self, '_yield_buffer') or self._yield_buffer is None:
-            raise RuntimeError("yield 只能在生成器函数中使用")
-        self._yield_buffer.append(value)
-        return value
+                ctrl.do_yield(item)
+            return NoneValue()
+
+        # 裸 yield 产出 None(对齐 Python; 旧版为 IntValue(0), S3 起迁移)
+        value = self.evaluate_expression(stmt.value) if stmt.value else NoneValue()
+        return ctrl.do_yield(value)
 
     def execute_continue(self) -> RuntimeValue:
         """执行continue语句"""
@@ -7814,8 +8756,13 @@ class Interpreter:
         return None
 
     def execute_function(self, func, args: List[RuntimeValue],
-                          closure_scope: Optional[Scope] = None) -> RuntimeValue:
-        """执行函数(带调用栈跟踪) — 委托 _execute_function_inner"""
+                         closure_scope: Optional[Scope] = None,
+                         gen_mode: bool = False) -> RuntimeValue:
+        """执行函数(带调用栈跟踪) — 委托 _execute_function_inner
+
+        gen_mode=True: 由生成器协程线程驱动 — 不建控制器, 直接跑体
+        (yield 在执行内握手挂起; 帧入栈/快照/弹栈仍走本通道)。
+        """
         fd = func.func_def if isinstance(func, FunctionValue) else func
         frame_name = getattr(fd, 'name', '<lambda>')
         # 调用发生处的行号;顶层调用(如 main)无发生行,用函数定义行兜底
@@ -7823,8 +8770,11 @@ class Interpreter:
         frame = CallFrame(frame_name, frame_line, self.current_col,
                           self.current_filename)
         self.call_stack.append(frame)
+        prof = self.profiler
+        if prof is not None:
+            prof.enter(frame_name)
         try:
-            return self._execute_function_inner(func, args, closure_scope)
+            return self._execute_function_inner(func, args, closure_scope, gen_mode)
         except Exception as e:
             # 异常首次穿过本帧时,把完整调用链快照挂到异常上 —
             # 传到顶层时 finally 已弹栈,只有此刻看得见全链
@@ -7849,15 +8799,23 @@ class Interpreter:
                 pass
             raise
         finally:
+            if self.profiler is not None:
+                self.profiler.exit(frame_name)
             self.call_stack.pop()
 
     def _execute_function_inner(self, func, args: List[RuntimeValue],
-                          closure_scope: Optional[Scope] = None) -> RuntimeValue:
+                          closure_scope: Optional[Scope] = None,
+                          gen_mode: bool = False) -> RuntimeValue:
         """执行函数 - 支持闭包和泛型类型推断
 
         如果 func 是 FunctionValue,自动提取其闭包作用域。
         闭包作用域作为新作用域的 parent,而非当前的 current_scope。
         泛型参数从实参类型推断,代入形参注解和返回类型注解。
+
+        S3: 生成器函数调用(gen_mode=False 且 is_generator)— 惰性创建
+        控制器立刻返回 GeneratorValue, 函数体一行不跑(首个 pull 才启动,
+        与 Python 一致: 调用即惰性)。gen_mode=True 时由协程线程驱动,
+        跳过建控制器, 直接跑体。
         """
         # 提取 FunctionValue 的闭包
         if isinstance(func, FunctionValue):
@@ -7869,6 +8827,11 @@ class Interpreter:
 
         # LambdaExpr 没有 name 属性，用特殊名称
         func_name = getattr(func_def, 'name', '<lambda>')
+
+        # ── S3: 生成器函数 — 调用即惰性, 建控制器交 GeneratorValue ──
+        if getattr(func_def, 'is_generator', False) and not gen_mode:
+            return GeneratorValue(
+                GeneratorController(self, func, args, closure_scope))
 
         # ── 泛型类型推断 ──
         type_bindings: Dict[str, str] = {}
@@ -7958,16 +8921,15 @@ class Interpreter:
         result = IntValue(0)
 
         if is_gen:
-            # 生成器模式：yield 将值收集到缓冲区，返回列表
-            saved_yield = getattr(self, '_yield_buffer', None)
-            self._yield_buffer = []
+            # S3: gen_mode — 体由协程线程顺序驱动, yield 在执行内握手挂起;
+            # 执行流即生成器的生命周期(首个 pull 启动, return/耗尽收摊)。
+            # 注: 生成器函数不验 ensures — 无返回值可验(Python 同语义),
+            # requires 已在首个 pull 前的本线程 setup 里验过。
             for stmt in func_def.body:
                 result = self.execute_statement(stmt)
                 if self.return_flag:
                     self.return_flag = False
                     break
-            result = ListValue(self._yield_buffer, AnyType())
-            self._yield_buffer = saved_yield
         else:
             for stmt in func_def.body:
                 result = self.execute_statement(stmt)
@@ -7977,7 +8939,7 @@ class Interpreter:
 
         # 验证后置条件
         func_ensures = getattr(func_def, 'ensures', [])
-        if func_ensures:
+        if func_ensures and not (is_gen and gen_mode):
             # 将 result 放入全局作用域,使 ensures 表达式的 result 可解析
             self.global_scope.symbols['result'] = result
             if not self.contract_verifier.verify_ensures(func_ensures, result, context):
@@ -8029,6 +8991,9 @@ class Interpreter:
         for method_def in stmt.methods:
             fv = FunctionValue(method_def, self.current_scope)
             methods[method_def.name] = fv
+            # E3: 方法 def 行即执行 — 与顶层函数同口径打点
+            if self.coverage is not None and getattr(method_def, 'line', 0):
+                self.coverage.mark_stmt(self.current_filename, method_def.line)
         
         # 创建 ClassValue
         class_value = ClassValue(stmt.name, methods, superclass)
@@ -8038,17 +9003,25 @@ class Interpreter:
         
         return class_value
     
-    def _execute_method(self, method: FunctionValue, instance: 'InstanceValue', args: List[RuntimeValue]):
-        """在实例上下文中执行方法(带调用栈跟踪) — 委托 _execute_method_inner"""
+    def _execute_method(self, method: FunctionValue, instance: 'InstanceValue', args: List[RuntimeValue],
+                        gen_mode: bool = False):
+        """在实例上下文中执行方法(带调用栈跟踪) — 委托 _execute_method_inner
+
+        gen_mode=True: 生成器方法的协程线程驱动 — 不建控制器, 直接跑体。
+        """
         fd = method.func_def
-        class_name = getattr(getattr(instance, 'class_value', None), 'name', '')
+        klass = getattr(instance, 'klass', None)
+        class_name = getattr(klass, 'name', '') or ''
         frame_name = f"{class_name}.{getattr(fd, 'name', '<method>')}" if class_name \
             else getattr(fd, 'name', '<method>')
         frame = CallFrame(frame_name, self.current_line, self.current_col,
                           self.current_filename)
         self.call_stack.append(frame)
+        prof = self.profiler
+        if prof is not None:
+            prof.enter(frame_name)
         try:
-            return self._execute_method_inner(method, instance, args)
+            return self._execute_method_inner(method, instance, args, gen_mode)
         except Exception as e:
             if not getattr(e, '_intent_stack', None):
                 try:
@@ -8070,13 +9043,26 @@ class Interpreter:
                 pass
             raise
         finally:
+            if self.profiler is not None:
+                self.profiler.exit(frame_name)
             self.call_stack.pop()
 
-    def _execute_method_inner(self, method: FunctionValue, instance: 'InstanceValue', args: List[RuntimeValue]):
-        """在实例上下文中执行方法"""
+    def _execute_method_inner(self, method: FunctionValue, instance: 'InstanceValue',
+                              args: List[RuntimeValue], gen_mode: bool = False):
+        """在实例上下文中执行方法
+
+        S3: 生成器方法(gen_mode=False 且 is_generator)— 调用即惰性,
+        建控制器交 GeneratorValue(this 由协程线程重建后注入)。
+        """
         func_def = method.func_def
         closure = method.closure
-        
+
+        # ── S3: 生成器方法 — 惰性创建控制器 ──
+        if getattr(func_def, 'is_generator', False) and not gen_mode:
+            return GeneratorValue(
+                GeneratorController(self, method, args, closure,
+                                    instance=instance))
+
         # 创建方法作用域
         method_scope = Scope(parent=closure)
         
@@ -8187,6 +9173,13 @@ class Interpreter:
                     return method
                 raise NameError(f"实例没有属性 '{expr.member}'")
 
+            # S3: 生成器方法 g.send(v) / g.throw(e) / g.close()
+            if isinstance(obj_value, GeneratorValue):
+                if expr.member in ('send', 'throw', 'close'):
+                    return _GenMethod(obj_value, expr.member)
+                raise NameError(
+                    f"生成器没有成员 '{expr.member}'(可用: send/throw/close)")
+
             # ErrorValue 成员访问(P1.4): e.type / e.message / e.stack / e.__cause__
             if isinstance(obj_value, ErrorValue):
                 if expr.member == 'type':
@@ -8266,7 +9259,7 @@ class Interpreter:
             if isinstance(obj, ListValue):
                 return obj.get(index.value)
             elif isinstance(obj, DictValue):
-                val = obj.get(index.value)
+                val = obj.get(self._dict_key(index))
                 if val is None:
                     raise KeyError(f"字典中没有键 '{index.value}'")
                 return val
@@ -8404,6 +9397,15 @@ class Interpreter:
             else:
                 return self.evaluate_expression(expr.else_expr, context)
 
+        elif isinstance(expr, WalrusExpr):
+            # S2a: 海象 := — 求值→绑定(存在则赋值, 否则声明)→原值返回
+            val = self.evaluate_expression(expr.value, context)
+            if self.current_scope.has(expr.name):
+                self.current_scope.assign(expr.name, val)
+            else:
+                self.current_scope.declare(expr.name, val, False)
+            return val
+
         elif isinstance(expr, ThisExpr):
             # this 关键字 — 返回当前实例
             this_val = self.current_scope.get('this')
@@ -8463,6 +9465,11 @@ class Interpreter:
                     # ClassValue → 类实例化
                     if isinstance(var_val, ClassValue):
                         return var_val.call(self, args)
+                    # X3: __call__ — 实例可调用: obj(args) → obj.__call__(args)
+                    if isinstance(var_val, InstanceValue):
+                        call_method = var_val.get('__call__')
+                        if call_method is not None and isinstance(call_method, FunctionValue):
+                            return self._execute_method(call_method, var_val, args)
                     # FunctionValue → 调用 lambda 或闭包
                     if isinstance(var_val, FunctionValue):
                         return self.execute_function(var_val, args)
@@ -8478,7 +9485,7 @@ class Interpreter:
                     m = expr.func.member
                     args = [self.evaluate_expression(arg, context) for arg in expr.args]
                     if m == 'has_key' and len(args) == 1:
-                        return BoolValue(recv.has_key(args[0]))
+                        return BoolValue(recv.has_key(self._dict_key(args[0])))
                     if m == 'keys' and not args:
                         return self._builtin_keys([recv])
                     if m == 'values' and not args:
@@ -8500,6 +9507,11 @@ class Interpreter:
                     if is_instance_call:
                         return self._execute_method(func_val, instance, args)
                     return self.execute_function(func_val, args)
+                # X3: __call__ — 实例可调用: holder(args) → holder.__call__(args)
+                if isinstance(func_val, InstanceValue):
+                    call_method = func_val.get('__call__')
+                    if call_method is not None and isinstance(call_method, FunctionValue):
+                        return self._execute_method(call_method, func_val, args)
                 # ClassValue → 类构造函数 (如 std.bim.geometry.Vector3D())
                 if isinstance(func_val, ClassValue):
                     return func_val.call(self, args)
@@ -8603,7 +9615,7 @@ class Interpreter:
                 
                 key_val = self.evaluate_expression(expr.key_expr, context)
                 value_val = self.evaluate_expression(expr.value_expr, context)
-                entries[DictValue._norm_key(key_val)] = value_val
+                entries[self._dict_key(key_val)] = value_val
                 self.current_scope = old_scope
             
             return DictValue(entries, StringType(), AnyType())
@@ -8627,8 +9639,8 @@ class Interpreter:
             for key_expr, value_expr in expr.entries:
                 key_val = self.evaluate_expression(key_expr, context)
                 val_val = self.evaluate_expression(value_expr, context)
-                # 用字符串/数值作为键
-                key = key_val.value
+                # 用字符串/数值作为键(实例键走 __hash__ 归一)
+                key = self._dict_key(key_val)
                 entries[key] = val_val
             # 字典字面量宽松类型:键=String,值=不限制
             if not entries:
@@ -8643,8 +9655,27 @@ class Interpreter:
             # 创建闭包 - 捕获当前作用域
             return FunctionValue(expr, self.current_scope)
 
+        elif isinstance(expr, YieldExpr):
+            # S3: yield 表达式 — 产出值并返回 send 进来的值
+            return self.execute_yield(expr)
+
         else:
             raise RuntimeError(f"不支持的表达式类型: {type(expr).__name__}")
+
+    def _dict_key(self, key: RuntimeValue):
+        """X3: dict 键归一 — 实例作键时走 __hash__()
+
+        约定: 实例定义 __hash__() 返回 Int/String, 以该值为 dict 键;
+        未定义则回落 DictValue._norm_key 的标量归一(实例取 value 字段)。
+        """
+        if isinstance(key, InstanceValue):
+            method = key.get('__hash__')
+            if method is not None and isinstance(method, FunctionValue):
+                hv = self._execute_method(method, key, [])
+                if isinstance(hv, (IntValue, StringValue)):
+                    return hv.value
+                raise TypeError(f"__hash__() 必须返回 Int 或 String,得到 {hv.get_type()}")
+        return DictValue._norm_key(key)
 
     def _binary_op(self, left: RuntimeValue, op: str, right: RuntimeValue) -> RuntimeValue:
         """执行二元运算"""
@@ -8712,7 +9743,7 @@ class Interpreter:
 
         # 比较运算
         elif op == 'in':
-            # x in list / key in dict / sub in string
+            # x in list / key in dict / sub in string / obj.__contains__(x)
             if isinstance(right, ListValue):
                 for elem in right.value:
                     eq_result = self._binary_op(left, '==', elem)
@@ -8720,13 +9751,18 @@ class Interpreter:
                         return BoolValue(True)
                 return BoolValue(False)
             elif isinstance(right, DictValue):
-                return BoolValue(right.has_key(left))
+                return BoolValue(right.has_key(self._dict_key(left)))
             elif isinstance(right, StringValue):
                 # 子串归属 — 一物是否在他物之中(格物的基本操作)
                 if not isinstance(left, StringValue):
                     raise TypeError(f"'in' 对字符串期望 String 左侧,得到 {left.type}")
                 return BoolValue(left.value in right.value)
-            raise TypeError(f"'in' 操作符右侧期望列表、字典或字符串,得到 {right.type}")
+            elif isinstance(right, InstanceValue):
+                # X3: __contains__ — 归属判断交给对象自己
+                method = right.get('__contains__')
+                if method is not None and isinstance(method, FunctionValue):
+                    return self._execute_method(method, right, [left])
+            raise TypeError(f"'in' 操作符右侧期望列表、字典、字符串或有__contains__的对象,得到 {right.type}")
 
         elif op == 'not in':
             # x not in list / key not in dict
@@ -8842,6 +9878,14 @@ class Interpreter:
         if op in op_to_method and isinstance(left, InstanceValue):
             method_name = op_to_method[op]
             method = left.get(method_name)
+            # != 未定义 __ne__ 时回退 __eq__ 取反(与 Python 的默认推导一致)
+            if method is None and op == '!=':
+                method_name, method = '__eq__', left.get('__eq__')
+                if method is not None and isinstance(method, FunctionValue):
+                    eq_result = self._execute_method(method, left, [right])
+                    if isinstance(eq_result, BoolValue):
+                        return BoolValue(not eq_result.value)
+                    raise TypeError(f"__eq__() 必须返回 Bool,得到 {eq_result.get_type()}")
             if method and isinstance(method, FunctionValue):
                 return self._execute_method(method, left, [right])
             # 反射方法: 如果右操作数是实例且有 __radd__ 等
@@ -9242,6 +10286,14 @@ def main():
                         help='C7: 调试模式执行(断点/单步/变量检视/调用栈)')
     parser.add_argument('--postmortem', action='store_true',
                         help='EX2: 事后调试(异常帧快照存档 + 崩溃后进场检视)')
+    parser.add_argument('--profile', action='store_true',
+                        help='M4: 函数级剖析(cProfile 等价: 调用次数/累计/自身时间)')
+    parser.add_argument('--mem-profile', action='store_true',
+                        help='M4: 内存分配热点(基于 MM1 对象注册表的按类型分配计数)')
+    parser.add_argument('--coverage', action='store_true',
+                        help='E3: 语句覆盖率(执行打点 + AST 分母, Python coverage 语句语义)')
+    parser.add_argument('--contracts', action='store_true',
+                        help='Q2: 与 --coverage 同用 — 叠加契约覆盖率(requires/ensures 子句级)')
 
     # parse_known_args: 源文件之后的额外参数透传给 Intent 程序(args() 读取)
     args, extra = parser.parse_known_args()
@@ -9376,6 +10428,31 @@ def main():
             sys.exit(2)
         run_postmortem(code, code_name)
         return
+
+    # M4: 剖析模式 — --profile 函数级计时 + --mem-profile 分配热点
+    if args.profile or args.mem_profile:
+        if code is None:
+            print("❌ --profile/--mem-profile 需要代码来源: --profile file.intent 或 -c '...'")
+            sys.exit(2)
+        if args.profile:
+            interpreter.profiler = FunctionProfiler()
+        wall0 = time.perf_counter()
+        run_code(code, interpreter, args)
+        wall = time.perf_counter() - wall0
+        if args.profile:
+            print()
+            print(interpreter.profiler.report(wall))
+        if args.mem_profile:
+            print()
+            print(render_mem_profile())
+        return
+
+    # E3/Q2: 覆盖率模式 — 语句打点 + (可选)契约子句打点
+    if args.coverage:
+        if code is None:
+            print("❌ --coverage 需要代码来源: --coverage file.intent")
+            sys.exit(2)
+        sys.exit(run_coverage(code, code_name, with_contracts=args.contracts))
 
     # -c 直接执行(无需文件)
     if args.code is not None:
@@ -9567,6 +10644,42 @@ def render_intent_error(e: IntentError, interpreter: 'Interpreter') -> str:
         for c in reversed(causes):
             out.append(f"     {c.err_type}: {c.message}")
     return "\n".join(out)
+
+def run_coverage(code: str, code_name: str, with_contracts: bool = False) -> int:
+    """E3/Q2: 覆盖率运行 — 解析后先计 AST 分母, 再打点执行, 出报告
+
+    程序异常也出报告(崩了更要看见覆盖到哪) — 渲染错误到 stderr,
+    报告走 stdout, 退出码 1; 干净执行退出 0。
+    """
+    lexer = Lexer(code)
+    tokens = lexer.tokenize()
+    parser = Parser(tokens, code)
+    program = parser.parse()
+    if parser.errors:
+        print(f"❌ 语法错误, 无法覆盖率分析: {parser.errors[0]}")
+        return 2
+    tracker = CoverageTracker(with_contracts=with_contracts)
+    tracker.count_program(program, code_name)
+    interp = Interpreter()
+    interp._set_source(code)
+    interp.current_filename = code_name
+    interp.coverage = tracker
+    exit_code = 0
+    try:
+        interp.execute_program(program)
+        # 测试文件约定(无 main, 全是 test_* 函数): 与 --test 同口径执行用例,
+        # 否则覆盖率报告是 0% 的空壳 — 覆盖要对准真实执行面
+        if 'main' not in interp.functions:
+            for tname in sorted(n for n in interp.functions if n.startswith('test_')):
+                interp.execute_function(interp.functions[tname], [])
+    except Exception as e:
+        err = wrap_intent_error(e, interp)
+        print(render_intent_error(err, interp), file=sys.stderr)
+        exit_code = 1
+    print()
+    print(tracker.report())
+    return exit_code
+
 
 def run_code(code: str, interpreter: Interpreter, args):
     """运行Intent代码"""

@@ -1,0 +1,9 @@
+# Issue 模板配置
+# 讨论与求助走 Discussions（开启后替换下方 URL），缺陷与特性走 Issue
+contact_links:
+  - name: Intent 路线图（四期）
+    url: https://github.com/J-intent/intent/blob/main/docs/ROADMAP_LONGTERM.md
+    about: 提议新特性前必读 — 候选任务与分期都在这里
+  - name: 语言规范 spec
+    url: https://github.com/J-intent/intent/blob/main/docs/spec.md
+    about: 行为争议以 spec 为唯一事实来源

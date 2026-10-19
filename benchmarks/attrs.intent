@@ -1,0 +1,43 @@
+// benchmarks/attrs.intent — 属性访问基准(Q4, 对标 M2 实例属性缓存)
+// 实例字段读是 MEP 场景最高频的操作(管道翻弯逐构件查标高)。
+// 本基准: 10 万次字段读 + 10 万次字段写, 分开计时。
+// cache_stats() 命中率一并输出 — 缓存有效性要有数字, 不靠感觉。
+
+class Node {
+    def init(x: Int, y: Int) {
+        this.x = x;
+        this.y = y;
+    }
+    def read_sum(): Int {
+        return this.x + this.y;
+    }
+    def bump() {
+        this.x = this.x + 1;
+    }
+}
+
+let n = Node(1, 2);
+
+let t0 = now();
+let mut i = 0;
+let mut acc = 0;
+while i < 100000 {
+    acc = acc + n.read_sum();
+    i = i + 1;
+};
+let ms = (now() - t0) * 1000.0;
+print("read_sum x100000 = " + str(acc));
+print("Time: " + str(int(ms)) + " ms");
+
+let t1 = now();
+let mut j = 0;
+while j < 100000 {
+    n.bump();
+    j = j + 1;
+};
+let ms2 = (now() - t1) * 1000.0;
+print("bump x100000, x = " + str(n.x));
+print("Time: " + str(int(ms2)) + " ms");
+
+let stats = cache_stats();
+print("cache hits/misses: " + str(stats[0]) + "/" + str(stats[1]));

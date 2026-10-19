@@ -1,4 +1,12 @@
-// 生成器回归测试(P1.5) — yield 与 yield from 委派
+// 生成器回归测试(P1.5 → S3 语义升级) — yield 与 yield from 委派
+// S3 起生成器为真惰性: 调用返回生成器对象, for/next 消费;
+// 本文件统一用 collect() 辅助函数物化后断言(语义迁移自旧的饿收集)。
+
+def collect(g) {
+    let r = [];
+    for x in g { push(r, x); };
+    return r;
+};
 
 def test_yield_basic() {
     def gen() {
@@ -6,8 +14,8 @@ def test_yield_basic() {
         yield 2;
         yield 3;
     };
-    let r = gen();
-    assert len(r) == 3, "yield 收集三个值";
+    let r = collect(gen());
+    assert len(r) == 3, "yield 产出三个值";
     assert r[0] == 1, "yield 顺序";
 };
 
@@ -15,7 +23,7 @@ def test_yield_from_list() {
     def inner() {
         yield from [10, 20, 30];
     };
-    let r = inner();
+    let r = collect(inner());
     assert len(r) == 3, "yield from 列表";
     assert r[1] == 20, "yield from 转发值";
 };
@@ -31,7 +39,7 @@ def test_yield_from_generator() {
         yield from base();
         yield 3;
     };
-    let r = wrapper();
+    let r = collect(wrapper());
     assert len(r) == 4, "yield from 生成器委派";
     assert r[2] == 2, "委派值正确嵌入";
 };
@@ -40,7 +48,7 @@ def test_yield_from_dict() {
     def keys_gen() {
         yield from {"a": 1, "b": 2};
     };
-    let r = keys_gen();
+    let r = collect(keys_gen());
     assert len(r) == 2, "yield from 字典转发键";
 };
 
@@ -50,7 +58,7 @@ def test_yield_mixed() {
         yield from [1, 2];
         yield "end";
     };
-    let r = mixed();
+    let r = collect(mixed());
     assert len(r) == 4, "yield 与 yield from 混用";
     assert r[0] == "start", "混用顺序";
     assert r[3] == "end", "混用收尾";

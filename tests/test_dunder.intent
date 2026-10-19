@@ -1,0 +1,223 @@
+// X3: dunder 协议全家回归测试
+// __call__/__iter__/__next__/__enter__/__exit__/__len__/__contains__/__eq__/__hash__/__repr__
+// 约定: __next__() 返回 None 表示迭代耗尽(语言无 StopIteration 通道);
+
+// ── __call__: 实例可调用 ──
+class Adder {
+    def init(base: Int) {
+        this.base = base;
+    }
+    def __call__(x: Int): Int {
+        return this.base + x;
+    }
+}
+
+def test_dunder_call() {
+    let add5 = Adder(5);
+    assert add5(3) == 8, "__call__: 实例像函数一样调用";
+    assert add5(-5) == 0, "__call__: 负数参数";
+    // 经成员访问持有的实例同样可调用
+    let holder = Adder(100);
+    let f = holder;
+    assert f(1) == 101, "__call__: 变量转手后可调用";
+}
+
+// ── __next__ + __iter__: 自定义迭代器 ──
+class Counter {
+    def init(limit: Int) {
+        this.i = 0;
+        this.limit = limit;
+    }
+    def __iter__() {
+        return this;
+    }
+    def __next__(): Int {
+        if this.i >= this.limit {
+            return None;
+        }
+        this.i = this.i + 1;
+        return this.i;
+    }
+}
+
+def test_dunder_next_builtin() {
+    let c = Counter(2);
+    assert next(c) == 1, "next(): 取第一个";
+    assert next(c) == 2, "next(): 取第二个";
+    assert next(c) == None, "next(): 耗尽返回 None";
+}
+
+def test_dunder_for_iterator() {
+    let c = Counter(3);
+    let mut total = 0;
+    for x in c {
+        total = total + x;
+    }
+    assert total == 6, "for 遍历自定义迭代器(1+2+3)";
+}
+
+// ── __iter__ 返回列表(既有路径回归) ──
+class Bag {
+    def init() {
+        this.items = [10, 20, 30];
+    }
+    def __iter__() {
+        return this.items;
+    }
+}
+
+def test_dunder_iter_list() {
+    let b = Bag();
+    let mut total = 0;
+    for x in b {
+        total = total + x;
+    }
+    assert total == 60, "__iter__ 返回列表, for 求和";
+}
+
+// ── __enter__/__exit__: 上下文管理器协议 ──
+class Guard {
+    def init(name: String) {
+        this.name = name;
+        this.entered = false;
+        this.exited = false;
+        this.saw_error = false;
+    }
+    def __enter__() {
+        this.entered = true;
+        return this.name;
+    }
+    def __exit__(err) {
+        this.exited = true;
+        if err != None {
+            this.saw_error = true;
+        }
+    }
+}
+
+def test_dunder_enter_exit() {
+    let g = Guard("res");
+    with g as name {
+        assert name == "res", "__enter__ 返回值绑定 as 名";
+        assert g.entered == true, "块内已进入";
+    };
+    assert g.exited == true, "块退出自动调 __exit__";
+    assert g.saw_error == false, "正常退出无错误值";
+}
+
+def test_dunder_exit_receives_error() {
+    let g = Guard("res2");
+    let mut caught = false;
+    try {
+        with g {
+            error("boom");
+        };
+    } catch e {
+        caught = true;
+    };
+    assert caught == true, "块内异常照常传播";
+    assert g.exited == true, "异常路径也调 __exit__";
+    assert g.saw_error == true, "__exit__ 收到错误值";
+}
+
+// ── __len__ ──
+class Squad {
+    def init() {
+        this.members = ["a", "b", "c", "d"];
+    }
+    def __len__(): Int {
+        return 4;
+    }
+}
+
+def test_dunder_len() {
+    let s = Squad();
+    assert len(s) == 4, "len() 走 __len__";
+}
+
+// ── __contains__ ──
+class Team {
+    def init() {
+        this.roster = ["alice", "bob"];
+    }
+    def __contains__(who: String): Bool {
+        for m in this.roster {
+            if m == who {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+def test_dunder_contains() {
+    let t = Team();
+    assert "alice" in t, "__contains__: 命中返回 true";
+    assert "carol" not in t, "__contains__: 未命中取反";
+}
+
+// ── __eq__/__ne__ ──
+class Version {
+    def init(major: Int, minor: Int) {
+        this.major = major;
+        this.minor = minor;
+    }
+    def __eq__(other): Bool {
+        return this.major == other.major and this.minor == other.minor;
+    }
+}
+
+def test_dunder_eq_ne() {
+    let v1 = Version(1, 2);
+    let v2 = Version(1, 2);
+    let v3 = Version(2, 0);
+    assert v1 == v2, "__eq__: 同版本相等";
+    assert v1 != v3, "__ne__: 无 __ne__ 时回退 __eq__ 取反";
+    assert not (v1 == v3), "__eq__: 不同版本不相等";
+}
+
+// ── __hash__: 实例作 dict 键 ──
+class Id {
+    def init(code: String) {
+        this.code = code;
+    }
+    def __hash__(): Int {
+        return len(this.code);
+    }
+}
+
+def test_dunder_hash_dict_key() {
+    let d = {};
+    let k1 = Id("abc");
+    d[k1] = 42;
+    assert d[k1] == 42, "__hash__: 实例作键写入后读回";
+    assert d.has_key(k1) == true, "__hash__: has_key 命中";
+}
+
+// ── __repr__ / __str__ ──
+class Show {
+    def init(v: Int) {
+        this.v = v;
+    }
+    def __repr__(): String {
+        return "Show(" + str(this.v) + ")";
+    }
+}
+
+class Plain {
+    def init(v: Int) {
+        this.v = v;
+    }
+}
+
+def test_dunder_repr() {
+    let s = Show(7);
+    assert repr(s) == "Show(7)", "repr() 走 __repr__";
+    print(s);
+}
+
+def test_dunder_default_str() {
+    // 无 __str__/__repr__ 的实例仍走结构渲染, 不崩
+    let p = Plain(1);
+    print(p);
+}

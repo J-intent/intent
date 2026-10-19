@@ -1,0 +1,47 @@
+// std/inspect.intent — 反射模块（X2 切片）
+//
+// 内置四件套(getattr/setattr/hasattr/dir)之上的纯 Intent 封装。
+// 边界(诚实清单): 无函数元数据内省(signature/params 需解释器暴露
+// FunctionValue 形参表 — 后续切片), 无源码行号; 本模块只做成员枚举
+// 与安全访问, 不假装是 Python inspect 全家族。
+// ⚠️ 实例作函数参数是值拷贝(参数绑定 arg_value.copy(), 既有语言语义) —
+// 经本模块函数改字段不会传播到调用方的实例; 要改原对象, 调用方侧直接
+// setattr(alias, ...)(let 别名共享引用)或定义实例方法。
+
+// getmembers(obj) → Dict[name, value] — 枚举全部可见成员(字段+方法)
+def getmembers(obj) {
+    let mut members = {};
+    for name in dir(obj) {
+        members[name] = getattr(obj, name);
+    }
+    return members;
+}
+
+// get(obj, name, default) — 安全读: 不存在返默认值, 不抛
+def get(obj, name, default) {
+    if hasattr(obj, name) {
+        return getattr(obj, name);
+    }
+    return default;
+}
+
+// attr_names(obj) → List — dir 的直传(枚举字段+方法名, 排序)
+def attr_names(obj) {
+    return dir(obj);
+}
+
+// is_field(obj, name) — 名是否为数据字段(存在且不可调用)
+def is_field(obj, name) {
+    if not hasattr(obj, name) {
+        return false;
+    }
+    return not callable(getattr(obj, name));
+}
+
+// is_method(obj, name) — 名是否为方法(存在且可调用)
+def is_method(obj, name) {
+    if not hasattr(obj, name) {
+        return false;
+    }
+    return callable(getattr(obj, name));
+}

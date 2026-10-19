@@ -1,0 +1,79 @@
+// f-string 完整化回归测试(S2b) — 调试格式 / 嵌套引号 / 格式规格
+// 对齐 Python f-string 三形态: ${x=} / 嵌套引号 / ${x:spec}
+// 格式规格语义以 Python format() 为准(白名单校验后原样委托)。
+
+def test_interp_basic() {
+    let name = "Intent";
+    let s = "hello ${name}!";
+    assert s == "hello Intent!", "基础插值不回归";
+};
+
+def test_interp_multi() {
+    let a = 1;
+    let b = 2;
+    assert "${a}+${b}=${a + b}" == "1+2=3", "多插值拼接";
+};
+
+def test_debug_format() {
+    let x = 42;
+    assert "${x=}" == "x=42", "= 调试格式带表达式原文";
+    let msg = "hi";
+    assert "value: ${msg=}" == "value: msg=hi", "调试格式可混排";
+};
+
+def test_debug_with_spec() {
+    let pi = 3.14159;
+    assert "${pi=:.2f}" == "pi=3.14", "调试格式叠加规格";
+};
+
+def test_float_spec() {
+    let pi = 3.14159;
+    assert "${pi:.4f}" == "3.1416", "精度规格";
+    assert "${pi:.2e}" == "3.14e+00", "科学计数";
+};
+
+def test_int_spec() {
+    let n = 42;
+    assert "${n:05d}" == "00042", "零填充宽度";
+    assert "${n:x}" == "2a", "十六进制";
+    assert "${n:+}" == "+42", "符号规格";
+    assert "${1234567:,}" == "1,234,567", "千分位";
+};
+
+def test_string_align_spec() {
+    let s = "hi";
+    assert "${s:>6}" == "    hi", "右对齐";
+    assert "${s:<6}" == "hi    ", "左对齐";
+    assert "${s:^7}" == "  hi   ", "居中";
+    assert "${s:*^7}" == "**hi***", "填充字符";
+};
+
+def test_percent_spec() {
+    let r = 0.156;
+    assert "${r:.1%}" == "15.6%", "百分比规格";
+};
+
+def test_nested_quotes_dict() {
+    let d = {"k": "v", "n": 7};
+    assert "lookup ${d["k"]}" == "lookup v", "双引号嵌套(插值区内引号不终止字符串)";
+    assert "single ${d['n']}" == "single 7", "单引号嵌套";
+};
+
+def test_interp_call_and_slice() {
+    let name = "Intent";
+    assert "len=${len(name)}" == "len=6", "插值内函数调用";
+    let l = [10, 20, 30, 40];
+    assert "mid=${l[1:3]}" == "mid=[20, 30]", "插值内切片(冒号不是规格分隔符)";
+};
+
+def test_fprefix_marker() {
+    let x = 9;
+    let s = f"x is ${x}";
+    assert s == "x is 9", "f 前缀仍是显式宣告";
+};
+
+def test_format_builtin_direct() {
+    assert format(3.14159, ".2f") == "3.14", "format 内置直调";
+    assert format(7, "03d") == "007", "format 整数规格";
+    assert format("ab", ">5") == "   ab", "format 字符串规格";
+};

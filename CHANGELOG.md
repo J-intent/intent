@@ -4,6 +4,198 @@
 
 ---
 
+## v2.21.0 — S3：生成器完整化（真惰性协程）（2026-10-19）
+
+> 旧实现：生成器函数**饿收集**——调用即跑完整个函数体，yield 的值攒成
+> List 返回。send/throw/close 无从谈起（没有挂起点），无限生成器直接挂死。
+> 本版换成线程协作式协程（threadlet）：体跑独立线程，双队列握手，
+> 任意时刻只有一个线程在跑，共享解释器状态靠上下文切换白名单保存/恢复。
+
+**新语义（对齐 CPython）**
+
+- 调用即惰性：`g()` 返回 `<generator>`，函数体一行不跑；首个 `next()` 才启动
+- `next(g)` 拉一个值，耗尽返回 `None`（语言约定，无 StopIteration 通道）
+- `g.send(v)`：v 递送到 yield 表达式（`let x = yield v` 的 x 即 v）；首 send 必须 None
+- `g.throw(e)`：在挂起点抛错——生成器内 catch 接得住，未捕获则到调用方
+- `g.close()`：关闭信号是 BaseException 子类，业务 catch 吞不掉（对齐 GeneratorExit）
+- `yield` 表达式化：`let x = yield v;`；裸 yield 产出 None（旧版为 0，已迁移）
+- `yield from` 对生成器源：逐项 pull 且 send 值透传；列表/字典源逐项交出
+- `for x in g` 真懒遍历：不预取，无限生成器可用；break/return 提前退出自动收摊协程线程
+
+**实现要点**
+
+- `GeneratorController`：协程线程 + in_q/out_q 双队列；`_GEN_CTX_ATTRS` 白名单
+  （current_scope/call_stack/return_flag/current_line/… ）在切换点保存恢复；
+  global_scope/functions/builtins 共享——正是生成器闭包所见的世界
+- 嵌套生成器：外层线程驱动内层控制器（owner 链），close 沿链传播有界收摊
+- 生成器方法（class 内 yield）：`this` 由协程线程重建后注入
+- requires 在首个 pull 时验（惰性）；ensures 不验（无返回值可验，Python 同语义）
+- 修一个被掩盖的旧 bug：`_has_yield_in_body` 递归进嵌套函数体，把外层误标
+  成生成器——饿收集时代无症状，真惰性后「调用即返回」会直接吃掉外层执行
+
+**边界（诚实清单）**：字节码 VM 无生成器路径（VM 差分纪律：不跑含 yield 的文件）；
+协程线程内 profiler 打点关闭（帧栈纪律与协程切换冲突），覆盖率打点保留；
+异常在调用方 pull 点抛出的栈快照为「生成器创建链 + 生成器帧」，不含 pull 点调用链；
+生成器线程阻塞在 channel 等无界操作时 close 有界返回（2s），留 daemon 线程。
+
+**测试**：tests/test_generator_full.intent 20 用例（惰性证明/send/throw/close/
+吞不掉/break 收摊/嵌套/闭包/方法/requires 惰性违约）；test_generators_p1.intent
+语义迁移至 collect() 物化；全量回归 312/313 绿（1 跳过为既有）。
+
+---
+
+## v2.20.0 — S2b：f-string 完整化（2026-10-19）
+
+> 对齐 Python f-string 三形态：调试格式 / 嵌套引号 / 格式规格。
+> 旧实现是正则 `[^}]+` 扫描——不敢放嵌套括号（切片/字典/调用）；
+> 且插值区内引号会提前终止字符串（`"${d["k"]}"` 直接语法错误）。
+
+- **调试格式 `${x=}`**：输出 `x=<值>`（表达式原文 + `=` + 求值）；`${x=:.2f}` 可叠加规格
+- **格式规格 `${x:spec}`**：新内置 `format(v, spec)`——白名单校验（拒花括号）后原样委托 Python `format()`；fill/align/sign/0宽度/千分位/精度/类型（d e f g x o b % s）全支持
+- **嵌套引号**：lexer 插值区括号深度 + 嵌套子串跟踪，`"${d["k"]}"` / `"${d['n']}"` 合法；三引号字符串同规则
+- 插值扫描器重写：括号深度感知——切片 `${l[1:3]}` 的冒号不再是规格分隔符（深度1 才算），字典/调用/嵌套字符串内的括号不误计
+- tests/test_fstring_advanced.intent 12 用例；全量回归 292/293 绿（1 跳过为既有）
+
+---
+
+## v2.19.0 — Q4：基准套件（2026-10-19）
+
+> 性能要对数字说话，不靠"感觉不慢"。benchmarks/ 三类基准 +
+> 运行器 + 基线报告，回退超 20% 自动标红。
+
+- `benchmarks/fib.intent`：fib(25) 递归（调用链试金石）+ fib_iter(10000) 循环/局部变量，附迭代=递归自检
+- `benchmarks/attrs.intent`：实例字段读/写各 10 万次 + cache_stats 命中率（M2 缓存有效性有数：实测命中率 99.9996%）
+- `benchmarks/contracts.intent`：同构函数对（带契约 vs 不带）量化契约税——实测 55%，spec §6 记录
+- `benchmarks/run_benchmarks.py`：每基准跑 3 次取最小值；`--update` 重写基线；与 BASELINE.md 对比超 +20% 判回退并非零退出
+- 基线来自真实运行（Ryzen 7 9700X / Win11 / Python 3.12），不手写编造
+
+---
+
+## v2.18.0 — E3 + Q2：语句覆盖率 + 契约覆盖率（2026-10-19）
+
+> 修掉一个被掩假的 done：E3 源码覆盖率 10-17 被同名 id 的「示例库」
+> （examples≥20 恒真）掩成 done，实际 `--coverage` 从未实现（未知 flag
+> 被 parse_known_args 吞掉）。本轮落地真实现，Q2 契约维度同轮交付。
+> 引擎 id 撞车 bug 已上报阿J（langforge.py 不在本自动化改动范围）。
+
+**E3 语句覆盖率（`--coverage file`）**
+
+- `CoverageTracker`：execute_statement 入口打点（含 def 行/方法行的注册处打点）；分母 = AST 全量遍历的非表达式语句行
+- 测试文件口径：无 main 时执行全部 `test_*` 函数（与 `--test` 一致），否则报告是 0% 空壳
+- 崩溃也出报告（错误进 stderr，报告进 stdout，退出码 1）——覆盖到哪看见到哪
+
+**Q2 契约覆盖率（`--coverage --contracts`）**
+
+- requires/ensures 逐子句按身份计（AST 节点 id 去重——覆盖率不是执行次数，实测踩过 150% 的坑已修）
+- 报告：契约覆盖率总况 + requires/ensures 分项；未调用函数的契约不进分子（部分覆盖场景实测 2/3）
+
+**边界（诚实清单）**：裸表达式语句（`f();`）不计分母；行级口径（同行多语句算一条）。
+
+---
+
+## v2.17.0 — S2a 切片：海象赋值 + 切片赋值（2026-10-19）
+
+> 语法糖补全的第一刀：表达式级赋值与列表写入侧。lexer 一层合并
+> （:= 此前被 : 单字符快通道劈成两截）、parser 最低优先级挂点、
+> 求值器/reolver 各一分发；切片赋值复用 SliceExpr，零新求值路径。
+> 中途踩坑已修：parse_statement 下标赋值检测一度把 index 传成整个
+> SubscriptExpr（求值索引变读取，未命中键即 KeyError）——A/B（stash）
+> 定位后修复，全量回归 280/281 绿。
+
+**海象 `:=`**
+
+- 新 AST `WalrusExpr(name, value)`；`parse_expression` 最低优先级（低于三元/管道/逻辑或/比较）
+- 求值：存在则 assign，否则 declare；返回被赋的值；左部非变量显式语法错误
+- resolver 同步：海象名入当前作用域（否则局部绑定后续引用掉到全局查找）
+- lexer：`:` 快通道前合并 `:=` 双字符（`::` 不受影响）
+
+**切片赋值 `l[a:b] = v`**
+
+- parse_statement 赋值检测认 SliceExpr（切片读取的产物即赋值目标）
+- 执行器切片分支：步长限 1、右侧限列表、Python slice 增删长度语义、负索引
+- 错误路径全显式：扩展切片 TypeError / 复合操作符 RuntimeError / 字符串 TypeError
+
+**测试**：tests/test_syntax_sugar.intent 12 用例（含 `or` 返回 Bool 的本语言语义锁）。
+
+---
+
+## v2.16.0 — X2：反射完整化切片（2026-10-19）
+
+> 反射四件套 + callable + std/inspect 纯 Intent 封装。边界如实记录：
+> 实例作函数参数是值拷贝（参数绑定 `arg_value.copy()`，既有语义）——
+> 经函数参数 setattr 不传播回调用方，inspect 因此不提供 setdefault
+> （承诺了语言给不了的事就是撒谎）；`let` 别名共享引用，别名侧
+> setattr 生效。函数元数据内省（signature/params）留后续切片。
+
+**内置（X2）**
+
+- `getattr(obj, name)` / `setattr(obj, name, v)` / `hasattr(obj, name)` / `dir(obj)`（字段+方法含继承链）
+- `callable(x)`：函数/类/FFI/Python 桥/mock/有 `__call__` 的实例
+- `ClassValue.all_method_names()`：继承链方法名枚举（dir 的地基）
+
+**std/inspect.intent（纯 Intent 封装）**
+
+- `getmembers` / `get(obj, name, default)` / `attr_names` / `is_field` / `is_method`
+- tests/test_reflect.intent 11 用例，含参数拷贝语义的对照锁定
+
+---
+
+## v2.15.0 — M2 切片：实例属性访问缓存 + 命中率可观测（2026-10-19）
+
+> 按拆解指引落地最小切片：缓存表 + 测试骨架 + 微基准命中率。
+> 诚实记录：端到端 A/B（30000 次 `p.sum()`）0.99x——树遍历解释器
+> 开销主导，2x 微基准留待隐藏类/调用点内联缓存迭代。
+
+**缓存表（`InstanceValue`）**
+
+- `get()`：缓存命中免 `fields`/方法表两级查找；未命中填缓存（字段 + 方法查找结果，类创建后方法表即稳定）
+- `set()` 写透同步——无失效窗口；`execute_member_assignment` 的直写 fields 两处改道 `set()`（缓存一致性）
+- `copy()` 得新实例新缓存（字段直赋，不经 set）
+
+**可观测性**
+
+- `cache_stats()` → `[命中, 未命中]`（模块级聚合）；`cache_reset()` 清零
+- tests/test_inline_cache.intent：写透语义/方法查找/微基准（4300 次读取，未命中仅 sum 首次查找，稳态命中率 99.98%）
+- 实测备忘：方法查找路径缓存后约为 `find_method` 链的 1/3；端到端被解释器固定成本摊平——如实记录，不吹 2x
+
+---
+
+## v2.13.0 — X3 + M4：dunder 协议全家 + 函数级剖析（2026-10-19）
+
+> 两个切片一轮落地。X3 补完元编程协议面；M4 把「看不见的慢」
+> 变成一张表：函数级调用/累计/自身时间 + 分配热点。profiler 未启用时
+> 热路径只多一次属性判断，零开销。
+
+**X3 dunder 协议全家**
+
+> 元编程协议从「运算符重载 + 两个内置分发」扩到完整协议面：解释器新增
+> 七个分发点（调用/迭代/with/归属/dict 键/字符串化），`next()`/`repr()`
+> 两个内置，`!=` 回退 `__eq__` 取反。VM 经委托通道零改动。既有
+> `__iter__`(返回列表)/`__len__`/`__str__`/比较系路径原样回归。
+
+- `__call__`：`obj(args)` 两条路径（作用域变量 + 成员访问持有）→ `_execute_method`
+- `__next__`：`next(it)` 内置；for 循环支持 `__iter__` 返回迭代器对象或自身即迭代器——树遍历边界预取为列表（`_drain_iterator`，100 万项安全上限；生成器仍真惰性）
+- `__enter__`/`__exit__`：with 语句协议化，`__enter__` 返回值绑定 as 名，`__exit__` 收退出错误值；无协议实例维持旧约定（绑资源 + `close()`），tests/test_with.intent 全绿回归
+- `__contains__`：`x in obj`
+- `__hash__`：实例作 dict 键——`_dict_key` 统一入口（字面量/推导式/下标读写/has_key/in 六处），返回 Int/String 为键
+- `__repr__`：`repr()` 内置 + `_value_to_str` 回落链 `__str__` → `__repr__` → 结构渲染
+- `!=` 未定义 `__ne__` 时回退 `__eq__` 取反（对齐 Python 默认推导）
+
+**M4 `--profile`（函数级，cProfile 等价切片）**
+
+- `FunctionProfiler`：挂接 `execute_function`/`_execute_method` 帧入出；自身时间 = 累计 − 直接子调用（`_stack` 逐层上报）；`time.perf_counter` 单调时钟
+- 输出按累计降序：函数名/调用次数/累计(s)/自身(s) + 墙钟总耗时
+- 顺带修复：`_execute_method` 帧名取 `class_value`（不存在属性）→ `klass.name`，方法帧恢复 `类.方法` 前缀（错误调用链同受益）
+
+**M4 `--mem-profile`（分配热点）**
+
+- MM1 注册表增 `alloc_by_type` 计数；实例按类名聚合（原先 `get_type()` 对实例返回 StringType，类型名失真）
+- 输出：累计分配/当前存活/已回收 + 按类型存活与累计分配表
+
+**测试**：tests/test_dunder.intent 12 用例（协议面全覆盖）；全量回归 254/255（1 为既有演示性 skip）。
+
+---
+
 ## v2.12.0 — X1 二批：装饰器完整化切片（带参/语句级）+ lru_cache（2026-10-19）
 
 > 最小切片把「装饰器能用」推进到「装饰器够用」：带参工厂、语句级声明、

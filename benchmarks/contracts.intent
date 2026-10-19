@@ -1,0 +1,45 @@
+// benchmarks/contracts.intent — 契约开销基准(Q4, 对标契约系统requires/ensures)
+// 契约是 Intent 的灵魂, 但灵魂不能免费: 本基准量化 requires/ensures
+// 每次调用的验证成本。同构函数一对: 带契约 vs 不带契约, 差值即契约税。
+//
+// 判定纪律: 契约税 >30% 需在 spec.md 记录理由或优化验证器;
+// 数字说话, 不靠"感觉不慢"。
+
+def plain_add(a: Int, b: Int): Int {
+    return a + b;
+};
+
+def guarded_add(a: Int, b: Int): Int
+    requires a >= 0
+    requires b >= 0
+    ensures result == a + b
+{
+    return a + b;
+};
+
+let n = 100000;
+
+let t0 = now();
+let mut i = 0;
+let mut acc = 0;
+while i < n {
+    acc = plain_add(acc, 1);
+    i = i + 1;
+};
+let ms = (now() - t0) * 1000.0;
+print("plain_add x${n} = ${acc}");
+print("Time: ${int(ms)} ms");
+
+let t1 = now();
+let mut j = 0;
+let mut acc2 = 0;
+while j < n {
+    acc2 = guarded_add(acc2, 1);
+    j = j + 1;
+};
+let ms2 = (now() - t1) * 1000.0;
+print("guarded_add x${n} = ${acc2}");
+print("Time: ${int(ms2)} ms");
+
+let tax = (ms2 - ms) * 100.0 / ms;
+print("contract tax: ${int(tax)}%");

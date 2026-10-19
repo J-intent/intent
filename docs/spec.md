@@ -47,6 +47,9 @@
 | String | 双引号，支持 `\` 转义 | `"hello\n"` |
 | f-string | `f"..."` 前缀（显式插值宣告） | `f"${name} 好"` |
 | 插值字符串 | `${expr}` 内嵌求值 | `"${name} 得分 ${score}"` |
+| 调试插值 | `${expr=}` 输出 `expr=值`（可叠规格 `${x=:.2f}`） | `"${x=}"` → `x=42` |
+| 格式规格插值 | `${expr:spec}` 对齐 Python format()（fill/align/sign/宽度/精度/类型） | `"${pi:.2f}"` `"${n:05d}"` `"${s:*^7}"` |
+| 嵌套引号 | 插值区内引号不终止字符串（括号深度 + 子串跟踪） | `"${d["k"]}"` |
 | 多行字符串 | `"""..."""` 或 `'''...'''`，保留换行 | 见下 |
 | Bool | `true` / `false` | |
 | Null | `null` | |
@@ -156,8 +159,14 @@ def name(params) [: ReturnType] [requires ...] [ensures ...] { body } ;
 - Lambda：`fn(x) { return x * 2; }` 或 `fn(x) => x * 2` 🔜（箭头体未实现，用块体）
 - 闭包：函数可嵌套定义，携带诞生环境（`_t_clret.intent` 验证）
 - 装饰器（X1）：`@deco def f() {...}`（裸形态）/ `@deco(args) def f() {...}`（带参工厂，先求值 `deco(args)` 出真装饰器再应用）；应用顺序 = 声明顺序（自上而下），先应用者居内——末位装饰器最外（与 Python 的首位最外相反，测试锁定）；语句级（函数体内）`def` 的装饰器同样生效
-- 生成器：函数体内 `yield expr;`，收集为 List 返回（mini_intent.py:5367）
-- 生成器委派（P1.5）：`yield from expr;`——可迭代对象的元素逐个转发（支持 List/Dict 键）
+- 生成器（S3）：函数体内 `yield expr;` 即为生成器函数——**调用即惰性**，返回 `<generator>`（函数体一行不跑，首个 `next()` 才启动）。协议（语义对齐 CPython）：
+  - `next(g)` 拉一个值；耗尽返回 `None`（语言约定：无 StopIteration 通道）
+  - `g.send(v)` 把 v 递送到 yield 表达式（`let x = yield v;` 的 x 即 v）；首个 send 必须为 None
+  - `g.throw(e)` 在挂起点抛错：生成器内 catch 接得住，未捕获则异常在调用方 pull 点抛出
+  - `g.close()` 关闭生成器：关闭信号是 BaseException 子类，业务 catch(Exception) 吞不掉（对齐 GeneratorExit）；break/return 提前退出 for 遍历时自动收摊
+  - `for x in g` 真懒遍历（不预取，无限生成器可用）；裸 `yield` 产出 None
+  - 实现：线程协作式协程（threadlet）——体跑独立线程，双队列握手；共享解释器状态在切换点按白名单保存/恢复（§6 限制表列边界）
+- 生成器委派（P1.5）：`yield from expr;`——可迭代对象的元素逐个转发（List/Dict 键/生成器源；生成器源 send 值透传）
 
 **契约**（一等公民，Intent 的身份证）：
 ```intent
@@ -243,6 +252,26 @@ enum Direction { North, South, East, West };   // 枚举:变体注册为全局�
 
 运算符重载：实例定义 `__add__`/`__eq__` 等方法即生效（`_binary_op` mini_intent.py:6225）。
 
+**属性访问缓存（M2 切片）**：实例属性读取经 `InstanceValue.get()`——缓存命中免 `fields`/方法表两级查找；`set()` 写透同步（无失效窗口，init 赋过的字段读即命中）；方法查找结果同样入缓存（类创建后方法表即稳定）。诊断内置：`cache_stats()` 返回 `[命中数, 未命中数]`（模块级聚合），`cache_reset()` 清零。实测（30000 次 `p.sum()` 端到端 A/B）：与缓存前 0.99x 持平——树遍历的解释器开销主导，缓存价值在方法查找路径与可观测性；隐藏类/调用点内联缓存/2x 微基准为后续迭代。统计为近似值（并发 spawn 下非原子）。
+
+**dunder 协议全家（X3）**——实例定义即生效，分派点如下：
+
+| 协议 | 触发 | 约定 |
+|---|---|---|
+| `__init__(args)` | `ClassName(args)` 实例化 | `init` 为兼容别名 |
+| `__call__(args)` | `obj(args)` | 实例可调用；支持作用域变量与成员访问两条路径 |
+| `__iter__()` | `for x in obj` | 返回 List（既有路径）或返回带 `__next__` 的迭代器 |
+| `__next__()` | `next(obj)` / for 遍历 | 返回 `None` 表示耗尽（语言无 StopIteration 通道） |
+| `__enter__()` | `with obj as name` | 返回值绑定 as 名；无则维持旧约定（绑定资源本身） |
+| `__exit__(err)` | with 块退出 | 收退出时的错误值（无错传 `None`）；暂不承担抑制语义 |
+| `__len__()` | `len(obj)` | 返回 Int |
+| `__contains__(x)` | `x in obj` | 返回 Bool |
+| `__eq__`/`__ne__`/`__lt__`/`__le__`/`__gt__`/`__ge__` | 比较运算符 | `!=` 未定义 `__ne__` 时回退 `__eq__` 取反 |
+| `__add__`/`__sub__`/`__mul__`/`__div__`/`__mod__`/`__pow__`/`__floordiv__` | 算术运算符 | 右操作数优先时可定义 `__radd__` 等反射方法 |
+| `__getitem__(k)` / `__setitem__(k, v)` | `obj[k]` / `obj[k] = v` | 下标协议 |
+| `__hash__()` | 实例作 dict 键 | 返回 Int/String，以该值为键（`_dict_key` 归一） |
+| `__str__()` / `__repr__()` | `print(obj)` / `repr(obj)` | `__str__` 优先，回落 `__repr__`，再无走结构渲染 |
+
 ### 3.7 管道与推导式
 
 ```intent
@@ -250,6 +279,31 @@ let result = data |> filter(valid) |> map(transform);   // |> 管道:从左到�
 let squares = [x * x for x in nums if x > 2];           // 列表推导式
 let m = {k: len(k) for k in pairs};                     // 字典推导式
 ```
+
+### 3.7b 语法糖（S2a 切片）
+
+**海象赋值 `:=`**（表达式级赋值，优先级最低——低于三元/管道/逻辑或/比较）：
+
+```intent
+let a = (n := 5);          // 求值 5 → 绑定 n → 返回 5
+while ((v := produce()) <= 3) { push(log, v); }   // 条件里消费并暂存
+```
+- 左部必须是变量名（`(obj.x := 1)` 是语法错误，显式报错）；已存在则赋值，否则当前作用域声明
+- 推导式内的海象绑在推导式作用域（随推导结束失效——与 Python 的泄露语义不同，已知边界）
+
+**切片赋值**（读取早已支持，S2a 补写入侧）：
+
+```intent
+let mut l = [1, 2, 3, 4, 5];
+l[1:3] = [20, 30];         // 等长替换
+l[1:2] = [20, 21, 22];     // 增长
+l[1:4] = [9];              // 收缩
+l[:2] = [10, 11]; l[3:] = [40]; l[:] = [7];   // 省头/省尾/全切片
+l[-2:] = [99];             // 负索引（Python slice 语义）
+```
+- 步长限 1（扩展切片 `l[::2] = ...` 显式 TypeError）；右侧限列表（替换语义，允许增删长度）
+- 复合操作符（`l[1:2] += ...`）显式 RuntimeError；字符串目标显式 TypeError
+- 剩余断点：星号解包 / 位置 only / match 类模式+守卫（后续轮次）
 
 ### 3.8 模块系统
 
@@ -423,13 +477,17 @@ let text = json.dumps({"a": 1});    // import python.json 后
 
 ## 4. 标准库
 
-### 4.1 内置函数（162，`_setup_builtins` mini_intent.py:4305）
+### 4.1 内置函数（163，`_setup_builtins` mini_intent.py:4305）
 
 | 类别 | 函数（签名） |
 |---|---|
 | 输出断言 | `print(...)` `assert(cond, msg)` |
 | 集合 | `len(x)` `keys(d)` `values(d)` `push(l, v)` `pop(l)` `insert(l, i, v)` `remove_at(l, i)` `enumerate(l)` `zip(a, b)` `range(...)` `reversed(x)` `sorted(x)` `any(l)` `all(l)` `contains(x, v)` |
+| 协议（X3） | `next(it)`（迭代器下一元素，耗尽返回 `None`） `repr(x)`（调试表示，实例走 `__repr__`） |
+| 缓存诊断（M2） | `cache_stats()`（`[命中, 未命中]`） `cache_reset()`（清零，微基准/测试的确定性起点） |
+| 反射（X2） | `getattr(obj, name)` `setattr(obj, name, v)` `hasattr(obj, name)` `dir(obj)`（字段+方法含继承链，排序） `callable(x)`（函数/类/FFI/桥/mock/有 `__call__` 的实例） |
 | 类型转换 | `int(x)` `float(x)` `str(x)` `bool(x)` `type_of(x)` `type(x)` |
+| 格式化（S2b） | `format(v, spec)`（格式规格对齐 Python：fill/align/sign/0宽度/千分位/精度/类型；花括号拒收；容器/None 先 str 化再套字符串规格） |
 | 数学 | `abs(x)` `min(...)` `max(...)` `sum(l)` `sqrt(x)` `pow(a, b)` `floor/ceil/round(x)` `log/exp/cos/sin/tan/acos/asin/atan(x)` `atan2(a, b)` `pi` `random()` `randint(a, b)` |
 | 字符串 | `split(s, sep)` `join(l, sep)` `trim(s)` `ord(c)` `chr(n)` `starts_with/ends_with(s, p)` `replace(s, a, b)` `to_upper/to_lower(s)` `substr(s, start, end)` |
 | Result | `ok(v)` `err(e)` `error(type, message)`（构造一等错误值，EX1） |
@@ -542,6 +600,11 @@ python src/mini_intent.py --install [url|dir]  # 安装依赖(url 单个; dir �
 python src/mini_intent.py --install --dry-run [dir]  # PK1: 依赖解析预演(约束合并/冲突检测, 不安装)
 python src/mini_intent.py --debug file.intent  # C7: 调试模式(断点/单步/变量检视/调用栈)
 python src/mini_intent.py --postmortem file.intent  # EX2: 事后调试(帧快照存档 + 崩溃后进场检视)
+python src/mini_intent.py --profile file.intent  # M4: 函数级剖析(调用次数/累计/自身时间, cProfile 等价切片)
+python src/mini_intent.py --mem-profile file.intent  # M4: 内存分配热点(MM1 注册表按类型分配计数)
+python src/mini_intent.py --coverage file.intent  # E3: 语句覆盖率(执行打点 + AST 分母)
+python src/mini_intent.py --coverage --contracts file.intent  # Q2: 叠加契约覆盖率(requires/ensures 子句级)
+python benchmarks/run_benchmarks.py [filter] [--update]  # Q4: 基准套件(每基准3次取最小; --update 重写基线; 超+20%判回退)
 python tools/venv.py create|install|list|activate  # PK2: 虚拟环境(.venv 隔离 + 全局缓存 + PATH)
 python src/mini_intent.py --version        # 版本
 python src/mini_intent.py -t / -a          # 只看 tokens / AST
@@ -566,10 +629,10 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 4 | 位运算、复合赋值、`:=`/`++`/`--` 词法接受但语义未实现 | 预留 |
 | 5 | match range 模式、类型别名/Union 未实现 | ~~路线图 P1.3~~ ✅ 已实现（2026-10-16，match range 仍未实现） |
 | 6 | 静态类型检查缺失（Resolver 只做作用域分析） | ✅ 已实现（2026-10-18 L1：`--types` 渐进类型检查——标注处检查 + 推断处放过，mypy-lite 最小切片；容器元素类型/全量推断留待完整版） |
-| 7 | f-string/多行字符串：插值 `${}` 已支持；`f"..."` 前缀与 `"""` 三引号未实现 | ✅ 已实现（2026-10-16） |
+| 7 | f-string/多行字符串：插值 `${}` 已支持；`f"..."` 前缀与 `"""` 三引号未实现 | ✅ 已实现（2026-10-16；2026-10-19 S2b 完整化：`${x=}` 调试格式 / 嵌套引号 / `${x:spec}` 格式规格，见 §2 字符串表） |
 | 8 | formatter/linter/LSP 缺失 | formatter ✅ linter ✅ doc ✅ 已实现（2026-10-16）；LSP ✅ 已实现（2026-10-18，tools/lsp/） |
 | 9 | with 语句 | ✅ 已实现（2026-10-16） |
-| 10 | yield from / 泛型约束 | ✅ 已实现（2026-10-16） |
+| 10 | yield from / 泛型约束 | ✅ 已实现（2026-10-16；2026-10-19 S3：生成器真惰性完整化——send/throw/close/yield 表达式/for 懒遍历，见 §3.2） |
 | 11 | `//` 是行注释——整除运算符在源码中不可达（`5 // 0` 被词法吞为注释） | 已知语言限制（用 `/` 真除法；修法需词法上下文歧义消解，排队） |
 | 12 | `str(inf)` 抛 OverflowError（1e308*10 → inf 时）；字典缺键抛 RuntimeError（KeyError 转译）；`len(None)` 抛 AttributeError | 行为快照，均可被 catch 捕获（见 tests/test_fuzz.intent） |
 | 13 | 内置无方法式调用：`lst.push(x)` 不被支持，须写自由函数 `push(lst, x)`（成员访问不回退内置） | 语法选择（类方法才行）； |
@@ -581,6 +644,11 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 19 | `run_source` 对容器返回 RuntimeValue 树（ListValue.value 内为 IntValue 等），非原生类型 | 桥侧已脱壳（tools/revit_bridge.py `_to_native`）；宿主接入时需自行转换 |
 | 20 | Python 桥（I2a）无关键字参数/类实例化/回调 | 最小切片边界（spec §3.16）；完整版随 I2a 剩余部分 |
 | 21 | 装饰器在提升期应用，早于顶层 import/let — 模块导入的装饰器（`@memoize` from std.functools）或引用顶层变量的装饰器参数找不到 | X1 已知边界（2026-10-19 实证）；**带参装饰器 / 零参调用形态 / 语句级（函数体内）装饰器已于 v2.12.0 支持**（语句级执行时机在 import/let 之后，不受此限）；本文件定义的装饰器可用；根治随「def 即语句执行」改造（X1 断点） |
+| 22 | 契约税实测 55%（`benchmarks/contracts.intent`：trivial 函数 10 万次调用，guarded 2602ms vs plain 1623ms） | 2026-10-19 Q4 实测记录；契约是灵魂不砍，优化方向：验证器子句缓存/短路（重函数上摊薄） |
+| 23 | 生成器仅解释器支持；字节码 VM 无生成器路径（VM 差分纪律：VM 不跑含 yield 的文件） | S3 已知边界（2026-10-19）；VM 生成器化随字节码协程支持排队 |
+| 24 | 协程线程内 profiler 打点关闭（帧栈纪律与协程切换冲突）；覆盖率打点保留（计数型无栈纪律） | S3 已知边界（2026-10-19）；--profile 不含生成器内部帧 |
+| 25 | 生成器异常在调用方 `next()/send()/throw()` 处抛出的栈快照为「生成器创建链 + 生成器帧」，不含 pull 点的调用链 | S3 已知边界（2026-10-19）；与 Python「生成器帧单独显示」同向 |
+| 26 | 生成器线程阻塞在无界操作（如 channel 接收）时，`close()` 有界返回（2s），留 daemon 线程 | S3 已知边界（2026-10-19）；不无限等，也不强杀 |
 
 ---
 
@@ -595,4 +663,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.12.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.12.0：X1 二批装饰器完整化切片——带参/零参/语句级装饰器 + lru_cache；§3.2 装饰器形态、§4.2 functools、§6 限制 21 更新）*
+*规范版本 v1.20.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.21.0：S3 生成器完整化——§3.2 生成器协议（惰性/send/throw/close/for 懒遍历）、§6 限制表 23-26 协程边界；此前 v2.20.0 S2b f-string + v2.19.0 Q4 基准套件）*

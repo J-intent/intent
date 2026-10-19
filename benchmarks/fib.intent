@@ -1,0 +1,39 @@
+// benchmarks/fib.intent — 函数调用基准(Q4)
+// fib(25) 递归是解释器调用链的试金石: 每次调用建帧、绑参、验约、弹栈。
+// fib_iter(10000) 压循环与局部变量 — 两条路径分开计时, 不混为一谈。
+// 正确性自检: fib_iter(10) == fib(10) == 55(不打印 2000 位大数 — 噪声)。
+//
+// 用法: python src/mini_intent.py benchmarks/fib.intent
+// 输出 "Time: N ms" 行由 run_benchmarks.py 解析。
+
+def fib(n: Int): Int {
+    if n < 2 { return n; };
+    return fib(n - 1) + fib(n - 2);
+};
+
+def fib_iter(n: Int): Int {
+    let mut a = 0;
+    let mut b = 1;
+    let mut i = 0;
+    while i < n {
+        let mut t = a + b;
+        a = b;
+        b = t;
+        i = i + 1;
+    };
+    return a;
+};
+
+assert fib_iter(10) == fib(10), "迭代与递归同源";
+
+let t0 = now();
+let r = fib(25);
+let ms = (now() - t0) * 1000.0;
+print("fib(25) = " + str(r));
+print("Time: " + str(int(ms)) + " ms");
+
+let t1 = now();
+let r2 = fib_iter(10000);
+let ms2 = (now() - t1) * 1000.0;
+print("fib_iter(10000) digits = " + str(len(str(r2))));
+print("Time: " + str(int(ms2)) + " ms");

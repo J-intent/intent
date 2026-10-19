@@ -1,0 +1,283 @@
+// 生成器完整化回归测试(S3) — send/throw/close + yield 表达式化 + 真惰性
+// 语义基线: CPython 生成器(惰性调用/next-send-throw-close/yield 表达式/
+// for 懒遍历/GC 收摊)。语言约定: next() 耗尽返回 None(无 StopIteration 通道);
+// 裸 yield 产出 None(对齐 Python); yield from 对生成器源 send 值透传。
+
+// 物化辅助: 生成器 → 列表(测试断言用)
+def collect(g) {
+    let r = [];
+    for x in g { push(r, x); };
+    return r;
+};
+
+class Acc {
+    def init(start: Int) {
+        this.total = start;
+    }
+    def gen() {
+        yield this.total;
+        yield this.total + 10;
+    }
+};
+
+def test_lazy_creation() {
+    // 调用即惰性: 函数体一行不跑, 首个 pull 才启动
+    let mut ran = false;
+    def g() {
+        ran = true;
+        yield 1;
+    };
+    let it = g();
+    assert ran == false, "创建不跑体";
+    next(it);
+    assert ran == true, "首个 next 启动";
+};
+
+def test_infinite_lazy() {
+    // 无限生成器只拉有限个 — 饿收集会直接挂死
+    def naturals() {
+        let mut i = 0;
+        while true {
+            yield i;
+            i = i + 1;
+        };
+    };
+    let it = naturals();
+    let mut sum = 0;
+    let mut k = 0;
+    while k < 5 {
+        sum = sum + next(it);
+        k = k + 1;
+    };
+    assert sum == 10, "0+1+2+3+4=10(只拉 5 个)";
+};
+
+def test_next_protocol() {
+    def g() {
+        yield 1;
+        yield 2;
+    };
+    let it = g();
+    assert next(it) == 1, "next 第一个";
+    assert next(it) == 2, "next 第二个";
+    assert next(it) == None, "耗尽返回 None(语言约定)";
+    assert next(it) == None, "耗尽后仍 None";
+};
+
+def test_send_to_yield_expr() {
+    // let v = yield total — yield 是表达式: 产出当前值, send 的值即其值
+    def running_sum() {
+        let mut total = 0;
+        while true {
+            let v = yield total;
+            total = total + v;
+        };
+    };
+    let it = running_sum();
+    assert next(it) == 0, "启动产出 0";
+    assert it.send(5) == 5, "send 5 → 产出新累计";
+    assert it.send(3) == 8, "send 3 → 累计 8";
+};
+
+def test_bare_yield_is_none() {
+    // 裸 yield 产出 None(对齐 Python; 旧版为 0, S3 起迁移)
+    def g() {
+        yield;
+        yield 1;
+    };
+    let it = g();
+    assert next(it) == None, "裸 yield 产出 None";
+    assert next(it) == 1, "后续正常";
+};
+
+def test_first_send_must_be_none() {
+    def g() {
+        yield 1;
+    };
+    let it = g();
+    expect_error(fn() { it.send("early"); }, "TypeError");
+};
+
+def test_throw_caught_in_generator() {
+    def g() {
+        try {
+            yield 1;
+        } catch e {
+            yield 2;
+        };
+    };
+    let it = g();
+    assert next(it) == 1, "throw 前正常产出";
+    assert it.throw(error("Boom", "cap")) == 2, "生成器内 catch 接住后继续产出";
+};
+
+def test_throw_uncaught_to_caller() {
+    def g() {
+        yield 1;
+        yield 2;
+    };
+    let it = g();
+    next(it);
+    let err = expect_error(fn() { it.throw(error("Boom", "capsized")); }, "Boom");
+    assert err.message == "capsized", "未捕获的 throw 到调用方";
+};
+
+def test_body_exception_at_pull() {
+    def g() {
+        yield 1;
+        raise error("Broke", "mid-flight");
+    };
+    let it = g();
+    assert next(it) == 1, "首个值正常";
+    let err = expect_error(fn() { next(it); }, "Broke");
+    assert err.message == "mid-flight", "体内异常在 pull 点抛出";
+};
+
+def test_close_stops() {
+    def g() {
+        yield 1;
+        yield 2;
+    };
+    let it = g();
+    assert next(it) == 1, "close 前正常";
+    it.close();
+    assert next(it) == None, "close 后耗尽";
+    it.close();
+};
+
+def test_close_not_swallowable() {
+    // 关闭信号是 BaseException — 业务 catch 吞不掉(对齐 GeneratorExit)
+    def g() {
+        try {
+            yield 1;
+            yield 2;
+        } catch e {
+            yield 3;
+        };
+    };
+    let it = g();
+    next(it);
+    it.close();
+    assert next(it) == None, "catch 拦不下 close";
+};
+
+def test_for_break_stops_pulling() {
+    // 懒遍历: break 后生成器不再跑, 协程线程收摊
+    let mut count = 0;
+    def g() {
+        while true {
+            count = count + 1;
+            yield count;
+        };
+    };
+    let mut taken = 0;
+    for x in g() {
+        taken = taken + 1;
+        if taken >= 3 { break; };
+    };
+    assert taken == 3, "取 3 个";
+    assert count == 3, "break 后不再拉取(线程已收摊)";
+};
+
+def test_for_lazy_collect() {
+    def g() {
+        yield 1;
+        yield 2;
+        yield 3;
+    };
+    let r = collect(g());
+    assert len(r) == 3, "for 物化";
+    assert r[2] == 3, "顺序保持";
+};
+
+def test_yield_from_send_passthrough() {
+    // yield from 对生成器源: send 值穿透到内层
+    def inner() {
+        let mut i = 0;
+        while i < 2 {
+            let r = yield i;
+            i = i + 1;
+        };
+    };
+    def outer() {
+        yield from inner();
+    };
+    let it = outer();
+    assert next(it) == 0, "委派首值";
+    assert it.send("ping") == 1, "send 穿透内层, 下一个产出回传";
+};
+
+def test_nested_generators() {
+    // 外层生成器的 for 消费内层生成器 — 两级协程线程嵌套
+    def inner() {
+        yield 1;
+        yield 2;
+    };
+    def outer() {
+        for x in inner() {
+            yield x * 10;
+        };
+    };
+    let r = collect(outer());
+    assert r[0] == 10, "嵌套外层转发";
+    assert r[1] == 20, "嵌套逐个转发";
+};
+
+def test_independent_generators() {
+    def g() {
+        yield 1;
+        yield 2;
+    };
+    let a = g();
+    let b = g();
+    assert next(a) == 1, "a 独立推进";
+    assert next(b) == 1, "b 不受 a 影响";
+    assert next(a) == 2, "a 继续";
+    assert next(b) == 2, "b 继续";
+};
+
+def test_generator_requires_lazy() {
+    // requires 在首个 pull 时验(调用即惰性, 违约不在创建点)
+    def guarded(n: Int) requires n > 0 {
+        yield n;
+    };
+    let it = guarded(-1);
+    let mut caught = "none";
+    try {
+        next(it);
+    } catch e {
+        caught = e.type;
+    };
+    assert caught == "ContractError", "首个 pull 触发 requires 违约";
+};
+
+def test_generator_method() {
+    let a = Acc(5);
+    let it = a.gen();
+    assert next(it) == 5, "生成器方法: this 注入协程线程";
+    assert next(it) == 15, "生成器方法: this 可见";
+};
+
+def test_generator_repr_and_len() {
+    def g() {
+        yield 1;
+    };
+    assert str(g()) == "<generator>", "str 表示";
+    expect_error(fn() { len(g()); }, "TypeError");
+};
+
+def test_closure_state_in_thread() {
+    // 生成器线程经闭包作用域访问外层变量(共享同一 Slot)
+    let mut log = [];
+    def g() {
+        push(log, "a");
+        yield 1;
+        push(log, "b");
+        yield 2;
+    };
+    let it = g();
+    next(it);
+    assert len(log) == 1, "闭包状态: 协程线程可见外层变量";
+    next(it);
+    assert len(log) == 2, "闭包状态: 持续推进";
+};

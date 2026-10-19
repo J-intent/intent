@@ -1,0 +1,113 @@
+// X2: 反射完整化回归测试 — getattr/setattr/hasattr/dir/callable + std.inspect
+import std.inspect;
+
+class Base {
+    def init(tag: String) {
+        this.tag = tag;
+    }
+    def describe(): String {
+        return "base:" + this.tag;
+    }
+}
+
+class Widget < Base {
+    def init(tag: String, size: Int) {
+        this.tag = tag;    // 语言无 super() 调用 — 子类 init 直接赋(见 test_oop 约定)
+        this.size = size;
+    }
+    def area(): Int {
+        return this.size * this.size;
+    }
+}
+
+def test_getattr_field() {
+    let w = Widget("btn", 3);
+    assert getattr(w, "tag") == "btn", "getattr 读继承字段";
+    assert getattr(w, "size") == 3, "getattr 读自有字段";
+}
+
+def test_getattr_method_is_function() {
+    let w = Widget("btn", 3);
+    let d = getattr(w, "describe");
+    assert callable(d) == true, "getattr 取到的方法可调用";
+}
+
+def test_setattr_write() {
+    let w = Widget("btn", 3);
+    setattr(w, "size", 10);
+    assert w.size == 10, "setattr 写入后点读可见";
+    assert getattr(w, "size") == 10, "setattr 写入后 getattr 可见";
+}
+
+def test_hasattr() {
+    let w = Widget("btn", 3);
+    assert hasattr(w, "size") == true, "字段存在";
+    assert hasattr(w, "area") == true, "方法存在";
+    assert hasattr(w, "describe") == true, "继承方法存在";
+    assert hasattr(w, "nope") == false, "不存在的属性";
+}
+
+def test_dir_lists_fields_and_methods() {
+    let w = Widget("btn", 3);
+    let names = dir(w);
+    assert contains(names, "tag") == true, "dir 含继承字段";
+    assert contains(names, "size") == true, "dir 含自有字段";
+    assert contains(names, "area") == true, "dir 含自有方法";
+    assert contains(names, "describe") == true, "dir 含继承方法";
+    assert contains(names, "init") == true, "dir 含构造方法";
+    assert contains(names, "ghost") == false, "dir 不含虚构名";
+}
+
+def test_callable_builtin() {
+    let w = Widget("btn", 3);
+    assert callable(w.area) == true, "方法可调用";
+    assert callable(w.size) == false, "标量字段不可调用";
+    assert callable(42) == false, "数字不可调用";
+}
+
+def test_getattr_missing_raises() {
+    let w = Widget("btn", 3);
+    let err = expect_error(fn() {
+        let v = getattr(w, "ghost");
+    }, "AttributeError");
+    assert err.type == "AttributeError", "缺失属性抛 AttributeError(可捕获)";
+}
+
+def test_inspect_getmembers() {
+    let w = Widget("btn", 3);
+    let m = getmembers(w);
+    assert m["size"] == 3, "getmembers 含字段值";
+    assert hasattr(w, "area") == true, "getmembers 后原对象完好";
+    // 方法名在字典键中
+    let keys = keys(m);
+    assert contains(keys, "area") == true, "getmembers 含方法名";
+}
+
+def test_inspect_get_default() {
+    let w = Widget("btn", 3);
+    assert get(w, "size", 0) == 3, "存在时返回值";
+    assert get(w, "ghost", -1) == -1, "不存在返默认";
+}
+
+def test_setattr_alias_shares_reference() {
+    // 语言语义锁定: let 别名共享引用 — setattr 经别名改到原对象
+    let w = Widget("btn", 3);
+    let alias = w;
+    setattr(alias, "color", "red");
+    assert w.color == "red", "setattr 经别名可见于原对象";
+    // 对照: 实例作函数参数是值拷贝(arg_value.copy()) — 参数内 setattr
+    // 不传播回调用方(既有语义, inspect 模块因此不提供 setdefault)
+    def mutate(o) {
+        setattr(o, "color", "blue");
+    };
+    mutate(w);
+    assert w.color == "red", "参数拷贝语义: 函数内 setattr 不污染原对象";
+}
+
+def test_inspect_is_field_is_method() {
+    let w = Widget("btn", 3);
+    assert is_field(w, "size") == true, "size 是字段";
+    assert is_field(w, "area") == false, "area 是方法不是字段";
+    assert is_method(w, "area") == true, "area 是方法";
+    assert is_method(w, "size") == false, "size 不是方法";
+}
