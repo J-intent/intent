@@ -1,0 +1,29 @@
+// std/functools.intent — 函数工具（X1 装饰器最小切片的 functools 系）
+//
+// 装饰器语法(@deco)与解释器应用机制本已就绪(parser 收集装饰器名 +
+// execute_program 应用 dec_func(fv)); 本模块补的是 functools 家族:
+//   compose / memoize — 纯 Intent, 无内置依赖
+// 完整 X1 剩余(已 note 断点): 带参装饰器 @deco(1,2)(parser 只存名字)、
+//   wraps(需函数元数据内省)、partial(需 *args 变长形参)、lru 淘汰策略。
+
+// 组合: compose(f, g) → fn(x) { f(g(x)) } — 右先生效
+def compose(f, g) {
+    return fn(x) {
+        return f(g(x));
+    };
+}
+
+// 记忆化(单参 lru_cache 的无淘汰子集): 同参第二次直接命中缓存
+// 闭包捕获 cache 字典 — 键限标量(Intent 字典键规范), 富键调用方自行编码
+// 命中证据由调用方侧证(装饰函数的副作用计数), 不搞外部统计出口
+def memoize(f) {
+    let mut cache = {};
+    return fn(x) {
+        if cache.has_key(x) {
+            return cache[x];
+        };
+        let r = f(x);
+        cache[x] = r;
+        return r;
+    };
+}

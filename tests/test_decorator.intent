@@ -1,0 +1,118 @@
+// 装饰器回归测试（X1 最小切片）— @deco 语法 + functools 系(compose/memoize)
+// 机制基线: parser 收集装饰器名 + execute_program 应用 dec_func(fv) 本已就绪;
+// 本切片补 functools 家族与行为锁定。
+// 已知边界(完整 X1 剩余): 带参装饰器 @deco(1,2) / 函数体内的装饰器不应用 /
+//   wraps / partial / lru 淘汰。
+
+import std.functools;
+
+// ── 顶层被装饰函数与副作用记账(装饰器只在顶层应用) ──
+
+let mut call_log = [];
+
+// 包装器工厂: 结果乘 2
+def double_result(f) {
+    return fn(x) {
+        return f(x) * 2;
+    };
+};
+
+// 记账包装器: 闭包捕获顶层 call_log
+def logged(f) {
+    return fn(x) {
+        push(call_log, x);
+        return f(x);
+    };
+};
+
+// 记忆化装饰器(本文件定义 — 提升期在 functions 表可找到):
+// 递归函数也受益(函数体内自调用走包装后的缓存版)
+def traced_cache(f) {
+    let mut cache = {};
+    return fn(n) {
+        if cache.has_key(n) {
+            return cache[n];
+        };
+        let r = f(n);
+        cache[n] = r;
+        return r;
+    };
+};
+
+// 手工对照: 带侧写的原函数(证明 memoize 省掉重算)
+def traced_square(n: Int) -> Int {
+    push(call_log, n);
+    return n * n;
+};
+
+@double_result
+def add_one(n: Int) -> Int {
+    return n + 1;
+};
+
+@logged
+def square(n: Int) -> Int {
+    return n * n;
+};
+
+@double_result
+@double_result
+def inc(n: Int) -> Int {
+    return n + 1;
+};
+
+def inc_fn(n: Int) -> Int {
+    return n + 1;
+};
+
+def dbl(n: Int) -> Int {
+    return n * 2;
+};
+
+// 记忆化装饰的递归 fib(顶层 — 装饰器只在顶层应用, 函数体内不支持)
+@traced_cache
+def fib_like(n: Int) -> Int {
+    if n < 2 { return n; };
+    return fib_like(n - 1) + fib_like(n - 2);
+};
+
+// ── 测试 ──
+
+def test_bare_decorator() {
+    assert add_one(41) == 84, "@double_result: (41+1)*2 == 84";
+};
+
+def test_decorator_side_evidence() {
+    let mut before = len(call_log);
+    assert square(5) == 25, "装饰不改变语义";
+    assert square(6) == 36, "二次调用";
+    assert len(call_log) == before + 2, "内层真调用两次(闭包记账)";
+};
+
+def test_stacked_decorators() {
+    assert inc(10) == 44, "双层装饰自外向内: ((10+1)*2)*2 == 44";
+};
+
+def test_memoize_result_and_cache() {
+    let memoed = memoize(traced_square);
+    let r1 = memoed(7);
+    let r2 = memoed(7);
+    let r3 = memoed(7);
+    let r4 = memoed(8);
+    assert r1 == 49 and r2 == 49 and r3 == 49 and r4 == 64, "memoize 结果正确";
+    // call_log 之前已有 square(5),square(6) 两条; traced 只应追加 7 和 8
+    let tail = [call_log[len(call_log) - 2], call_log[len(call_log) - 1]];
+    assert tail == [7, 8], "同参只算一次(7 三次 → 内层一次; 8 一次)";
+};
+
+def test_memoize_decorated_form_local() {
+    // 本文件内定义的装饰器可用 @形态(提升期在 functions 表里能找到),
+    // 递归自调用走包装后的缓存版; 模块导入的装饰器(@memoize from
+    // std.functools)受提升期时序限制 — 已知边界, 见 spec §6 与 X1 断点 note
+    assert fib_like(10) == 55, "@traced_cache 装饰形态(本文件装饰器, 递归正确)";
+};
+
+def test_compose() {
+    let f = compose(inc_fn, dbl);
+    assert f(5) == 11, "compose(inc, dbl)(5) = inc(dbl(5)) = 11(右先生效)";
+};

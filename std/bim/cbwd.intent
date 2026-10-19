@@ -1,0 +1,244 @@
+// std/bim/cbwd.intent — CBWD 算法移植（BD4 最小切片：洞口合并）
+//
+// 源: D:\Desktop\CBWD\COM.py（洞口合并工具, 1077 行 WinForms+RevitAPI）
+// 移植的是算法内核(与 Revit 无关的纯逻辑):
+//   bbox_3d_gap_mm / can_merge_openings / find_merge_groups(连通分量+空间哈希预筛)
+// 单位口径: 参考实现几何用 ft(Revit 内部)、距离用 mm; 本模块统一 mm —
+//   边界处换算, 算法内不再有 304.8 魔法数。
+//
+// 心学为体: 合并规则是格物得来的必然(距离可合并才合并), 不是随意阈值
+// 禅道为翼: 纯函数, 无副作用, 分组结果只依赖输入
+// 马哲为用: 契约保证每个入口参数合法(非负距离/三维盒/布尔圆柱标志)
+
+// ═══════════════════════════════════════════
+// 辅助函数(必须在所有被调函数之前定义, Resolver 需要)
+// ═══════════════════════════════════════════
+
+def list_contains(lst, v) -> Bool {
+    let mut i = 0;
+    while i < len(lst) {
+        if lst[i] == v { return true; };
+        i = i + 1;
+    };
+    return false;
+}
+
+// 3D 包围盒间隙(mm): 两盒在任一维度重叠 → 0; 否则三维分离距离的欧氏长度
+def bbox_gap_mm(b1, b2) -> Float
+    requires len(b1["min"]) == 3
+    requires len(b2["min"]) == 3
+    ensures result >= 0.0
+{
+    let dx = max(0.0, b1["min"][0] - b2["max"][0], b2["min"][0] - b1["max"][0]);
+    let dy = max(0.0, b1["min"][1] - b2["max"][1], b2["min"][1] - b1["max"][1]);
+    let dz = max(0.0, b1["min"][2] - b2["max"][2], b2["min"][2] - b1["max"][2]);
+    return sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// 合并判定: 包围盒间隙 ≤ max_distance 且(圆柱时)表面间隙 ≤ max_distance
+// 洞口 schema: {"min": [x,y,z], "max": [x,y,z], "cylindrical": Bool,
+//              "radius": Float, "center": [x,y,z]} — 单位 mm
+def can_merge(o1, o2, max_distance_mm: Float) -> Bool
+    requires max_distance_mm >= 0.0
+{
+    let gap = bbox_gap_mm(o1, o2);
+    if gap > max_distance_mm { return false; };
+    // 圆柱精修: 中心距减半径和为表面间隙(参考 COM.py can_merge_openings)
+    if o1["cylindrical"] and o2["cylindrical"] {
+        let r1 = o1["radius"];
+        let r2 = o2["radius"];
+        if r1 > 0.0 and r2 > 0.0 {
+            let c1 = o1["center"];
+            let c2 = o2["center"];
+            let cdx = c1[0] - c2[0];
+            let cdy = c1[1] - c2[1];
+            let cdz = c1[2] - c2[2];
+            let center_dist = sqrt(cdx * cdx + cdy * cdy + cdz * cdz);
+            let surface_gap = center_dist - (r1 + r2);
+            if surface_gap > max_distance_mm { return false; };
+        };
+    };
+    return true;
+}
+
+// 连通分量核心: cands[i] = i 的候选下标表(已去重), DFS 遍历
+// 分量集合与参考的 BFS 完全一致(连通分量唯一, 遍历顺序不影响成员)
+def _components(n: Int, cands, openings, max_distance_mm: Float) -> List {
+    let mut visited = [];
+    let mut i = 0;
+    while i < n {
+        push(visited, false);
+        i = i + 1;
+    };
+    let mut groups = [];
+    let mut k = 0;
+    while k < n {
+        if not visited[k] {
+            let mut group = [k];
+            visited[k] = true;
+            let mut stack = [k];
+            while len(stack) > 0 {
+                let cur = pop(stack);
+                let mut ci = 0;
+                while ci < len(cands[cur]) {
+                    let j = cands[cur][ci];
+                    if not visited[j] {
+                        if can_merge(openings[cur], openings[j], max_distance_mm) {
+                            visited[j] = true;
+                            push(group, j);
+                            push(stack, j);
+                        };
+                    };
+                    ci = ci + 1;
+                };
+            };
+            push(groups, group);
+        };
+        k = k + 1;
+    };
+    return groups;
+}
+
+// 全候选表: 每个下标的候选 = 其余全部(O(n²) 兜底路径, 参考 _find_merge_groups_slow)
+def _all_candidates(n: Int) -> List {
+    let mut cands = [];
+    let mut i = 0;
+    while i < n {
+        let mut row = [];
+        let mut j = 0;
+        while j < n {
+            if j != i { push(row, j); };
+            j = j + 1;
+        };
+        push(cands, row);
+        i = i + 1;
+    };
+    return cands;
+}
+
+// 空间哈希候选表: 包围盒膨胀 D 后共格的下标(数学不漏: 3D 距离 ≤ D ⟺ 膨胀相交 ⟹ 共格)
+// 网格边长沿用参考口径(D_ft > 0.5 ? D_ft : 0.5, 换算 mm: D > 152.4 ? D : 152.4)
+def _grid_candidates(openings, max_distance_mm: Float, cell: Float) -> List {
+    let n = len(openings);
+    let mut grid = {};   // "ix,iy,iz" → [下标]
+    let mut i = 0;
+    while i < n {
+        let b = openings[i];
+        let lo = b["min"];
+        let hi = b["max"];
+        let ix0 = floor(lo[0] / cell);
+        let ix1 = floor(hi[0] / cell);
+        let iy0 = floor(lo[1] / cell);
+        let iy1 = floor(hi[1] / cell);
+        let iz0 = floor(lo[2] / cell);
+        let iz1 = floor(hi[2] / cell);
+        let mut ix = ix0;
+        while ix <= ix1 {
+            let mut iy = iy0;
+            while iy <= iy1 {
+                let mut iz = iz0;
+                while iz <= iz1 {
+                    let key = str(ix) + "," + str(iy) + "," + str(iz);
+                    if grid.has_key(key) {
+                        push(grid[key], i);
+                    } else {
+                        grid[key] = [i];
+                    };
+                    iz = iz + 1;
+                };
+                iy = iy + 1;
+            };
+            ix = ix + 1;
+        };
+        i = i + 1;
+    };
+    // 膨胀 D 的覆盖格 → 去重候选
+    let mut cands = [];
+    let mut i2 = 0;
+    while i2 < n {
+        let b = openings[i2];
+        let lo = b["min"];
+        let hi = b["max"];
+        let lo2 = [lo[0] - max_distance_mm, lo[1] - max_distance_mm, lo[2] - max_distance_mm];
+        let hi2 = [hi[0] + max_distance_mm, hi[1] + max_distance_mm, hi[2] + max_distance_mm];
+        let ix0 = floor(lo2[0] / cell);
+        let ix1 = floor(hi2[0] / cell);
+        let iy0 = floor(lo2[1] / cell);
+        let iy1 = floor(hi2[1] / cell);
+        let iz0 = floor(lo2[2] / cell);
+        let iz1 = floor(hi2[2] / cell);
+        let mut seen = [];
+        let mut ix = ix0;
+        while ix <= ix1 {
+            let mut iy = iy0;
+            while iy <= iy1 {
+                let mut iz = iz0;
+                while iz <= iz1 {
+                    let key = str(ix) + "," + str(iy) + "," + str(iz);
+                    if grid.has_key(key) {
+                        let cell_list = grid[key];
+                        let mut ci = 0;
+                        while ci < len(cell_list) {
+                            let j = cell_list[ci];
+                            if j != i2 and not list_contains(seen, j) {
+                                push(seen, j);
+                            };
+                            ci = ci + 1;
+                        };
+                    };
+                    iz = iz + 1;
+                };
+                iy = iy + 1;
+            };
+            ix = ix + 1;
+        };
+        push(cands, seen);
+        i2 = i2 + 1;
+    };
+    return cands;
+}
+
+// 洞口合并分组(参考 find_merge_groups 的默认路径: 空间哈希预筛)
+def find_merge_groups(openings, max_distance_mm: Float) -> List
+    requires max_distance_mm >= 0.0
+    ensures len(result) >= 1
+{
+    let n = len(openings);
+    if n < 2 { return [openings]; };   // 参考语义: 元素少时整体一组
+    let mut cell = 152.4;
+    if max_distance_mm > 152.4 { cell = max_distance_mm; };
+    let cands = _grid_candidates(openings, max_distance_mm, cell);
+    return _components(n, cands, openings, max_distance_mm);
+}
+
+// 兜底路径: O(n²) 全两两(参考 PRECISE_MERGE_PREFILTER=False)
+// 与默认路径的分量集合必须一致 — 测试里互为对照
+def find_merge_groups_slow(openings, max_distance_mm: Float) -> List
+    requires max_distance_mm >= 0.0
+{
+    let n = len(openings);
+    if n < 2 { return [openings]; };
+    let cands = _all_candidates(n);
+    return _components(n, cands, openings, max_distance_mm);
+}
+
+// 组签名: 组内下标升序连字符 + 全体排序(跨实现的稳定比较形态)
+def group_signature(g) -> String {
+    let s = sorted(g);
+    let mut out = "";
+    let mut i = 0;
+    while i < len(s) {
+        if i > 0 { out = out + "-"; };
+        out = out + str(s[i]);
+        i = i + 1;
+    };
+    return out;
+}
+
+def groups_signature(groups) -> List {
+    let mut sigs = [];
+    for g in groups {
+        push(sigs, group_signature(g));
+    };
+    return sorted(sigs);
+}

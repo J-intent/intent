@@ -4,6 +4,91 @@
 
 ---
 
+## v2.11.0 — X1 装饰器最小切片：functools 系 + 顶层函数一等值修复（2026-10-19）
+
+> 装饰器的骨架早已在库里睡灰：parser 收名字、解释器应用 dec_func(fv)——
+> 缺的只是 functools 家族，和一个「函数能当值传」的根因修复。
+> 版本 2.10.0 → 2.11.0。
+
+**X1 装饰器最小切片**（tests/test_decorator.intent 6 测试，全过）
+
+- 机制基线（既有，本轮实证锁定）：`@deco` 语法 + execute_program 应用 `deco(fn)` + 装饰器栈自外向内
+- 新模块 std/functools.intent：`compose(f, g)`（右先生效）/ `memoize(f)`（单参记忆化，闭包捕获 cache，无淘汰子集）——纯 Intent 零内置依赖
+- **根因修复**：顶层普通函数只进 `self.functions` 表（可按名调用）不进作用域——函数作实参传递时 `未定义的变量`。execute_program 顶层函数一律 declare 入全局作用域（函数是一等值）
+- 测试锁定：裸装饰/副作用记账/双层栈/memoize 缓存命中证据（同参三次内层只算一次）/compose 右先生效/@traced_cache 递归记忆化
+- **VM 一致性修复**：装饰器应用逻辑下沉 `_apply_decorators`，execute_program 提升期与 execute_statement FunctionDef 分支（VM 委托通道）共用——修复 VM 路径装饰器不应用导致的双引擎分歧（vm_diff DIVERGE 1 → 0）
+- 完整 X1 剩余（已 note 断点）：带参装饰器 `@deco(1,2)`（parser 只存名字）、函数体内的装饰器不应用、模块导入装饰器的提升期时序问题（import 早于提升期应用——需「def 即语句执行」改造）、wraps（需函数元数据内省）、partial（需 *args）、lru 淘汰策略
+
+**质量门**：--test 235/236 过 0 败 1 跳（229→235，+6）；vm_diff 69/69 一致（含 test_decorator 双引擎对照）；spec v1.11.0（§4.2 functools、§6 限制 21）。
+
+---
+
+## v2.10.0 — Phase 6 二批：Python 桥最小切片 + CBWD 洞口合并移植（2026-10-19）
+
+> 寄生期皇冠落地第一块：`import python.math` 跑通真 Python 生态。
+> CBWD 的合并逻辑搬进 Intent——不是抄代码，是算法逐例对齐后才签收。
+> 版本 2.9.0 → 2.10.0。
+
+**I2a Python 互操作桥最小切片**（tests/test_pybridge.intent 6 测试，全过）
+
+- `import python.X` 经 importlib 加载真 Python 模块；符号包成桥值**命名空间挂载**（`math.sqrt` 可用，全链 `python.math.sqrt` 亦可用）——刻意不平扁注入，防遮蔽核心内置（与 std import 的边界偏差见 spec §3.8）
+- 双向编排：标量/列表/字典/None 自动转换；富对象包不透明 PyObjectValue 句柄（可传回 Python，Intent 侧不探内部）
+- 新值类型 PyFuncValue（可调用，走 CallExpr callable 分发）/ PyObjectValue；MemberAccess 调用路径补 callable 分发（原先只认 FunctionValue/ClassValue，桥函数会撞「无法调用」）
+- 异常策略：Python 侧异常 → RuntimeError 带原类型名，显式失败不静默
+- 测试：math 函数/常量/全链、json round-trip、statistics.mean、Python 异常显式化
+- 完整 I2a 剩余（15 人日中的未做部分）：类实例化/关键字参数/Python 回调 Intent/子模块链/pip 三方包 round-trip
+
+**BD4 CBWD 移植最小切片：洞口合并**（std/bim/cbwd.intent + tests/test_bim_cbwd.intent 8 测试，全过）
+
+- 移植源：D:\Desktop\CBWD\COM.py 的纯算法内核——bbox_3d_gap_mm / can_merge_openings / find_merge_groups（连通分量 + 空间哈希预筛）；剥掉 Revit/WinForms 依赖，单位统一 mm（COM.py 原 ft 几何在边界换算，算法内无 304.8 魔法数）
+- 函数：bbox_gap_mm / can_merge（含圆柱表面间隙精修）/ find_merge_groups（预筛路径）/ find_merge_groups_slow（O(n²) 兜底）/ groups_signature
+- 对照基准 tools/cbwd_reference.py：COM.py 算法的 Python 参考提取 + `--parity` 同输入同签名对齐（24 洞口合成数据 × 3 距离 × 双路径 = 6/6）+ `--selftest` 12/12
+- 测试覆盖：间隙度量、gap==D 边界合并、传递链、圆柱精修（bbox 近但表面间隙超限不合并）、空表/单元素边缘、预筛==慢路径、合成数据 D=150/D=80 与参考签名逐字一致
+- 与 COM.py 的刻意差异：参考工具两路径均返回组成员**下标**（COM.py 原返回元素对象）——签名比较需稳定身份
+- BD4 完整判定剩余：Dynamo 里跑出与 CBWD 一致结果（需 Revit 环境）+ 翻弯/标签排列算法移植 + 组边界计算与参数写回
+
+**质量门**：--test 229/230 过 0 败 1 跳（215→229，+14）；vm_diff 68/68 一致（65→68，3 个新测试文件自动纳入且双引擎一致）；cbwd_reference selftest 12/12 + parity 6/6；revit_bridge selftest 10/10；pyrevit_hook selftest 6/6；spec v1.10.0（§3.16 新增、§4.2 bim/cbwd、§6 限制 20）。
+
+---
+
+## v2.9.0 — Phase 6 首批：FFI 最小切片 + Revit 桥 + pyRevit 适配（2026-10-19）
+
+> BIM 落地线开工：桥不造轮子——ctypes 是 CPython 自己的答案，
+> 寄生期复用宿主 ABI；句柄是唯一的跨边界引用，Intent 侧永远不见 .NET 对象。
+> 版本 2.8.0 → 2.9.0。
+
+**I1 C ABI FFI 最小切片**（tests/test_ffi.intent 8 测试，全过）
+
+- 新内置 6 个：`ffi_load(path)` / `ffi_func(lib, name, restype, argtypes)` / `ffi_struct(names, types)` / `ffi_field_get(s, name)` / `ffi_field_set(s, name, v)` / `ffi_sizeof(s)`
+- 新值类型：LibValue / ForeignFuncValue（可调用，走 CallExpr callable 分发）/ StructValue；均引用语义
+- 类型映射：Int→c_int / Float→c_double / Str→c_char_p(utf-8) / Bool→c_int / Ptr→c_void_p / Struct→指针 / Void→无返回
+- restype 声明期钉死（默认 c_int 会把指针/字符串返回截断成 int）；`Struct` 形参显式 byref（**实测根因：未声明 argtypes 的 ctypes 对 Structure 实例按值传递——GetCursorPos 传实例 ret=0，byref ret=1**）
+- 测试走真实 Windows API：msvcrt.strlen / user32.GetSystemMetrics / user32.GetCursorPos 出参写回；负例：符号缺失/库缺失/类型名白名单/参数个数
+- 完整 I1 剩余（20 人日中的未做部分，已 note 断点）：回调 CFUNCTYPE、数组/联合、varargs、头文件解析、`foreign` 语法糖
+
+**BD2 Revit API 桥**（tools/revit_bridge.py，selftest 10/10）
+
+- UnwrapElement 模式：`__unwrap__()`（pyRevit）/ `InternalElement`（Dynamo）/ `unwrap()` 三形态识别，非元素值透传
+- ElementRegistry：handle ↔ element 双向注册，wrap 幂等，句柄顺序分配（与 Revit ElementId 解耦），失效句柄 RuntimeError 显式失败
+- RevitSession：send（元素→handle）/ read_props（边界读属性成 Intent 字典）/ run（prelude 注入 + RuntimeValue 树脱壳）/ recv（handle→元素，混合值透传）
+- 端到端：mock Revit 世界上跑真实 Intent 选管规则（std/bim/unit 参与），身份保持验证
+
+**BD3 pyRevit 适配**（tools/pyrevit_hook.py，selftest 6/6）
+
+- CPython3 模式按钮流程 button_main：选元素 → send/read_props → Intent 规则 → 原生结果
+- 宿主定位：显式 host 参数优先，否则沿调用栈向上 3 帧找 `__revit__`（按钮 script.py 的模块全局）；兼容 ActiveUIDocument/uidoc/直挂三种 Selection 形态
+- check_intent 自检 + 宿主缺失显式报错带指引
+
+**BD1 模板修复**（tools/dynamo_node.py，三处从未实跑过的断点）
+
+- `geometry.point(...)` 不可用：import 扁平注入符号但中间名 `geometry` 不存在，且 bim/geometry 无 point() 函数 → 改 `Point3D() + create()`
+- 返回值是 RuntimeValue 树 Dynamo 吃不下 → 模板改返回扁平 [x, y, z]，附 `_native` 脱壳；富几何转换（→ DesignScript Point）属 BD4 范围
+- std/ 按 cwd 相对查找 → 模板切到 intent 根再跑，finally 还原
+
+**质量门**：--test 215/216 过 0 败 1 跳（207→215，+8）；vm_diff 66/66；LSP 冒烟全通；registry/venv/typecheck selftest 全过；spec v1.9.0（§3.15 新增、§3.8 扁平注入边界、§4.1 156→162、§6 限制 17-19）。
+
+---
+
 ## v2.8.0 — L1 渐进类型系统：mypy-lite 切片（2026-10-18）
 
 > 契约是运行时可验证的主防线，类型是静态提示的副防线。

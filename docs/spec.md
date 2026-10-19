@@ -263,6 +263,8 @@ export my_func, my_const;     // 显式导出(P2.1): 无 export 声明的模块�
 模块查找优先级：`<base>/<name>.intent` → `<base>/<name>/__init__.intent` → `<base>/<name>/<name>.intent`（npm 风格）。
 模块 = 文件；循环导入检测（`_import_stack`）；每个模块独立执行，导入时注册其导出符号。
 
+**扁平注入语义（已知边界，2026-10-19 记）**：`import std.bim.unit;` 把模块符号**扁平**注入当前作用域（`mm_to_m(...)` 裸调可用），同时挂载嵌套链 `std.bim.unit.mm_to_m(...)`；但中间名 `unit` **不是**独立符号——`unit.mm_to_m(...)` 报 NameError。历史模板（tools/dynamo_node.py BD1）曾踩此坑，BD2 期已修正。
+
 ### 3.9 包管理（P2.1 + PK1 依赖解析，V0.2 本地优先）
 
 项目清单 `intent.toml`：
@@ -381,11 +383,47 @@ python src/mini_intent.py --postmortem tests/_demo_error_stack.intent
 - 非交互（stdin EOF）自动收尾，退出码 0——postmortem 的职责是接住崩溃，不是复制失败
 - 与 C7 `--debug` 的分工：debugger 事前（打断点逐步走），postmortem 事后（栈已冻结，只检视不执行）
 
+### 3.15 C ABI FFI（I1 最小切片，ctypes 背载）
+
+```intent
+let lib = ffi_load("msvcrt");                          // 加载 .dll/.so
+let strlen = ffi_func(lib, "strlen", "Int", ["Str"]);  // 声明外部函数
+print(strlen("hello"));                                // 5
+
+let pt = ffi_struct(["x", "y"], ["Int", "Int"]);       // 结构体(平铺标量)
+ffi_field_set(pt, "x", 42);
+let user32 = ffi_load("user32");
+let get_cursor = ffi_func(user32, "GetCursorPos", "Int", ["Struct"]);
+get_cursor(pt);                                        // 结构体按引用传(出参)
+print(ffi_field_get(pt, "x"));
+```
+
+- 类型名白名单：`Int`(c_int) / `Float`(c_double) / `Str`(c_char_p, utf-8) / `Bool`(c_int) / `Ptr`(c_void_p) / `Struct`(指针语义) / `Void`(仅返回)；声明期校验，未知类型名抛 ValueError
+- `Struct` 形参 = 指向结构体的指针（Win32 出参/入参指针模式）——**未声明 argtypes 的 ctypes 函数对 Structure 实例按值传递，必须显式 byref**（实测 GetCursorPos：传实例 ret=0，byref ret=1）
+- 符号不存在 / 库加载失败 / 实参个数或类型不符 → RuntimeError/TypeError，显式失败不返回哑值
+- 架构立场：寄生期复用宿主 CPython 的 ctypes，不自己造 ABI 桥（ROADMAP §0.1）
+- **完整 I1 剩余**（20 人日中的未做部分）：回调（CFUNCTYPE）、数组/联合、varargs、头文件解析、`foreign` 语法糖——最小切片已交付并通过 8 项测试（tests/test_ffi.intent，Windows 真实 API msvcrt/user32）
+
+### 3.16 Python 互操作桥（I2a 最小切片，寄生期标志）
+
+```intent
+import python.math;                 // 加载真 Python 模块
+print(math.sqrt(16.0));             // 4.0 — 命名空间成员调用
+print(python.math.floor(3.7));      // 3  — 全链亦可
+let text = json.dumps({"a": 1});    // import python.json 后
+```
+
+- **命名空间挂载**：`import python.X` 经 importlib 加载真模块，符号包成桥值挂到 `X`（末段名独立可用）；**不平扁注入**——防遮蔽核心内置（与 std import 扁平注入的边界偏差是刻意设计，见 §3.8）
+- 双向编排：标量/列表/字典/None 自动转换；富对象（类实例等）包成不透明 `PyObjectValue` 句柄（可传回 Python，不可在 Intent 侧探内部）
+- 异常策略：Python 侧任何异常 → RuntimeError（带原类型名）——显式失败，不静默 None
+- 架构立场：I2 是路线图 ROI 最高的单个任务（ROADMAP §0.1）；寄生期解决生态从零
+- **完整 I2a 剩余**（15 人日中的未做部分）：类实例化、关键字参数、Python 回调 Intent、子模块链、pip 三方包 round-trip（requests/numpy）
+
 ---
 
 ## 4. 标准库
 
-### 4.1 内置函数（156，`_setup_builtins` mini_intent.py:4305）
+### 4.1 内置函数（162，`_setup_builtins` mini_intent.py:4305）
 
 | 类别 | 函数（签名） |
 |---|---|
@@ -414,6 +452,7 @@ python src/mini_intent.py --postmortem tests/_demo_error_stack.intent
 | 内存观测（MM1） | `mem_live_count()` `mem_alloc_total()` `mem_stats_info()` `gc_collect_now()` `ref_count_of(obj)`（设计文档 docs/memory_design.md） |
 | 通道（CC2） | `chan()` `chan(n)`（创建无界/容量 n 通道） `close(ch)`（关闭：发送报错、接收排空即止） |
 | 测试框架（TQ1） | `skip(reason)` `expect_error(fn, type)` `param_cases(cases, fn)` `mock(name)` `mock_return(m, v)` `mock_calls(m)` `mock_call_count(m)` |
+| FFI（I1 最小切片） | `ffi_load(path)` `ffi_func(lib, name, restype, argtypes)` `ffi_struct(names, types)` `ffi_field_get(s, name)` `ffi_field_set(s, name, v)` `ffi_sizeof(s)`（ctypes 背载；类型名白名单 Int/Float/Str/Bool/Ptr/Struct + Void；见 §3.15） |
 
 ### 4.2 std 模块（`std/*.intent`）
 
@@ -451,7 +490,8 @@ python src/mini_intent.py --postmortem tests/_demo_error_stack.intent
 | `argparse`（SL1） | parse, get（--key value 对 + 裸 --flag 置真；演示级） |
 | `pathlib`（SL1） | name, stem, suffix, parent, join_path, with_suffix（纯 Intent；不叫 join——避让核心内置） |
 | `memory`（MM1） | mem_live, alloc_total, mem_stats, gc_collect, ref_count（寄生策略：弱引用注册表 + 宿主分代 GC；docs/memory_design.md） |
-| `bim/*` | unit(单位换算) / geometry(Vector3D 等) / transform(矩阵) / solid / polygon / pipe / pipe_fittings / pipe_routing(A* 3D 寻路) |
+| `functools`（X1） | compose(f, g)（右先生效的组合）/ memoize(f)（单参记忆化，无淘汰子集） |
+| `bim/*` | unit(单位换算) / geometry(Vector3D 等) / transform(矩阵) / solid / polygon / pipe / pipe_fittings / pipe_routing(A* 3D 寻路) / **cbwd**(BD4：洞口合并——连通分量+空间哈希预筛，与 CBWD 参考逐例一致) |
 
 字典方法（P3.1）：`d.has_key(k)` / `d.keys()` / `d.values()`；dict 键统一为 Python 标量形态（`DictValue._norm_key`），int/float/str/bool 键均可，`{1: "a"}` 与 `squares[3]` 自然工作。
 
@@ -536,6 +576,11 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 14 | `ListValue.copy()` 不处理环：自引用列表作 Intent 函数实参 → 无限递归（形参复制传值） | M2 期修（copy 带 memo 表）；诊断路径直调内置绕行 |
 | 15 | `import std.X` 将模块全部符号注入当前作用域，可能遮蔽核心内置（如 pathlib.join 曾遮蔽 join） | 命名避让（join_path）；根治需改 import 语义，排队 |
 | 16 | `and`/`or` 原为两侧 eager 求值（`i < len(l) and l[i] < x` 边界越界） | ✅ 已修复（2026-10-18：短路求值，返回类型保持 BoolValue；VM 经委托通道同受益） |
+| 17 | `import std.X` 扁平注入符号，但中间名（如 `unit`）不是独立符号，`unit.mm_to_m(...)` 报 NameError | 已知边界（2026-10-19 BD2 期实证）；用裸名 `mm_to_m(...)` 或全链 `std.bim.unit.mm_to_m(...)`；BD1 模板已修正 |
+| 18 | FFI 仅最小切片：无回调/数组/联合/varargs/头文件解析/`foreign` 语法糖 | I1 剩余部分（20 人日中的未做部分，ROADMAP 维度 8 已注断点） |
+| 19 | `run_source` 对容器返回 RuntimeValue 树（ListValue.value 内为 IntValue 等），非原生类型 | 桥侧已脱壳（tools/revit_bridge.py `_to_native`）；宿主接入时需自行转换 |
+| 20 | Python 桥（I2a）无关键字参数/类实例化/回调 | 最小切片边界（spec §3.16）；完整版随 I2a 剩余部分 |
+| 21 | 装饰器在提升期应用，早于顶层 import — 模块导入的装饰器（`@memoize` from std.functools）找不到；函数体内的 `@deco` 不解析 | X1 已知边界（2026-10-19 实证）；本文件定义的装饰器可用；完整版随「def 即语句执行」改造（X1 断点） |
 
 ---
 
@@ -550,4 +595,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.5.0 · 2026-10-18 从实现提取 · 与 mini_intent.py 工作区对齐（v2.5.0：SL1 高频标准库 / SL2 组合数学 / MM1 内存管理 / else if / and-or 短路）*
+*规范版本 v1.11.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.11.0：X1 装饰器最小切片——@deco + functools 系 + 顶层函数一等值修复；§4.2 functools）*

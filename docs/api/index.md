@@ -37,6 +37,7 @@
 | std.textwrap | [textwrap.md](textwrap.md) |
 | std.time | [time.md](time.md) |
 | std.uuid | [uuid.md](uuid.md) |
+| bim.cbwd | [bim.cbwd.md](bim.cbwd.md) |
 | bim.geometry | [bim.geometry.md](bim.geometry.md) |
 | bim.pipe | [bim.pipe.md](bim.pipe.md) |
 | bim.pipe_fittings | [bim.pipe_fittings.md](bim.pipe_fittings.md) |

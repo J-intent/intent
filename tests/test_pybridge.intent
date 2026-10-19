@@ -1,0 +1,41 @@
+// I2a Python 互操作桥测试（最小切片）— import python.xxx
+// 寄生期标志(ROADMAP 皇冠 I2 第一期): Intent 直接调用 Python 生态
+// 语义: 命名空间挂载(math.sqrt 可用, 符号不平扁注入防遮蔽内置)
+
+import python.math;
+import python.json;
+import python.statistics;
+
+def test_pybridge_math_functions() {
+    assert abs(math.sqrt(16.0) - 4.0) < 0.000001, "python.math.sqrt(16) == 4";
+    assert math.floor(3.7) == 3, "python.math.floor";
+    assert math.gcd(12, 18) == 6, "python.math.gcd";
+};
+
+def test_pybridge_math_constant() {
+    assert math.pi > 3.14 and math.pi < 3.15, "python.math.pi 常量透传(非函数属性)";
+};
+
+def test_pybridge_full_namespace_chain() {
+    assert abs(python.math.sqrt(25.0) - 5.0) < 0.000001, "全链 python.math.sqrt 亦可用";
+};
+
+def test_pybridge_json_roundtrip() {
+    let text = json.dumps({"a": 1, "b": [2, 3]});
+    assert len(text) > 0, "python.json.dumps 返回字符串";
+    let back = json.loads(text);
+    assert back["a"] == 1, "json round-trip: 整数字段";
+    assert back["b"][1] == 3, "json round-trip: 嵌套列表";
+};
+
+def test_pybridge_statistics() {
+    assert abs(statistics.mean([1.0, 2.0, 3.0, 4.0]) - 2.5) < 0.000001,
+        "python.statistics.mean(列表编排)";
+};
+
+def test_pybridge_python_exception_is_explicit() {
+    let err = expect_error(fn() {
+        math.sqrt("abc");
+    }, "RuntimeError");
+    assert err.type == "RuntimeError", "Python 侧异常 → RuntimeError(显式失败不静默)";
+};

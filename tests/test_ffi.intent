@@ -1,0 +1,90 @@
+// C ABI FFI 回归测试(I1 最小切片) — ffi_load/ffi_func/ffi_struct
+// ctypes 背载: 标量/结构体/指针出参; Windows 走 msvcrt/user32 真实 API,
+// 非 Windows 环境诚实 skip(不假装通过)。
+
+def test_ffi_scalar_strlen() {
+    if platform() != "win32" {
+        skip("FFI 标量测试依赖 Windows msvcrt");
+    };
+    let lib = ffi_load("msvcrt");
+    let strlen = ffi_func(lib, "strlen", "Int", ["Str"]);
+    assert strlen("hello") == 5, "msvcrt.strlen('hello') == 5";
+    assert strlen("") == 0, "空串长度 0";
+    assert strlen("契约") == 6, "utf-8 多字节串按字节计(契/约 各 3 字节 → 6)";
+};
+
+def test_ffi_windows_api_get_system_metrics() {
+    if platform() != "win32" {
+        skip("FFI Windows API 测试依赖 user32");
+    };
+    let user32 = ffi_load("user32");
+    let get_metrics = ffi_func(user32, "GetSystemMetrics", "Int", ["Int"]);
+    let screen_w = get_metrics(0);   // SM_CXSCREEN
+    assert screen_w > 0, "GetSystemMetrics(SM_CXSCREEN) 返回正数(真实 Windows API)";
+};
+
+def test_ffi_struct_roundtrip() {
+    // 结构体字段读写与 sizeof — 纯内存操作, 不依赖平台
+    let pt = ffi_struct(["x", "y"], ["Int", "Int"]);
+    ffi_field_set(pt, "x", 42);
+    ffi_field_set(pt, "y", -7);
+    assert ffi_field_get(pt, "x") == 42, "结构体写后读回(x)";
+    assert ffi_field_get(pt, "y") == -7, "结构体写后读回(y, 负数)";
+    assert ffi_sizeof(pt) == 8, "POINT 双 Int 字段 sizeof == 8";
+};
+
+def test_ffi_struct_pointer_outparam() {
+    if platform() != "win32" {
+        skip("出参测试依赖 user32.GetCursorPos");
+    };
+    let user32 = ffi_load("user32");
+    let pt = ffi_struct(["x", "y"], ["Int", "Int"]);
+    let get_cursor_pos = ffi_func(user32, "GetCursorPos", "Int", ["Struct"]);
+    let ok = get_cursor_pos(pt);   // 结构体按引用传: 出参写回
+    assert ok == 1, "GetCursorPos 返回 TRUE(1)";
+    let x = ffi_field_get(pt, "x");
+    let y = ffi_field_get(pt, "y");
+    assert type_of(x) == "Int" and type_of(y) == "Int",
+        "出参经指针写回结构体(字段类型为 Int)";
+};
+
+def test_ffi_declare_missing_symbol() {
+    if platform() != "win32" {
+        skip("符号缺失测试依赖 Windows msvcrt");
+    };
+    let lib = ffi_load("msvcrt");
+    let err = expect_error(fn() {
+        ffi_func(lib, "intent_no_such_symbol_xyz", "Int", []);
+    }, "RuntimeError");
+    assert err.type == "RuntimeError", "声明不存在的符号 → RuntimeError(显式失败)";
+};
+
+def test_ffi_load_missing_lib() {
+    let err = expect_error(fn() {
+        ffi_load("intent_no_such_library_zzz.dll");
+    }, "RuntimeError");
+    assert err.type == "RuntimeError", "加载不存在的库 → RuntimeError";
+};
+
+def test_ffi_bad_type_name() {
+    if platform() != "win32" {
+        skip("类型名白名单测试依赖 Windows msvcrt(需库句柄作第1参)");
+    };
+    let lib = ffi_load("msvcrt");
+    let err = expect_error(fn() {
+        ffi_func(lib, "strlen", "Int", ["Int128"]);
+    }, "ValueError");
+    assert err.type == "ValueError", "未知类型名 → ValueError(声明期白名单)";
+};
+
+def test_ffi_arg_count_mismatch() {
+    if platform() != "win32" {
+        skip("参数个数校验测试依赖 Windows msvcrt");
+    };
+    let lib = ffi_load("msvcrt");
+    let strlen = ffi_func(lib, "strlen", "Int", ["Str"]);
+    let err = expect_error(fn() {
+        strlen("a", "b");
+    }, "TypeError");
+    assert err.type == "TypeError", "实参个数与声明不符 → TypeError";
+};

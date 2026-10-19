@@ -13,6 +13,7 @@ import re
 import time
 import threading
 import queue
+import ctypes
 
 # 提升 Python 递归限制（Intent 递归函数需要更深的调用栈）
 sys.setrecursionlimit(100000)
@@ -3287,6 +3288,10 @@ class RuntimeValue:
             return self  # 对象/函数/类是引用语义
         if isinstance(self, (ChannelValue, MockValue)):
             return self  # CC2 通道/TQ1 mock: 共享句柄, 引用语义
+        if isinstance(self, (LibValue, ForeignFuncValue, StructValue)):
+            return self  # I1 FFI: 库/函数句柄/结构体(指针语义)均引用共享
+        if isinstance(self, (PyFuncValue, PyObjectValue)):
+            return self  # I2a Python 桥: 函数句柄/不透明对象均引用共享
         if isinstance(self, (ResultValue, ErrorValue)):
             return self.copy()  # 委托各自实现
         return RuntimeValue(self.type, self.value)
@@ -3611,6 +3616,263 @@ class MockValue(RuntimeValue):
 
     def __str__(self):
         return f"<mock {self.name} calls={len(self.calls)}>"
+
+
+# ── I1: C ABI FFI（ctypes 背载的最小切片）────────────────
+# 设计: 声明外部函数 + 加载 .dll/.so + 结构体映射。
+# ctypes 是 CPython 自己的答案 — 寄生期复用宿主 ABI, 不自己造桥。
+# 类型映射: Int→c_int, Float→c_double, Str→c_char_p(utf-8),
+#           Bool→c_int, Ptr→c_void_p, Struct→按引用传(ctypes 实例语义)。
+# 完整 I1 剩余(见 ROADMAP_LONGTERM 维度 8): 回调(CFUNCTYPE)/数组/
+#   联合/varargs/头文件解析/foreign 语法糖 — 最小切片已 note 断点。
+
+_FFI_SCALARS = {
+    'Int': ctypes.c_int,
+    'Float': ctypes.c_double,
+    'Str': ctypes.c_char_p,
+    'Bool': ctypes.c_int,
+    'Ptr': ctypes.c_void_p,
+}
+
+# restype 映射(与 _FFI_SCALARS 的差集: Void→None 即 C void)
+_FFI_RESTYPES = dict(_FFI_SCALARS)
+_FFI_RESTYPES['Void'] = None
+
+
+def _ffi_check_type_name(tname: str) -> None:
+    """FFI 类型名白名单: 标量或 Struct — 声明期即失败, 不拖到调用期"""
+    if tname not in _FFI_SCALARS and tname != 'Struct':
+        raise ValueError(
+            f"未知 FFI 类型: {tname}(可用: Int/Float/Str/Bool/Ptr/Struct)")
+
+
+def _ffi_to_c(val: 'RuntimeValue', tname: str):
+    """Intent 值 → C 实参
+
+    'Struct' 语义 = 指向结构体的指针(Win32 出参/入参指针模式):
+    未声明 argtypes 的 ctypes 函数会把 Structure 实例按值传递,
+    必须显式 byref(实测 GetCursorPos: 传实例 ret=0, byref ret=1)。
+    """
+    if tname == 'Struct':
+        if not isinstance(val, StructValue):
+            raise TypeError(f"FFI Struct 参数期望结构体, 得到 {val.type}")
+        return ctypes.byref(val.instance)  # 指针语义: 外部函数可写回
+    if tname == 'Int':
+        if not isinstance(val, IntValue):
+            raise TypeError(f"FFI Int 参数期望整数, 得到 {val.type}")
+        return ctypes.c_int(int(val.value))
+    if tname == 'Float':
+        if isinstance(val, IntValue):
+            return ctypes.c_double(float(val.value))
+        if not isinstance(val, FloatValue):
+            raise TypeError(f"FFI Float 参数期望浮点, 得到 {val.type}")
+        return ctypes.c_double(val.value)
+    if tname == 'Str':
+        if not isinstance(val, StringValue):
+            raise TypeError(f"FFI Str 参数期望字符串, 得到 {val.type}")
+        return val.value.encode('utf-8')
+    if tname == 'Bool':
+        if not isinstance(val, BoolValue):
+            raise TypeError(f"FFI Bool 参数期望布尔, 得到 {val.type}")
+        return ctypes.c_int(1 if val.value else 0)
+    if tname == 'Ptr':
+        if isinstance(val, StructValue):
+            return ctypes.byref(val.instance)
+        if isinstance(val, IntValue):
+            return ctypes.c_void_p(int(val.value))
+        raise TypeError(f"FFI Ptr 参数期望结构体或整数地址, 得到 {val.type}")
+    raise ValueError(f"未知 FFI 类型: {tname}")
+
+
+def _ffi_from_c(ret, tname: str) -> 'RuntimeValue':
+    """C 返回值 → Intent 值"""
+    if tname == 'Void':
+        return NoneValue()
+    if tname == 'Int' or tname == 'Bool':
+        return IntValue(int(ret))
+    if tname == 'Float':
+        return FloatValue(float(ret))
+    if tname == 'Str':
+        if ret is None:
+            return StringValue("")
+        if isinstance(ret, bytes):
+            return StringValue(ret.decode('utf-8', 'replace'))
+        return StringValue(str(ret))
+    if tname == 'Ptr':
+        return IntValue(int(ctypes.cast(ret, ctypes.c_void_p).value or 0))
+    raise ValueError(f"未知 FFI 返回类型: {tname}")
+
+
+class LibValue(RuntimeValue):
+    """I1: 外部动态库句柄(ffi_load 返回)
+
+    持有 ctypes.CDLL; 路径原样保留供报错定位。
+    引用语义: copy() 返回自身(句柄共享)。
+    """
+
+    def __init__(self, path: str, handle):
+        super().__init__(AnyType(), path)
+        self.path = path
+        self.handle = handle
+
+    def __str__(self):
+        return f"<ffi-lib {self.path}>"
+
+
+class ForeignFuncValue(RuntimeValue):
+    """I1: 外部函数(ffi_func 声明) — 可调用值
+
+    走 CallExpr 的 callable 分发(与 mock 同路); 参数个数/类型在
+    调用期校验, 声明期校验符号存在性与类型名白名单。
+    引用语义: copy() 返回自身。
+    """
+
+    def __init__(self, lib: 'LibValue', name: str, restype: str, argtypes: list):
+        super().__init__(AnyType(), f"{lib.path}!{name}")
+        self.lib = lib
+        self.name = name
+        self.restype = restype
+        self.argtypes = list(argtypes)
+        try:
+            self._fn = getattr(lib.handle, name)
+        except AttributeError:
+            raise RuntimeError(
+                f"FFI 声明失败: 库 {lib.path} 中不存在符号 {name}")
+        # restype 必须在声明期钉死: 默认 c_int 会把指针/字符串返回截断成 int
+        self._fn.restype = _FFI_RESTYPES.get(restype, ctypes.c_int)
+
+    def __call__(self, args: list) -> 'RuntimeValue':
+        if len(args) != len(self.argtypes):
+            raise TypeError(
+                f"FFI 函数 {self.name} 期望 {len(self.argtypes)} 个参数, "
+                f"得到 {len(args)} 个")
+        marshaled = [_ffi_to_c(a, t) for a, t in zip(args, self.argtypes)]
+        ret = self._fn(*marshaled)
+        return _ffi_from_c(ret, self.restype)
+
+    def __str__(self):
+        sig = f"{self.name}({', '.join(self.argtypes)}) -> {self.restype}"
+        return f"<ffi-func {sig} @ {self.lib.path}>"
+
+
+class StructValue(RuntimeValue):
+    """I1: C 结构体(ffi_struct 创建)
+
+    fields: name → 类型名(str); instance: ctypes.Structure 实例。
+    作实参传外部函数时按引用传递(指针语义 — GetCursorPos 式出参)。
+    引用语义: copy() 返回自身(结构体是共享内存, 不是值对象)。
+    """
+
+    def __init__(self, fields: dict, instance):
+        super().__init__(AnyType(), None)
+        self.fields = dict(fields)
+        self.instance = instance
+
+    def __str__(self):
+        parts = []
+        for fname, ft in self.fields.items():
+            v = getattr(self.instance, fname)
+            parts.append(f"{fname}={v}")
+        return f"<ffi-struct {{{', '.join(parts)}}}>"
+
+
+# ── I2a: Python 互操作桥（寄生期标志, ROADMAP 皇冠）─────────
+# import python.X → importlib 加载真 Python 模块, 符号包成桥值。
+# 设计: 命名空间挂载(namespace_only) — math.sqrt 可用, 但符号不
+# 平扁注入(防遮蔽核心内置, 与 std import 的边界偏差是刻意选择)。
+# 编排规则: 标量/列表/字典/None 双向自动; 富对象包 PyObjectValue
+# 不透明句柄(可传回 Python, 不可在 Intent 侧探内部)。
+# 完整 I2a 剩余(15 人日中的未做部分): 类实例化/关键字参数/
+#   Python 回调 Intent/子模块链/pip 三方包 round-trip(requests/numpy)。
+
+def _py_from_intent(v: 'RuntimeValue'):
+    """Intent 值 → Python 原生(桥入参)"""
+    if isinstance(v, (IntValue, FloatValue, StringValue, BoolValue)):
+        return v.value
+    if isinstance(v, NoneValue):
+        return None
+    if isinstance(v, ListValue):
+        return [_py_from_intent(x) for x in v.value]
+    if isinstance(v, DictValue):
+        return {k: _py_from_intent(x) for k, x in v.value.items()}
+    if isinstance(v, PyObjectValue):
+        return v.obj
+    raise TypeError(
+        f"python 桥暂不支持把 {v.type} 传进 Python"
+        "(标量/列表/字典/None/桥对象可传)")
+
+
+def _py_to_intent(x) -> 'RuntimeValue':
+    """Python 原生 → Intent 值(桥返回)"""
+    if x is None:
+        return NoneValue()
+    if isinstance(x, bool):  # bool 须先于 int(Python bool 是 int 子类)
+        return BoolValue(x)
+    if isinstance(x, int):
+        return IntValue(x)
+    if isinstance(x, float):
+        return FloatValue(x)
+    if isinstance(x, str):
+        return StringValue(x)
+    if isinstance(x, (list, tuple)):
+        return ListValue([_py_to_intent(i) for i in x], AnyType())
+    if isinstance(x, dict):
+        entries = {}
+        for k, v in x.items():
+            if isinstance(k, bool):
+                entries[k] = _py_to_intent(v)
+            elif isinstance(k, (int, float, str)):
+                entries[k] = _py_to_intent(v)
+            else:
+                entries[str(k)] = _py_to_intent(v)  # 非标量键字符串化
+        return DictValue(entries)
+    return PyObjectValue(x)
+
+
+class PyFuncValue(RuntimeValue):
+    """I2a: Python 函数桥值 — 可调用值, 走 CallExpr callable 分发
+
+    异常策略: Python 侧任何异常 → RuntimeError(带原名),
+     Intent 侧 catch 到的是显式失败, 不是静默 None。
+    引用语义: copy() 返回自身。
+    """
+
+    def __init__(self, py_func, qualname: str):
+        super().__init__(AnyType(), qualname)
+        self.py_func = py_func
+        self.qualname = qualname
+
+    def __call__(self, args: list) -> 'RuntimeValue':
+        py_args = [_py_from_intent(a) for a in args]
+        try:
+            ret = self.py_func(*py_args)
+        except Exception as e:
+            raise RuntimeError(
+                f"Python 桥调用 {self.qualname} 失败: "
+                f"{type(e).__name__}: {e}")
+        return _py_to_intent(ret)
+
+    def __str__(self):
+        return f"<py-func {self.qualname}>"
+
+
+class PyObjectValue(RuntimeValue):
+    """I2a: 不透明 Python 对象句柄(类实例/模块/富返回)
+
+    可传回 Python(桥对象原样交接), 不可在 Intent 侧探内部 —
+    寄生期边界: 需要深层互操作时走 I2b(Python 调 Intent)或完整 I2a。
+    引用语义: copy() 返回自身。
+    """
+
+    def __init__(self, obj):
+        super().__init__(AnyType(), None)
+        self.obj = obj
+
+    def __str__(self):
+        text = str(self.obj)
+        if len(text) > 80:
+            text = text[:77] + "..."
+        return f"<py {type(self.obj).__name__}: {text}>"
 
 
 class SkipTest(Exception):
@@ -4339,6 +4601,13 @@ class Interpreter:
             # CC2: 通道通信
             'chan': self._builtin_chan,
             'close': self._builtin_close,
+            # I1: C ABI FFI（ctypes 背载最小切片）
+            'ffi_load': self._builtin_ffi_load,
+            'ffi_func': self._builtin_ffi_func,
+            'ffi_struct': self._builtin_ffi_struct,
+            'ffi_field_get': self._builtin_ffi_field_get,
+            'ffi_field_set': self._builtin_ffi_field_set,
+            'ffi_sizeof': self._builtin_ffi_sizeof,
             # TQ1: 测试框架深化
             'skip': self._builtin_skip,
             'expect_error': self._builtin_expect_error,
@@ -4926,6 +5195,119 @@ class Interpreter:
             raise TypeError(f"close() 期望通道(chan() 创建), 得到 {args[0].type}")
         args[0].close()
         return NoneValue()
+
+    # ── I1: C ABI FFI 内置（ctypes 背载最小切片）──────────
+
+    def _builtin_ffi_load(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """ffi_load(path) — 加载外部动态库(.dll/.so), 返回库句柄
+
+        路径直接交给 ctypes.CDLL: Windows 按 LoadLibrary 语义搜路径,
+        POSIX 按 dlopen 语义。加载失败(找不到/不是库)报 RuntimeError,
+        错误信息带原始 OSError 文本 — 显式失败, 不返回哑值。
+        """
+        if len(args) != 1:
+            raise TypeError(f"ffi_load() 期望1个参数(库路径), 得到 {len(args)} 个")
+        if not isinstance(args[0], StringValue):
+            raise TypeError(f"ffi_load() 期望字符串路径, 得到 {args[0].type}")
+        path = args[0].value
+        try:
+            handle = ctypes.CDLL(path)
+        except OSError as e:
+            raise RuntimeError(f"FFI 加载库失败 {path!r}: {e}")
+        return LibValue(path, handle)
+
+    def _builtin_ffi_func(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """ffi_func(lib, name, restype, argtypes) — 声明外部函数
+
+        argtypes 是类型名列表(Int/Float/Str/Bool/Ptr/Struct);
+        restype 同表 + Void。声明期校验: 符号存在 + 类型名白名单。
+        """
+        if len(args) != 4:
+            raise TypeError("ffi_func() 期望4个参数(lib, name, restype, argtypes), "
+                            f"得到 {len(args)} 个")
+        lib, name, restype, argtypes = args
+        if not isinstance(lib, LibValue):
+            raise TypeError(f"ffi_func() 第1个参数期望库句柄(ffi_load 创建), 得到 {lib.type}")
+        if not isinstance(name, StringValue):
+            raise TypeError(f"ffi_func() 第2个参数期望函数名字符串, 得到 {name.type}")
+        if not isinstance(restype, StringValue):
+            raise TypeError(f"ffi_func() 第3个参数期望返回类型字符串, 得到 {restype.type}")
+        if not isinstance(argtypes, ListValue):
+            raise TypeError(f"ffi_func() 第4个参数期望参数类型列表, 得到 {argtypes.type}")
+        type_names = []
+        for t in argtypes.value:
+            if not isinstance(t, StringValue):
+                raise TypeError(f"ffi_func() 参数类型必须是字符串, 得到 {t.type}")
+            _ffi_check_type_name(t.value)
+            type_names.append(t.value)
+        _ffi_check_type_name(restype.value)
+        return ForeignFuncValue(lib, name.value, restype.value, type_names)
+
+    def _builtin_ffi_struct(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """ffi_struct(names, types) — 定义并创建 C 结构体实例
+
+        字段类型限 Int/Float/Str/Bool/Ptr(最小切片: 平铺标量,
+        嵌套结构体/数组属完整 I1)。names 与 types 等长, 字段名唯一。
+        """
+        if len(args) != 2:
+            raise TypeError("ffi_struct() 期望2个参数(names, types), "
+                            f"得到 {len(args)} 个")
+        names_v, types_v = args
+        if not isinstance(names_v, ListValue) or not isinstance(types_v, ListValue):
+            raise TypeError("ffi_struct() 期望两个列表(字段名, 字段类型)")
+        if len(names_v.value) != len(types_v.value):
+            raise ValueError(
+                f"ffi_struct() 字段名与类型数量不符: "
+                f"{len(names_v.value)} vs {len(types_v.value)}")
+        fields = {}
+        cfields = []
+        for n, t in zip(names_v.value, types_v.value):
+            if not isinstance(n, StringValue) or not isinstance(t, StringValue):
+                raise TypeError("ffi_struct() 字段名与类型必须是字符串")
+            if n.value in fields:
+                raise ValueError(f"ffi_struct() 字段名重复: {n.value}")
+            _ffi_check_type_name(t.value)
+            fields[n.value] = t.value
+            cfields.append((n.value, _FFI_SCALARS[t.value]))
+        if not cfields:
+            raise ValueError("ffi_struct() 至少需要一个字段")
+        cls = type('IntentFFIStruct', (ctypes.Structure,), {'_fields_': cfields})
+        return StructValue(fields, cls())
+
+    def _builtin_ffi_field_get(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """ffi_field_get(s, name) — 读结构体字段"""
+        if len(args) != 2:
+            raise TypeError(f"ffi_field_get() 期望2个参数, 得到 {len(args)} 个")
+        s, name = args
+        if not isinstance(s, StructValue):
+            raise TypeError(f"ffi_field_get() 第1个参数期望结构体, 得到 {s.type}")
+        if not isinstance(name, StringValue):
+            raise TypeError(f"ffi_field_get() 第2个参数期望字段名字符串, 得到 {name.type}")
+        if name.value not in s.fields:
+            raise KeyError(f"结构体无字段 {name.value}(现有: {sorted(s.fields)})")
+        return _ffi_from_c(getattr(s.instance, name.value), s.fields[name.value])
+
+    def _builtin_ffi_field_set(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """ffi_field_set(s, name, v) — 写结构体字段(指针语义: 外部函数可见)"""
+        if len(args) != 3:
+            raise TypeError(f"ffi_field_set() 期望3个参数, 得到 {len(args)} 个")
+        s, name, v = args
+        if not isinstance(s, StructValue):
+            raise TypeError(f"ffi_field_set() 第1个参数期望结构体, 得到 {s.type}")
+        if not isinstance(name, StringValue):
+            raise TypeError(f"ffi_field_set() 第2个参数期望字段名字符串, 得到 {name.type}")
+        if name.value not in s.fields:
+            raise KeyError(f"结构体无字段 {name.value}(现有: {sorted(s.fields)})")
+        setattr(s.instance, name.value, _ffi_to_c(v, s.fields[name.value]))
+        return NoneValue()
+
+    def _builtin_ffi_sizeof(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """ffi_sizeof(s) — 结构体内存字节数(与 C sizeof 一致)"""
+        if len(args) != 1:
+            raise TypeError(f"ffi_sizeof() 期望1个参数, 得到 {len(args)} 个")
+        if not isinstance(args[0], StructValue):
+            raise TypeError(f"ffi_sizeof() 期望结构体, 得到 {args[0].type}")
+        return IntValue(ctypes.sizeof(args[0].instance))
 
     # ── TQ1: 测试框架深化内置 ────────────────────────────
 
@@ -6166,6 +6548,33 @@ class Interpreter:
         if hasattr(node, 'column'):
             self.current_col = node.column or self.current_col
 
+    def _apply_decorators(self, func: 'FunctionDef',
+                          fv: 'FunctionValue') -> 'FunctionValue':
+        """X1: 应用装饰器栈 dec_func(fv), 自外向内; 返回包装后的函数值
+
+        提升期(execute_program)与语句期(execute_statement FunctionDef,
+        VM 委托通道经此)共用 — 两引擎行为一致的唯一挂点。
+        已知边界: 提升期早于顶层 import 执行, 模块导入的装饰器
+        (如 @memoize from std.functools)在提升期找不到 — 完整 X1
+        的「带参装饰器 + def 即语句执行」改造一并解决(已 note 断点)。
+        """
+        for dec_name in func.decorators:
+            dec_func = self.current_scope.get_opt(dec_name)
+            # 作用域中没有则查解释器内部函数表
+            if dec_func is None and dec_name in self.functions:
+                dec_func = self.functions[dec_name]
+            # 可能是原始 FunctionDef（scope 中存储的原始声明）
+            if isinstance(dec_func, FunctionDef):
+                dec_func = FunctionValue(dec_func, self.current_scope)
+            if isinstance(dec_func, FunctionValue):
+                # decorator(fn) → 返回包装后的 FunctionValue
+                dec_result = self._execute_method(dec_func, None, [fv])
+                if isinstance(dec_result, FunctionValue):
+                    fv = dec_result
+            else:
+                print(f"[警告] 装饰器 '{dec_name}' 未找到或不是函数")
+        return fv
+
     def execute_program(self, program: Program, module_mode: bool = False) -> RuntimeValue:
         """执行整个程序
         module_mode=True 时只注册函数/变量,不执行main(用于模块加载)
@@ -6180,28 +6589,20 @@ class Interpreter:
         # 注册所有函数
         for func in program.functions.values():
             self.functions[func.name] = func
+            # 顶层函数同时入全局作用域 — 函数是一等值(可作实参传递),
+            # 不能只进 functions 表(那只支持按名调用)。
+            # 闭包作用域 = 当前作用域(顶层即全局), 与旧行为一致。
+            if not module_mode:
+                self.current_scope.declare(
+                    func.name, FunctionValue(func, self.current_scope),
+                    False, allow_redefine=True)
             # 模块模式下同时写入当前作用域,供导入方使用
             if module_mode:
                 self.current_scope.declare(func.name, func, False, allow_redefine=True)
 
             # ── 应用装饰器 ──
             if func.decorators:
-                fv = FunctionValue(func, self.current_scope)
-                for dec_name in func.decorators:
-                    dec_func = self.current_scope.get_opt(dec_name)
-                    # 作用域中没有则查解释器内部函数表
-                    if dec_func is None and dec_name in self.functions:
-                        dec_func = self.functions[dec_name]
-                    # 可能是原始 FunctionDef（scope 中存储的原始声明）
-                    if isinstance(dec_func, FunctionDef):
-                        dec_func = FunctionValue(dec_func, self.current_scope)
-                    if isinstance(dec_func, FunctionValue):
-                        # decorator(fn) → 返回包装后的 FunctionValue
-                        dec_result = self._execute_method(dec_func, None, [fv])
-                        if isinstance(dec_result, FunctionValue):
-                            fv = dec_result
-                    else:
-                        print(f"[警告] 装饰器 '{dec_name}' 未找到或不是函数")
+                fv = self._apply_decorators(func, FunctionValue(func, self.current_scope))
                 # 更新函数注册
                 self.functions[func.name] = fv.func_def
                 if not module_mode:
@@ -6279,7 +6680,12 @@ class Interpreter:
             return self.execute_assert(stmt)
         elif isinstance(stmt, FunctionDef):
             # 嵌套函数定义：注册到当前作用域（闭包捕获）
+            # X1: 装饰器在此应用 — VM 对带装饰器的 def 整条委托解释器,
+            # 两引擎装饰语义一致的挂点(与 execute_program 提升期共用)
             func_val = FunctionValue(stmt, self.current_scope)
+            if stmt.decorators:
+                func_val = self._apply_decorators(stmt, func_val)
+                self.functions[stmt.name] = func_val.func_def
             self.current_scope.declare(stmt.name, func_val)
             return func_val
 
@@ -7136,6 +7542,36 @@ class Interpreter:
         self.continue_flag = True
         return IntValue(0)
 
+    def _load_python_bridge_module(self, module_name: str):
+        """I2a: import python.X — importlib 加载真 Python 模块, 包成桥作用域
+
+        返回 Scope(namespace_only=True); 加载失败打印警告返回 None
+        (与 std 模块找不到时的宽模式一致 — 运行期显式失败兜底)。
+        """
+        import importlib
+        py_name = module_name[len('python.'):]
+        try:
+            mod = importlib.import_module(py_name)
+        except ImportError as e:
+            print(f"[警告] python 桥加载失败: {py_name}: {e}")
+            return None
+        scope = Scope(parent=self.global_scope)
+        scope.namespace_only = True  # 符号只挂命名空间, 不平扁注入
+        for name in dir(mod):
+            if name.startswith('_'):
+                continue  # 私有属性不过桥
+            try:
+                attr = getattr(mod, name)
+            except Exception:
+                continue  # 探测性属性抛错的不拦(某些模块 __getattr__ 挑剔)
+            if callable(attr):
+                scope.declare(name, PyFuncValue(attr, f"{py_name}.{name}"),
+                              False, allow_redefine=True)
+            else:
+                scope.declare(name, _py_to_intent(attr), False,
+                              allow_redefine=True)
+        return scope
+
     def execute_import(self, stmt: ImportStmt) -> RuntimeValue:
         """执行import语句"""
         module_name = stmt.module_name
@@ -7144,6 +7580,12 @@ class Interpreter:
         # 检查模块是否已加载(缓存)
         if module_name in self.modules:
             module_scope = self.modules[module_name]
+        elif module_name.startswith('python.'):
+            # ── I2a: Python 互操作桥 — import python.X 加载真 Python 模块 ──
+            module_scope = self._load_python_bridge_module(module_name)
+            if module_scope is None:
+                return IntValue(0)
+            self.modules[module_name] = module_scope
         else:
             # ── 循环依赖检测 ──
             if module_name in self._import_stack:
@@ -7242,19 +7684,29 @@ class Interpreter:
             cursor_scope = inner_scope
             cursor_val = inner_val
         # 把模块实际符号挂到最内层（FunctionDef 包成 FunctionValue 以支持高阶函数传参）
+        # I2a: python.* 桥模块 namespace_only=True — 符号只挂命名空间链,
+        # 不平扁注入(防遮蔽核心内置), 但末段名独立可用(math.sqrt 而非
+        # 只有 python.math.sqrt — 与 std 扁平注入的边界偏差是刻意设计)
+        _namespace_only = getattr(module_scope_obj, 'namespace_only', False)
         for name, value in module_scope_obj.symbols.items():
             if hasattr(value, 'body'):
                 # 函数: 包成 FunctionValue（闭包=模块作用域）
                 fv = FunctionValue(value, module_scope_obj)
                 cursor_scope.declare(name, fv, False, allow_redefine=True)
-                # 同时注入当前作用域（供模块内裸名调用）
-                self.current_scope.declare(name, fv, False, allow_redefine=True)
+                if not _namespace_only:
+                    # 同时注入当前作用域（供模块内裸名调用）
+                    self.current_scope.declare(name, fv, False, allow_redefine=True)
                 full_name = f"{alias}.{name}"
                 self.functions[full_name] = fv
             else:
                 cursor_scope.declare(name, value, False, allow_redefine=True)
-                # 同时注入当前作用域（供模块内裸名调用，如 ClassValue/Module 等非函数值）
-                self.current_scope.declare(name, value, False, allow_redefine=True)
+                if not _namespace_only:
+                    # 同时注入当前作用域（供模块内裸名调用，如 ClassValue/Module 等非函数值）
+                    self.current_scope.declare(name, value, False, allow_redefine=True)
+        if _namespace_only and len(alias_parts) > 1:
+            # python.X → X 独立可用(命名空间成员, 非扁平符号洪峰)
+            self.current_scope.declare(alias_parts[-1], cursor_val, False,
+                                       allow_redefine=True)
 
         return IntValue(0)
 
@@ -7985,6 +8437,9 @@ class Interpreter:
                 # ClassValue → 类构造函数 (如 std.bim.geometry.Vector3D())
                 if isinstance(func_val, ClassValue):
                     return func_val.call(self, args)
+                # I1/I2a 可调用桥值(FFI 外部函数/Python 桥函数/mock 同路)
+                if callable(func_val):
+                    return func_val(args)
 
                 raise NameError(f"无法调用 {func_val}")
 
@@ -8618,6 +9073,45 @@ class IntentREPL:
                 break
             except Exception as e:
                 print(f"错误: {e}")
+
+# ==================== 嵌入 API（BD1: Dynamo/pyRevit 宿主调用） ====================
+
+def run_source(code: str, filename: str = "<embedded>"):
+    """在宿主进程内运行 Intent 源码, 返回最后一条表达式的原生 Python 值。
+
+    BD1 Dynamo 落地入口: Dynamo 的 PythonNet3 节点(CPython 3.11)里
+    `import mini_intent; mini_intent.run_source(intent_code)` 即可跑 Intent —
+    解释器是纯 Python, 零 C 依赖, 无需重写。
+
+    返回: 最后一条顶层语句的值(RuntimeValue → Python 原生: int/float/str/
+    bool/None/list/dict); 无顶层语句或最后是语句则返回 None。
+    异常: 语法错误/契约违约/运行时错误原样抛出(宿主可捕获)。
+    """
+    lexer = Lexer(code, filename)
+    tokens = lexer.tokenize()
+    parser = Parser(tokens, code)
+    program = parser.parse()
+    if parser.errors:
+        raise SyntaxError(f"Intent 语法错误: {parser.errors[0]}")
+
+    interp = Interpreter()
+    interp.cli_args = []
+    # 顶层函数注册(与 execute_program 的函数提升一致, 否则调用即 NameError)
+    for func in program.functions.values():
+        interp.functions[func.name] = func
+    result = None
+    for stmt in program.statements:
+        if isinstance(stmt, Expression):
+            rv = interp.evaluate_expression(stmt)
+            result = rv.value if isinstance(rv, RuntimeValue) else rv
+        else:
+            interp.execute_statement(stmt)
+    # 顶层无语句但有 main 函数时, 自动调用(与 CLI 行为一致)
+    if result is None and 'main' in program.functions:
+        rv = interp.execute_function(program.functions['main'], [])
+        result = rv.value if isinstance(rv, RuntimeValue) else rv
+    return result
+
 
 # ==================== 主程序 ====================
 def main():

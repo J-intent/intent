@@ -49,7 +49,7 @@
 | 性能 | VM 4.4x 于自家解释器；fib25 787ms vs CPython 约 300ms ≈ 0.38x | 0.38x |
 | 调试 | 调用链 + 源码光标 + --debug 断点单步 | pdb 的 ~60% |
 | 元编程 | 类 + 运算符重载 + 少量 dunder | ~20% |
-| 互操作 | 无 | 0% |
+| 互操作 | I1 FFI 最小切片（ctypes 6 内置）+ Revit/pyRevit 桥（BD2/BD3） | 15%（寄生期起步） |
 | 测试 | 126 用例 + fuzz + CI 七步 | ~5% |
 | 文档社区 | 37 页站点 + 25 API 页 + CONTRIBUTING | 起步 |
 
@@ -242,6 +242,13 @@ Phase 8  生产就绪（v4.0 LTS）      2028 Q2 起持续     ≈ 持续
 - [ ] `--profile`/`--coverage` 出报告
 - [ ] 微基准比 v3.0 提升 ≥2x（M2）
 - [ ] 测试数 ≥ 500
+
+**BIM 落地线进度（2026-10-19，战略首优先，POSITIONING.md 四大战场之 Dynamo 路径）**：
+- ✅ I1 FFI 最小切片：ctypes 背载 6 内置 + 8 测试（Windows 真实 API）。剩余：回调/数组/联合/varargs/头文件解析/`foreign` 语法糖（20 人日中的未做部分）
+- ✅ I2a Python 桥最小切片：`import python.X` 命名空间挂载 + 标量编排 + 6 测试。剩余：类实例化/关键字参数/回调/子模块链/pip 三方 round-trip（15 人日中的未做部分）
+- ✅ BD2 Revit 桥：UnwrapElement + ElementRegistry + RevitSession，mock 世界端到端 10/10。剩余：属性双向通道、事务包裹、事件订阅
+- ✅ BD3 pyRevit 适配：CPython3 模式按钮流程 + 宿主自动定位，selftest 6/6。剩余：IronPython2 兼容、bundle 打包规范
+- ✅ BD4 CBWD 移植最小切片：洞口合并算法移植（std/bim/cbwd.intent），与 COM.py 参考逐例对齐（parity 6/6 + 8 测试）。剩余：Dynamo 实跑判定、翻弯/标签排列移植、组边界与参数写回
 
 ### v4.0-beta「生态冷启动」出口
 - [ ] 20 个官方包全部过「契约+测试+doc」三件套检查
