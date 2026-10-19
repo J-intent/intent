@@ -319,9 +319,8 @@ class Resolver:
             MatchExpr, TryExpr, ThisExpr, SetExpr, GetExpr, ThisExpr, SetExpr, GetExpr,
             SendExpr, RecvExpr,
             LiteralPattern, VariablePattern, WildcardPattern, OrPattern, ConstructorPattern,
-            YieldExpr
+            YieldExpr, AwaitExpr
         )
-
         if isinstance(expr, Literal):
             pass  # 无变量
 
@@ -425,6 +424,10 @@ class Resolver:
                 self._resolve_expr(expr.value)
             if expr.from_expr:
                 self._resolve_expr(expr.from_expr)
+
+        elif isinstance(expr, AwaitExpr):
+            # A3a: await — 操作数是协程表达式(闭包变量同样要标注深度)
+            self._resolve_expr(expr.operand)
 
     def _resolve_pattern(self, pattern) -> None:
         """解析匹配模式"""

@@ -1,0 +1,120 @@
+// A3a async/await 回归测试 — 协程语法 + run 驱动（S3 threadlet 基底）
+// 语义: async def 调用即惰性返回协程；await 挂起当前协程、
+//       驱动内层协程后取其返回值；run(coro) 蹦床驱动至完成。
+// 边界（本切片刻意不做）: async 生成器（async + yield 混用显式拒绝）、
+//       事件循环/IO 多路复用（A3b）、asyncio.gather 式并发调度。
+
+let mut side_effects = [];
+
+async def add(a: Int, b: Int) -> Int {
+    return a + b;
+};
+
+async def double_it(x: Int) -> Int {
+    return x * 2;
+};
+
+async def plus_one(x: Int) -> Int {
+    let y = await double_it(x);
+    return y + 1;
+};
+
+async def three_levels(x: Int) -> Int {
+    let a = await plus_one(x);      // 内层还有 await
+    let b = await double_it(a);
+    return b;
+};
+
+async def touch(n: Int) -> Int {
+    push(side_effects, n);
+    return n;
+};
+
+async def no_return() {
+    let x = 1;
+};
+
+async def boom() {
+    raise error("ValueError", "async boom");
+};
+
+class Box {
+    def init(v: Int) {
+        this.v = v;
+    }
+    async def get(): Int {
+        return this.v;
+    }
+    async def get_doubled(): Int {
+        let raw = await this.get();
+        return raw * 2;
+    }
+}
+
+// ── 测试 ──
+
+def test_async_basic() {
+    assert run(add(1, 2)) == 3, "async 函数体正常执行并返回";
+};
+
+def test_async_await_chain() {
+    assert run(plus_one(5)) == 11, "await 取内层返回值: 5*2+1 == 11";
+};
+
+def test_async_await_deep() {
+    assert run(three_levels(2)) == 10, "三级协程链: ((2*2+1)*2) == 10";
+};
+
+def test_async_lazy_body() {
+    let mut before = len(side_effects);
+    let c = touch(7);
+    assert len(side_effects) == before, "调用 async 函数不执行函数体(惰性)";
+    assert run(c) == 7, "run 驱动后返回结果";
+    assert len(side_effects) == before + 1, "驱动后函数体恰好执行一次";
+};
+
+def test_async_sequential_awaits() {
+    let a = run(touch(1));
+    let b = run(touch(2));
+    assert a == 1 and b == 2, "两个协程依次驱动互不干扰";
+};
+
+def test_async_no_return() {
+    assert run(no_return()) == None, "无 return 的协程返回 None";
+};
+
+def test_async_exception_propagates() {
+    let err = expect_error(fn() {
+        return run(boom());
+    }, "ValueError");
+    assert err.message == "async boom", "协程内异常穿透 run 到调用方";
+};
+
+def test_async_await_non_coroutine() {
+    let err = expect_error(fn() {
+        return await 42;
+    }, "TypeError");
+    assert err.type == "TypeError", "await 非协程显式报错(不静默)";
+};
+
+def test_async_run_non_coroutine() {
+    let err = expect_error(fn() {
+        return run(5);
+    }, "TypeError");
+    assert err.type == "TypeError", "run 非协程显式报错";
+};
+
+def test_async_method() {
+    let b = Box(21);
+    assert run(b.get()) == 21, "类内 async 方法可驱动";
+    assert run(b.get_doubled()) == 42, "async 方法内 await 同类方法";
+};
+
+def test_async_await_outside_async() {
+    // 非 async 上下文中 await 协程 → 显式 RuntimeError
+    let c = double_it(3);
+    let err = expect_error(fn() {
+        return await c;
+    }, "RuntimeError");
+    assert err.type == "RuntimeError", "await 只能在 async 函数中使用";
+};

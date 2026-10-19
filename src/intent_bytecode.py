@@ -436,8 +436,9 @@ class Emitter:
             self._delegate_stmt(node)
 
     def _compile_function_def(self, node: FunctionDef):
-        # 生成器 / 装饰器 / 泛型 / 默认参数 — 语义重在解释器, 整条声明委托
+        # 生成器 / 装饰器 / 泛型 / 默认参数 / async — 语义重在解释器, 整条声明委托
         if (node.is_generator or node.decorators or node.type_params
+                or getattr(node, 'is_async', False)
                 or any(p[2] is not None for p in node.params)):
             self._delegate_stmt(node)
             return

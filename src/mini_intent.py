@@ -577,6 +577,7 @@ class FunctionDef(ASTNode):
     is_pure: bool = False
     effects: List[str] = field(default_factory=list)
     is_generator: bool = False  # 包含 yield 则为 True
+    is_async: bool = False      # A3a: async def — 调用返回协程(惰性)
     decorators: List['Decorator'] = field(default_factory=list)  # 装饰器声明列表(@name 或 @name(args))
 
     def get_param_names(self) -> List[str]:
@@ -765,6 +766,15 @@ class YieldExpr(Expression):
     """S3: yield 表达式 — `let x = yield v` 的递送点(send 的值即本表达式值)"""
     value: Optional["Expression"] = None
     from_expr: Optional["Expression"] = None  # yield from expr 委派转发
+    line: int = 0
+    column: int = 0
+
+
+@dataclass
+class AwaitExpr(Expression):
+    """A3a: await 表达式 — 挂起当前协程, 把内层协程交给驱动线程,
+    驱完拿到其结果作为本表达式的值(线程协作式协程背载)"""
+    operand: Optional["Expression"] = None
     line: int = 0
     column: int = 0
 
@@ -1001,9 +1011,11 @@ class Parser:
                 decorators = self._parse_decorators()
 
                 # 解析函数定义
+                is_async = self._consume_async()
                 if self.match(TokenType.KEYWORD, 'def'):
                     func = self.parse_function_def()
                     if func is not None:
+                        func.is_async = is_async
                         func.decorators = decorators
                         program.add_function(func)
                 elif decorators:
@@ -1050,6 +1062,20 @@ class Parser:
 
         self.expect(TokenType.SYMBOL, '}')
         return EnumDef(name=name, variants=variants)
+
+    def _consume_async(self) -> bool:
+        """A3a: 消费 async 软关键字前缀(仅当后随 def 时才吞)
+
+        软关键字: `async` 仍是合法标识符(变量名/函数名可用),
+        只在 `async def` 组合里取得关键字地位 — 与 type 别名同思路。
+        """
+        if (self.match(TokenType.IDENTIFIER, 'async')
+                and self.peek() is not None
+                and self.peek().type == TokenType.KEYWORD
+                and self.peek().value == 'def'):
+            self.advance()
+            return True
+        return False
 
     def _parse_decorators(self) -> List['Decorator']:
         """X1: 收集装饰器序列 @name / @name(args) — 顶层与语句级共用
@@ -1309,6 +1335,17 @@ class Parser:
                 method = self.parse_function_def()
                 if method:
                     cls.methods.append(method)
+            elif self.match(TokenType.IDENTIFIER, 'async'):
+                # A3a: 类内 async def — 软关键字(仅后随 def 时吞)
+                is_async = self._consume_async()
+                if not is_async or not self.match(TokenType.KEYWORD, 'def'):
+                    self.error(self.current_token, "async 必须紧跟 def")
+                    self.synchronize()
+                    continue
+                method = self.parse_function_def()
+                if method:
+                    method.is_async = True
+                    cls.methods.append(method)
             elif self.match(TokenType.KEYWORD, 'let'):
                 # 类字段声明 let x: Int;
                 self.advance()
@@ -1349,12 +1386,14 @@ class Parser:
         # 覆盖函数体内等语句级位置的 def(顶层走 program() 收集路径)
         if self.match(TokenType.SYMBOL, '@'):
             decorators = self._parse_decorators()
+            is_async = self._consume_async()
             if not self.match(TokenType.KEYWORD, 'def'):
                 self.error(self.current_token, "装饰器 @ 必须紧跟函数定义")
                 self.synchronize()
                 return None
             func = self.parse_function_def()
             if func is not None:
+                func.is_async = is_async
                 func.decorators = decorators
             return func
 
@@ -1399,8 +1438,13 @@ class Parser:
             return stmt
 
         # 嵌套函数定义（闭包）
+        # A3a: async def — 软关键字前缀(函数体内的协程定义)
+        is_async = self._consume_async()
         if self.match(TokenType.KEYWORD, 'def'):
-            return self.parse_function_def()
+            func = self.parse_function_def()
+            if func is not None:
+                func.is_async = is_async
+            return func
 
         # 枚举定义
         if self.match(TokenType.KEYWORD, 'enum'):
@@ -2388,6 +2432,26 @@ class Parser:
 
         return expr
 
+    def _starts_expression(self, tok) -> bool:
+        """A3a: 判断 token 能否作为表达式起点(await 软关键字的消歧依据)
+
+        保守集: 排除语句终止符与不能起始表达式的算符 —
+        `-`/`+`/`!` 可起始一元表达式故保留(await -1 虽怪但合法)。
+        """
+        if tok is None:
+            return False
+        if tok.type == TokenType.NEWLINE:
+            return False
+        if tok.type == TokenType.SYMBOL and tok.value in (
+                ';', ',', ')', ']', '}', '=', '==', '!=', '<=', '>=',
+                '<', '>', '&&', '||', '?', ':', '.', '->', '=>', '<-'):
+            return False
+        if tok.type == TokenType.OPERATOR and tok.value in (
+                '&&', '||', '==', '!=', '<=', '>=', '<', '>', '=', '+=',
+                '-=', '*=', '/=', '%=', '**=', '//=', '?', ':'):
+            return False
+        return True
+
     def parse_unary(self) -> Expression:
         """解析一元运算"""
         # 'not' 关键字作为逻辑非
@@ -2396,6 +2460,15 @@ class Parser:
             self.advance()
             operand = self.parse_unary()
             return UnaryOp(op='!', operand=operand, line=op_token.line, column=op_token.column)
+        # A3a: await 协程(前缀软关键字 — 仅当后随表达式起点时才吞,
+        # `await` 单独作变量名/语句结尾不受影响)
+        if (self.match(TokenType.IDENTIFIER, 'await')
+                and self._starts_expression(self.peek())):
+            op_token = self.current_token
+            self.advance()
+            operand = self.parse_unary()
+            return AwaitExpr(operand=operand, line=op_token.line,
+                             column=op_token.column)
         # CC2: <- ch 通道接收(前缀, 与 ch <- v 共用 <- 词法)
         if self.match(TokenType.OPERATOR) and self.current_token.value == '<-':
             op_token = self.current_token
@@ -4513,6 +4586,8 @@ class GeneratorController:
     驱动侧 API: next() / send(v) / throw(e) / close()
     生成器线程侧: do_yield(v) — 交出值并返回 send 进来的值
     (yield 表达式化: `let x = yield v` 的 x 即 do_yield 的返回值)。
+    A3a: async 协程复用本控制器 — 函数返回值存 final_result,
+    驱动侧(run)在 _GEN_DONE 时取它。
     """
 
     def __init__(self, interp: 'Interpreter', func, args,
@@ -4522,6 +4597,7 @@ class GeneratorController:
         self.args = args
         self.closure_scope = closure_scope
         self.instance = instance  # 生成器方法: this 的注入目标
+        self.final_result = None  # A3a: 协程跑完后的返回值(done 消息同载)
         # 创建瞬间定格驱动侧状态(主线程此刻的执行态)
         self._call_scope = interp.current_scope
         self._stack_snapshot = list(interp.call_stack)
@@ -4642,6 +4718,7 @@ class GeneratorController:
             else:
                 result = interp.execute_function(self.func, self.args,
                                                  gen_mode=True)
+            self.final_result = result
             self.out_q.put(('done', result))
         except _GenExitSignal:
             self.out_q.put(('done', None))
@@ -4750,6 +4827,26 @@ class GeneratorValue(RuntimeValue):
 
     def copy(self):
         # 生成器不能复制,返回自身
+        return self
+
+
+class AsyncValue(RuntimeValue):
+    """A3a: 协程值 — async 函数调用的惰性结果(线程协作式协程背载)
+
+    与生成器的分别: 生成器交出数据(next 拉值), 协程交出内层协程
+    (await 挂起) — 驱动侧 run() 按此协议蹦床, 取 final_result 收摊。
+    """
+    _ctrl: object = None  # GeneratorController
+
+    def __init__(self, ctrl):
+        super().__init__(AnyType(), None)
+        self._ctrl = ctrl
+
+    def __str__(self):
+        return "<coroutine>"
+
+    def copy(self):
+        # 协程不能复制, 返回自身(引用语义, 与生成器一致)
         return self
 
 
@@ -5317,6 +5414,7 @@ class Interpreter:
             'enumerate': self._builtin_enumerate,
             'zip': self._builtin_zip,
             'range': self._builtin_range,
+            'run': self._builtin_run,
             'abs': self._builtin_abs,
             'min': self._builtin_min,
             'max': self._builtin_max,
@@ -5730,6 +5828,38 @@ class Interpreter:
             row = [a.value[i] for a in args]
             result.append(ListValue(row, AnyType()))
         return ListValue(result, AnyType())
+
+    def _builtin_run(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """A3a: run(coro) — 驱动协程至完成, 返回 async 函数的返回值
+
+        协议: 协程线程 await 时交出的必是内层协程(AsyncValue);
+        驱动侧递归驱动内层, 把结果 send 回挂起点。本质是蹦床——
+        没有事件循环(A3b 才做 IO 多路复用), 调度按 await 顺序串行。
+        """
+        if len(args) != 1:
+            raise TypeError("run() 期望1个协程参数(async 函数调用的结果)")
+        coro = args[0]
+        if not isinstance(coro, AsyncValue):
+            raise TypeError(
+                f"run() 期望协程(async 函数调用的结果), 得到 {coro.get_type()}")
+        return self._drive_coroutine(coro._ctrl, NoneValue())
+
+    def _drive_coroutine(self, ctrl, send_value) -> RuntimeValue:
+        """A3a: 蹦床 — 把协程推到完成, 返回其 final_result
+
+        异常沿驱动链自然传播(协程线程的 error 消息在 _resume 处重抛);
+        协程交出非协程值即协议违约(TypeError, 显式失败不静默)。
+        """
+        while True:
+            v = ctrl.send(send_value) if ctrl.started else ctrl.next()
+            if v is _GEN_DONE:
+                result = ctrl.final_result
+                return result if result is not None else NoneValue()
+            if isinstance(v, AsyncValue):
+                send_value = self._drive_coroutine(v._ctrl, NoneValue())
+                continue
+            raise TypeError(
+                f"async 函数只能 await 协程, 交出了 {getattr(v, 'get_type', lambda: type(v))()}")
 
     def _builtin_range(self, args: List[RuntimeValue]) -> RuntimeValue:
         """内置range函数:生成整数序列"""
@@ -8833,6 +8963,16 @@ class Interpreter:
             return GeneratorValue(
                 GeneratorController(self, func, args, closure_scope))
 
+        # ── A3a: async 函数 — 调用即惰性, 建协程交 AsyncValue ──
+        # 体在协程线程里以 gen_mode 执行(await 经 _active_gen 挂起);
+        # async 生成器(yield + await 混用)留后续切片, 显式拒绝不静默。
+        if getattr(func_def, 'is_async', False) and not gen_mode:
+            if getattr(func_def, 'is_generator', False):
+                raise RuntimeError(
+                    f"async 函数暂不支持 yield(async 生成器留后续): {func_name}")
+            return AsyncValue(
+                GeneratorController(self, func, args, closure_scope))
+
         # ── 泛型类型推断 ──
         type_bindings: Dict[str, str] = {}
         type_params = getattr(func_def, 'type_params', [])
@@ -8918,7 +9058,9 @@ class Interpreter:
 
         # 执行函数体
         is_gen = getattr(func_def, 'is_generator', False)
+        is_async_fn = getattr(func_def, 'is_async', False)
         result = IntValue(0)
+        explicit_return = False
 
         if is_gen:
             # S3: gen_mode — 体由协程线程顺序驱动, yield 在执行内握手挂起;
@@ -8929,13 +9071,20 @@ class Interpreter:
                 result = self.execute_statement(stmt)
                 if self.return_flag:
                     self.return_flag = False
+                    explicit_return = True
                     break
         else:
             for stmt in func_def.body:
                 result = self.execute_statement(stmt)
                 if self.return_flag:
                     self.return_flag = False
+                    explicit_return = True
                     break
+
+        # A3a: async 函数的返回值对齐 Python — 无显式 return 即 None
+        # (普通函数保持既有隐式返回约定, 不改; 协程结果会被 run 当返回值用)
+        if is_async_fn and not explicit_return:
+            result = NoneValue()
 
         # 验证后置条件
         func_ensures = getattr(func_def, 'ensures', [])
@@ -9060,6 +9209,12 @@ class Interpreter:
         # ── S3: 生成器方法 — 惰性创建控制器 ──
         if getattr(func_def, 'is_generator', False) and not gen_mode:
             return GeneratorValue(
+                GeneratorController(self, method, args, closure,
+                                    instance=instance))
+
+        # ── A3a: async 方法 — 惰性创建协程 ──
+        if getattr(func_def, 'is_async', False) and not gen_mode:
+            return AsyncValue(
                 GeneratorController(self, method, args, closure,
                                     instance=instance))
 
@@ -9658,6 +9813,18 @@ class Interpreter:
         elif isinstance(expr, YieldExpr):
             # S3: yield 表达式 — 产出值并返回 send 进来的值
             return self.execute_yield(expr)
+
+        elif isinstance(expr, AwaitExpr):
+            # A3a: await — 求值出内层协程, 经协程线程交出(挂起),
+            # 驱动线程驱完内层后把结果 send 回来, 即本表达式的值。
+            inner = self.evaluate_expression(expr.operand)
+            if not isinstance(inner, AsyncValue):
+                raise TypeError(
+                    f"await 期望协程(async 函数调用的结果), 得到 {inner.get_type()}")
+            ctrl = getattr(self, '_active_gen', None)
+            if ctrl is None:
+                raise RuntimeError("await 只能在 async 函数中使用")
+            return ctrl.do_yield(inner)
 
         else:
             raise RuntimeError(f"不支持的表达式类型: {type(expr).__name__}")

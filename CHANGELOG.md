@@ -4,6 +4,38 @@
 
 ---
 
+## v2.22.0 — Phase 7 首批：A3a async/await + P3a HTTP 注册表 + S4b doc 收口（2026-10-19）
+
+> 协程从语言进入语法：async 即惰性，await 即挂起，run 即蹦床——
+> 底座是 S3 刚打好的 threadlet，不新造轮子。包管理同时从目录走上网络：
+> 本地 registry 套一层 HTTP，publish/install 走 URL 即跨机。版本 2.21.0 → 2.22.0。
+
+**A3a async/await 协程**（tests/test_async.intent 11 测试，全过）
+
+- 语法：`async def f(...)` + `await expr` + 内置 `run(coro)`；`async`/`await` 均为**软关键字**（后随 `def` / 表达式起点才取得关键字地位，作标识符不受影响）；支持类内 async 方法
+- 语义：调用即惰性返回 `<coroutine>`（体一行不跑）；`await` 求值出内层协程后经 `do_yield` 挂起（与 S3 yield 同一握手），`run` 以蹦床递归驱动内层、把结果送回避挂起点；async 函数无显式 `return` 时结果为 `None`（对齐 Python，普通函数的隐式返回约定不变）
+- 实现：`AsyncValue` + 复用 `GeneratorController`（线程协作式协程）；控制器新增 `final_result`（done 消息同载，供 run 取返回值）；`execute_function`/`_execute_method` 各加惰性分支；异常沿驱动链自然穿透到 `run` 调用点
+- 边界（诚实清单）：async 生成器（async + yield）显式拒绝；无事件循环/IO 多路复用（await 串行驱动，A3b）；`await` 软关键字歧义见 spec §6 限制 27
+- **双引擎一致**：VM 对 async def 整条委托 + AwaitExpr 走 RUN_AST——vm_diff 自动纳入新测试文件且 76/76 一致
+
+**P3a HTTP 注册表服务**（tools/registry.py selftest 含 http round-trip）
+
+- `serve` 命令：stdlib `ThreadingHTTPServer`——`GET /index.json` 查询索引、`GET /pkg/<name>/<ver>/<file>` 下载、`POST /publish` 发布（JSON {name, version, files}）
+- 客户端：`publish`/`install` 带 `--registry-url` 即走 HTTP 通道；install 按索引 files 清单逐文件下载后落 `lib/`
+- 索引新增 `files` 字段（本地 publish 与 HTTP 发布共用）；发布校验（包名/版本/含 .intent）本地与 HTTP 同一套规则；路径穿越防护；版本冲突 409
+- selftest 扩 HTTP round-trip：真起服务（临时端口）→ HTTP 发布 → 索引查询 → HTTP 安装 → 内容校验 → 重复发布被拒（409）
+
+**S4b 标准库 doc 页收口**
+
+- `tools/gen_docs_site.py --api` 全量再生：43 个模块页（对齐 43 个真实模块；`std/__init__.intent` 是包标记不计）+ 文档站 58 页
+- LangForge 判定同时收紧为子集检查（原「页数≥模块数」两边各充一个数，脆弱平衡——见 PROGRESS_PLAN 判定纠偏记录）
+
+**质量门**：--test **323/324 过 0 败 1 跳**（312→323，+11）；vm_diff **76/76 一致**（新文件自动纳入）；registry selftest 全通（含 HTTP）；spec v1.21.0（§3.2 协程、§4.1 内置 164、§6 限制 27）。
+
+**LangForge**：Phase 7 注入后首批 3 任务闭环（P3a/S4b/A3a），进度 69/89（77%），关键路径 P3b→P4。
+
+---
+
 ## v2.21.0 — S3：生成器完整化（真惰性协程）（2026-10-19）
 
 > 旧实现：生成器函数**饿收集**——调用即跑完整个函数体，yield 的值攒成

@@ -13,10 +13,12 @@
 | std.decimal | [decimal.md](decimal.md) |
 | std.encoding | [encoding.md](encoding.md) |
 | std.fs | [fs.md](fs.md) |
+| std.functools | [functools.md](functools.md) |
 | std.glob | [glob.md](glob.md) |
 | std.hashlib | [hashlib.md](hashlib.md) |
 | std.hmac | [hmac.md](hmac.md) |
 | std.http | [http.md](http.md) |
+| std.inspect | [inspect.md](inspect.md) |
 | std.itertools | [itertools.md](itertools.md) |
 | std.itertools2 | [itertools2.md](itertools2.md) |
 | std.json | [json.md](json.md) |

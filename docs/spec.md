@@ -167,6 +167,7 @@ def name(params) [: ReturnType] [requires ...] [ensures ...] { body } ;
   - `for x in g` 真懒遍历（不预取，无限生成器可用）；裸 `yield` 产出 None
   - 实现：线程协作式协程（threadlet）——体跑独立线程，双队列握手；共享解释器状态在切换点按白名单保存/恢复（§6 限制表列边界）
 - 生成器委派（P1.5）：`yield from expr;`——可迭代对象的元素逐个转发（List/Dict 键/生成器源；生成器源 send 值透传）
+- 协程（A3a）：`async def f(...) {...}` + `await expr` + 内置 `run(coro)`——**调用即惰性**，返回 `<coroutine>`（体一行不跑）；`await` 求值出内层协程后挂起当前协程，`run` 以蹦床递归驱动内层、把结果送回避挂起点。`async`/`await` 均为**软关键字**（后随 `def` / 表达式起点时才取得关键字地位，作标识符不受影响）；支持类内 async 方法；async 函数无显式 `return` 时结果为 `None`（对齐 Python）。底层复用 S3 threadlet（协程线程 + 双队列），暂无事件循环与并发调度（A3b）
 
 **契约**（一等公民，Intent 的身份证）：
 ```intent
@@ -477,13 +478,13 @@ let text = json.dumps({"a": 1});    // import python.json 后
 
 ## 4. 标准库
 
-### 4.1 内置函数（163，`_setup_builtins` mini_intent.py:4305）
+### 4.1 内置函数（164，`_setup_builtins` mini_intent.py:4305）
 
 | 类别 | 函数（签名） |
 |---|---|
 | 输出断言 | `print(...)` `assert(cond, msg)` |
 | 集合 | `len(x)` `keys(d)` `values(d)` `push(l, v)` `pop(l)` `insert(l, i, v)` `remove_at(l, i)` `enumerate(l)` `zip(a, b)` `range(...)` `reversed(x)` `sorted(x)` `any(l)` `all(l)` `contains(x, v)` |
-| 协议（X3） | `next(it)`（迭代器下一元素，耗尽返回 `None`） `repr(x)`（调试表示，实例走 `__repr__`） |
+| 协议（X3） | `next(it)`（迭代器下一元素，耗尽返回 `None`） `repr(x)`（调试表示，实例走 `__repr__`） `run(coro)`（A3a 驱动协程至完成，返回其返回值） |
 | 缓存诊断（M2） | `cache_stats()`（`[命中, 未命中]`） `cache_reset()`（清零，微基准/测试的确定性起点） |
 | 反射（X2） | `getattr(obj, name)` `setattr(obj, name, v)` `hasattr(obj, name)` `dir(obj)`（字段+方法含继承链，排序） `callable(x)`（函数/类/FFI/桥/mock/有 `__call__` 的实例） |
 | 类型转换 | `int(x)` `float(x)` `str(x)` `bool(x)` `type_of(x)` `type(x)` |
@@ -649,6 +650,7 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 24 | 协程线程内 profiler 打点关闭（帧栈纪律与协程切换冲突）；覆盖率打点保留（计数型无栈纪律） | S3 已知边界（2026-10-19）；--profile 不含生成器内部帧 |
 | 25 | 生成器异常在调用方 `next()/send()/throw()` 处抛出的栈快照为「生成器创建链 + 生成器帧」，不含 pull 点的调用链 | S3 已知边界（2026-10-19）；与 Python「生成器帧单独显示」同向 |
 | 26 | 生成器线程阻塞在无界操作（如 channel 接收）时，`close()` 有界返回（2s），留 daemon 线程 | S3 已知边界（2026-10-19）；不无限等，也不强杀 |
+| 27 | async 生成器（async 函数内 yield）显式拒绝；协程无事件循环/并发调度（`await` 按顺序串行驱动）；`await` 软关键字在「标识符 await 后随表达式」的写法上会被当作 await 表达式 | A3a 已知边界（2026-10-19）；async 生成器与事件循环/IO 多路复用归 A3b 及后续 |
 
 ---
 
@@ -663,4 +665,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.20.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.21.0：S3 生成器完整化——§3.2 生成器协议（惰性/send/throw/close/for 懒遍历）、§6 限制表 23-26 协程边界；此前 v2.20.0 S2b f-string + v2.19.0 Q4 基准套件）*
+*规范版本 v1.21.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.22.0：A3a async/await 协程 + P3a HTTP 注册表 + S4b doc 页收口——§3.2 协程语义（软关键字/惰性/run 蹦床/async 方法/无 return 即 None）、§4.1 内置 164（+run）、§6 限制 27；此前 v2.21.0 S3 生成器完整化）*
