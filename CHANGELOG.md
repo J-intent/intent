@@ -4,6 +4,25 @@
 
 ---
 
+## v2.24.1 — I3b C 扩展 GC 钩子 + 判定防真空第三例（2026-10-19）
+
+> 自己的判定自己咬：I3b 的 `contains ["gc"]` 被输出里 **"gcc"** 的三个字母
+> 蒙混过关——钩子根本没实现却"通过"了。收紧成「GC 钩子」，并把钩子做实。
+> 版本 2.24.0 → 2.24.1。
+
+**I3b GC 钩子**（tools/csdk/loader.py + selftest）
+
+- `_LIVE` 弱引用集合：原生模块加载即登记（`load_native` / `make_simulated_module`），被 GC 回收或显式 `unload_native` 即出表
+- `live_native_modules()` 可观测出口；selftest 断言登记数 `1 → 0`（卸载即注销）
+- 官方扩展示例：`example.c` 的高速数值核（`native_sum_range` / `native_square`）
+- 边界（诚实清单）：GC 钩子 = 生命周期登记（弱引用），不是让 C 代码持有/释放 Intent 值——后者需要 ABI 对象模型，留后续
+
+**判定纠偏第三例**：原判定 `contains ["gc"]` 误匹配编译器检测行里的 "gcc"。收紧为 `["GC 钩子"]`（实现专属证据词）。三类真空已入库：M3b（未知 flag 照常执行）、S4b（两边充数）、I3b（子串误匹配）——**判定子串必须是实现独有的词，不能是环境里随便出现的字母组合**。
+
+**质量门**：csdk selftest 全通（ABI v1 + GC 钩子）；--test 323/324；vm_diff 76/76；spec v1.23.0 §6 限制 30 补充 GC 钩子口径。
+
+---
+
 ## v2.24.0 — EX4 调试器增强 + I3a C 扩展 SDK（2026-10-19）
 
 > 调试器从「能停」到「停得准」：条件断点与 watch 表达式让断点带脑子。

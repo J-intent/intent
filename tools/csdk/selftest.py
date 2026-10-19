@@ -113,8 +113,20 @@ def main() -> int:
         return 1
     print("   ABI 版本校验: v1 接受 / v2 拒绝")
 
+    # 4) GC 钩子：原生模块生命周期登记（加载可见 / 卸载注销）
+    if loader.live_native_modules() < 1:
+        print("❌ GC 钩子: 已加载模块未登记")
+        return 1
+    before = loader.live_native_modules()
+    loader.unload_native(mod)
+    after = loader.live_native_modules()
+    if after != before - 1:
+        print(f"❌ GC 钩子: 卸载后登记数未减少（{before} → {after}）")
+        return 1
+    print(f"   GC 钩子: 原生模块弱引用登记 {before} → {after}（卸载即注销）")
+
     print("✅ CSDK selftest 全通（ABI v1: 加载→注册表→Intent 调用 → "
-          "5050/144 断言 → 版本校验）")
+          "5050/144 断言 → 版本校验 → GC 钩子登记/注销）")
     return 0
 
 

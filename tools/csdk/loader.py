@@ -18,6 +18,7 @@
 import ctypes
 import os
 import sys
+import weakref
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
@@ -26,6 +27,21 @@ sys.path.insert(0, os.path.join(PROJECT, 'src'))
 from mini_intent import IntValue  # noqa: E402
 
 ABI_VERSION = 1
+
+# I3b: GC 钩子 — 原生模块生命周期登记（弱引用，模块被 GC 即自动出表）
+_LIVE = weakref.WeakSet()
+
+
+def live_native_modules() -> int:
+    """当前存活的原生模块数（GC 钩子的可观测出口）"""
+    return len(_LIVE)
+
+
+def unload_native(mod: 'NativeModule') -> None:
+    """注销原生模块：出登记表并断开库引用（显式卸载，不等 GC）"""
+    _LIVE.discard(mod)
+    mod.lib = None
+    mod.module = IntentModule(0, 0, None)
 
 IntentFnPtr = ctypes.CFUNCTYPE(ctypes.c_longlong,
                                ctypes.c_longlong, ctypes.c_longlong)
@@ -100,7 +116,9 @@ def load_native(path: str) -> NativeModule:
     module = IntentModule()
     register(ctypes.byref(module))
     _check_abi(module)
-    return NativeModule(lib, module)
+    mod = NativeModule(lib, module)
+    _LIVE.add(mod)  # I3b: GC 钩子登记
+    return mod
 
 
 def make_simulated_module() -> NativeModule:
@@ -117,7 +135,9 @@ def make_simulated_module() -> NativeModule:
     entries[1].arity = 1
     entries[1].fn = IntentFnPtr(lambda x, _unused: x * x)
     module = IntentModule(ABI_VERSION, 2, entries)
-    return NativeModule(None, module, keepalive=[entries])
+    mod = NativeModule(None, module, keepalive=[entries])
+    _LIVE.add(mod)  # I3b: GC 钩子登记
+    return mod
 
 
 def check_abi_rejected(abi_version: int) -> bool:
