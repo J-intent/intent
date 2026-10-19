@@ -592,6 +592,7 @@ python src/mini_intent.py <file> [args...] # 执行, 额外参数经 args() 读�
 python src/mini_intent.py -c "code"        # 直接执行代码串
 python src/mini_intent.py --check [file]   # 只解析不执行: 干净退出0, 错误退出2
 python src/mini_intent.py --types [file]   # L1: 渐进类型静态检查(mypy-lite: 标注处检查+推断处放过)
+python src/mini_intent.py --types --show-inferred file.intent  # L3a: 打印无标注变量的推断结果
 python src/mini_intent.py --compile file.intent [--run-vm]  # M10: 编译字节码(可选 VM 执行)
 python src/mini_intent.py --emit tokens|ast <file>   # 分析结果写文件
 python src/mini_intent.py --test [path]    # 测试(默认 tests/, _ 开头跳过)
@@ -663,6 +664,7 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 30 | C 扩展 SDK（ABI v1）只支持 `long long` 整数、元数 1-2；浮点/字符串/结构体/回调映射未做。GC 钩子 = 原生模块弱引用生命周期登记（加载登记/卸载注销，`live_native_modules` 可观测），不是让 C 代码持有/释放 Intent 值的对象模型。本机无 C 编译器——`selftest.py` 自动检测：有编译器则编译 example.c 验真 DLL，无则用 ctypes 回调表验证同一 ABI（输出明示"C 编译路径未验证"） | I3a/I3b 已知边界（2026-10-19）；ABI 与 GC 钩子已端到端验证，编译产物待有编译器的机器复验 |
 | 31 | 调试器增强（EX4）未做远程调试；非 TTY stdin 时命令循环直接放行（不读命令）；条件表达式求值失败按无条件命中处理（显式打印原因） | EX4 已知边界（2026-10-19）；远程调试（socket 附加）留后续 |
 | 32 | 结构化类型（L2）只比方法名，不比参数/返回签名；嵌套 protocol（protocol 内嵌 protocol）不查；运行时鸭子类型缺方法在**调用时**才炸（NameError），`implements` 只是显式检查口 | L2 已知边界（2026-10-19）；签名一致性与递归结构留完整版 |
+| 33 | 局部推断（L3a）覆盖：字面量 / 变量 / 一元 / 二元（数值提升）/ 三元与 if 表达式（分支统一）/ 管道（取目标函数返回标注）/ 类构造（类名）/ 容器字面量（基类）；**不推**：成员访问、下标、闭包返回值、函数体内的跨函数调用链；返回类型推断属 L3b | L3a 已知边界（2026-10-19）；推断结果可用 `--show-inferred` 观测，`tools/infer_selftest.py` 锁定 |
 
 ---
 
@@ -677,4 +679,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.24.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.25.0：L2 结构化类型（Protocol）——§3.2 协议语义、§4.1 内置 166（+implements/protocol_methods）、§6 限制 32；此前 v2.24.x EX4 + I3a/b）*
+*规范版本 v1.25.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.26.0：L3a 局部推断——§5 `--show-inferred`、§6 限制 33；此前 v2.25.0 L2 结构化类型）*

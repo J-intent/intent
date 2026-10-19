@@ -4,6 +4,27 @@
 
 ---
 
+## v2.26.0 — L3a 局部类型推断：let 链传递 + 推断可观测（2026-10-19）
+
+> 推断的核心不在「能猜」，在「链能传下去」。这一轮挖出检查器的真根因：
+> 每条语句都 `dict(env)` 复制，let 链在第二条就断了——
+> 修好之后 `let a = 1; let b = a;` 的 b 才是 Int。
+> 版本 2.25.0 → 2.26.0。
+
+**L3a 局部推断核心**（tools/infer_selftest.py 15/15；typecheck 25/25 无回归）
+
+- **根因修复：env 传递链**。原 `check()` 每条语句 `dict(env)` 复制、`_recurse_value` 每项复制——同作用域的 let 链在第二条语句就断（`let a = 1; let b = a` 的 b 推不出）。改为：**同一作用域共享一份 env，块边界（if/while/for 体）整块共享一份拷贝**——块内链可传递、块内声明不污染外层
+- 推断补齐：三元表达式（分支统一，数值混合提升 Float）、if 表达式（块尾类型）、管道 `x |> f`（取目标函数返回标注）、类构造（返回类名，L2 联动）
+- 推断结果可观测：`TypeChecker.inferred_vars` + CLI `--types --show-inferred` 打印 `推断: name: Type`
+- **判定方式纠偏**：L3a/L3b 是纯静态特性，原判定用 `.intent` 运行时测试文件（测不到编译期行为）——改为 `tools/infer_selftest.py`（fixture 直接驱动 TypeChecker，断言推断结果 + 推断参与标注检查的正反例）；PROGRESS_PLAN 与引擎判定同步（零漂移纪律）
+- 边界（诚实清单）：不推成员访问/下标/闭包返回值/跨函数调用链；返回类型推断属 L3b（`--returns` 用例已备好，未实现即失败，不假通过）
+
+**质量门**：infer_selftest **15/15**；typecheck_selftest **25/25**；--test 333/334；vm_diff 77/77；spec v1.25.0（§5 `--show-inferred`、§6 限制 33）。
+
+**LangForge**：76/89（85%），类型线 L1→L2→L3a 连推，剩余旁路 12。
+
+---
+
 ## v2.25.0 — L2 结构化类型：Protocol + 鸭子类型静态化（2026-10-19）
 
 > 类型线开打。结构化类型不问「你是谁家的孩子」（继承声明），

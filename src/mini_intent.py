@@ -10660,6 +10660,8 @@ def main():
                         help='只解析不执行: 语法干净退出0, 有错误退出2(CI/lint 前置)')
     parser.add_argument('--types', action='store_true',
                         help='L1: 渐进类型静态检查(mypy-lite: 标注处检查+推断处放过)')
+    parser.add_argument('--show-inferred', action='store_true',
+                        help='L3a: 与 --types 联用, 打印无标注变量的推断结果')
     parser.add_argument('--emit', nargs=2, metavar=('KIND', 'FILE'),
                         help='将词法/语法结果写入文件: --emit tokens out.txt | --emit ast out.txt')
     parser.add_argument('--install', nargs='?', const='__BATCH__', default=None,
@@ -10807,7 +10809,8 @@ def main():
 
     # --types: L1 渐进类型静态检查(标注处检查+推断处放过)
     if args.types:
-        type_check_code(code or "", code_name)
+        type_check_code(code or "", code_name,
+                        show_inferred=getattr(args, 'show_inferred', False))
         return
 
     # --emit: tokens/ast 写入文件
@@ -12157,6 +12160,7 @@ class TypeChecker:
         self.aliases: Dict[str, str] = {}
         self.checked_count = 0    # 标注处检查次数
         self.inferred_count = 0   # 推断放过次数(无标注/未知)
+        self.inferred_vars: Dict[str, str] = {}  # L3a: 无标注变量的推断结果
         # 预收集类型别名
         for stmt in ast.statements:
             if isinstance(stmt, TypeAliasStmt):
@@ -12265,7 +12269,47 @@ class TypeChecker:
             return self._infer_binary(expr, env, func)
         if isinstance(expr, CallExpr):
             return self._infer_call(expr, env, func)
+        # L3a: 三元/if 表达式 — 分支结果统一(同为数值则提升 Float)
+        if isinstance(expr, TernaryExpr):
+            t = self._infer(expr.then_expr, env, func)
+            e = self._infer(expr.else_expr, env, func)
+            return self._unify_inferred(t, e)
+        if isinstance(expr, IfExpr):
+            t = self._infer_block_tail(expr.then_body, env, func)
+            e = self._infer_block_tail(expr.else_body, env, func)
+            return self._unify_inferred(t, e)
+        # L3a: 管道 x |> f ≡ f(x) — 类型取目标函数返回标注
+        if isinstance(expr, PipeExpr):
+            target = self._call_target_name(
+                expr.right if isinstance(expr.right, CallExpr)
+                else CallExpr(func=expr.right, line=0, column=0))
+            if target and target in self.ast.functions:
+                rt = self.ast.functions[target].return_type
+                return rt if rt else None
+            return None
         # MemberAccess/SendExpr/RecvExpr/LambdaExpr/SubscriptExpr 等: 不猜
+        return None
+
+    def _unify_inferred(self, a: Optional[str],
+                        b: Optional[str]) -> Optional[str]:
+        """L3a: 两个分支的推断类型统一 — 相同则取之, 数值混合取 Float, 否则未知"""
+        if a is None or b is None:
+            return None
+        if a == b:
+            return a
+        if a in _NUMERIC_TYPES and b in _NUMERIC_TYPES:
+            return 'Float'
+        return None
+
+    def _infer_block_tail(self, body: List['ASTNode'],
+                          env: Dict[str, str],
+                          func: Optional['FunctionDef']) -> Optional[str]:
+        """L3a: 块尾表达式的类型(if 表达式的分支结果)"""
+        for stmt in reversed(body):
+            if isinstance(stmt, Expression):
+                return self._infer(stmt, env, func)
+            if isinstance(stmt, ReturnStmt):
+                return self._infer(stmt.value, env, func)
         return None
 
     def _infer_binary(self, expr: 'BinaryOp',
@@ -12366,6 +12410,8 @@ class TypeChecker:
                     inferred = self._infer(stmt.value, env, func)
                     if inferred is not None and stmt.name not in env:
                         env[stmt.name] = inferred  # 无标注声明也进环境(推断值)
+                        # L3a: 记录推断结果(--show-inferred 可观测)
+                        self.inferred_vars.setdefault(stmt.name, inferred)
             self._check_expr(stmt.value, env, func)
             return
         if isinstance(stmt, ReturnStmt):
@@ -12394,20 +12440,34 @@ class TypeChecker:
             if isinstance(value, Expression):
                 self._check_expr(value, env, func)
             else:
-                # 语句: 分支体复制环境(分支内声明不污染外层)
+                # 语句: 单条子语句隔离（避免声明泄漏到兄弟节点）
                 self._check_stmt(value, dict(env), func)
         elif isinstance(value, (list, tuple)):
+            # L3a: 列表 = 块（函数体/if 体/循环体），块内共享一份 env —
+            # 块内 let 链可传递; 对外层仍是拷贝(块内声明不污染外层)
+            block_env = dict(env)
             for item in value:
-                self._recurse_value(item, env, func)
+                if isinstance(item, ASTNode):
+                    if isinstance(item, Expression):
+                        self._check_expr(item, block_env, func)
+                    else:
+                        self._check_stmt(item, block_env, func)
+                elif isinstance(item, (list, tuple)):
+                    self._recurse_value(item, block_env, func)
 
     # ---------- 主入口 ----------
 
     def check(self) -> List[str]:
-        """执行检查, 返回错误列表(空 = 通过)"""
-        # 全局语句
+        """执行检查, 返回错误列表(空 = 通过)
+
+        L3a: 同一作用域的语句共享一份 env（let 链可传递）；
+        块边界（if/while/for 体）由 _recurse_value 拷贝隔离。
+        """
+        # 全局语句 — 共享一份 env
+        global_env: Dict[str, str] = {}
         for stmt in self.ast.statements:
-            self._check_stmt(stmt, {}, None)
-        # 函数体(参数标注入环境)
+            self._check_stmt(stmt, global_env, None)
+        # 函数体(参数标注入环境) — 函数内语句共享一份 env
         for func in self.ast.functions.values():
             env: Dict[str, str] = {}
             tp_set = set(func.type_params)
@@ -12415,15 +12475,17 @@ class TypeChecker:
                 if ptype != 'Any' and ptype is not None and name not in tp_set:
                     env[name] = ptype
             for stmt in func.body:
-                self._check_stmt(stmt, dict(env), func)
+                self._check_stmt(stmt, env, func)
         return self.errors
 
 
-def type_check_code(code: str, code_name: str) -> None:
+def type_check_code(code: str, code_name: str,
+                    show_inferred: bool = False) -> None:
     """--types: L1 渐进类型静态检查(mypy-lite)。
 
     标注处检查 + 推断处放过。通过 → 退出0; 有类型错误 → 逐条报告退出1;
     语法错误 → 退出2(类型检查以语法干净为前提)。
+    L3a: show_inferred=True 时打印无标注变量的推断结果(--show-inferred)。
     """
     try:
         tokens = Lexer(code).tokenize()
@@ -12440,6 +12502,12 @@ def type_check_code(code: str, code_name: str) -> None:
         sys.exit(2)
     checker = TypeChecker(ast, code_name)
     errors = checker.check()
+    if show_inferred:
+        if checker.inferred_vars:
+            for name in sorted(checker.inferred_vars):
+                print(f"推断: {name}: {checker.inferred_vars[name]}")
+        else:
+            print("推断: （无标注变量均可推断）")
     if errors:
         print(f"❌ 类型错误: {code_name} ({len(errors)} 处)")
         for err in errors:
