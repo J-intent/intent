@@ -12161,6 +12161,7 @@ class TypeChecker:
         self.checked_count = 0    # 标注处检查次数
         self.inferred_count = 0   # 推断放过次数(无标注/未知)
         self.inferred_vars: Dict[str, str] = {}  # L3a: 无标注变量的推断结果
+        self.inferred_returns: Dict[str, str] = {}  # L3b: 无标注函数的返回推断
         # 预收集类型别名
         for stmt in ast.statements:
             if isinstance(stmt, TypeAliasStmt):
@@ -12345,10 +12346,12 @@ class TypeChecker:
         # 内置白名单
         if name in _BUILTIN_RETURN_TYPES:
             return _BUILTIN_RETURN_TYPES[name]
-        # 本模块函数: 用其返回标注(无标注 = 放过)
+        # 本模块函数: 用其返回标注(无标注则用 L3b 推断结果)
         if '.' not in name and name in self.ast.functions:
             target = self.ast.functions[name]
-            return target.return_type if target.return_type else None
+            if target.return_type:
+                return target.return_type
+            return self.inferred_returns.get(name)  # L3b: 返回推断
         # L2: 类构造调用 → 类型即类名（结构化检查的 actual 来源）
         if name in self.classes:
             return name
@@ -12457,12 +12460,72 @@ class TypeChecker:
 
     # ---------- 主入口 ----------
 
+    # ---------- L3b: 返回类型推断 ----------
+
+    def _collect_inferred_returns(self) -> None:
+        """L3b: 无返回标注的函数 → 从 return 表达式推断返回类型
+
+        迭代收敛（上限 = 函数数 + 1）：调用链上被调函数先有推断结果，
+        调用方才能借到类型（`def g() { return f(); }` 依赖 f 的推断）。
+        """
+        pending = [f for f in self.ast.functions.values()
+                   if not f.return_type]
+        for _ in range(len(self.ast.functions) + 1):
+            changed = False
+            for func in pending:
+                if func.name in self.inferred_returns:
+                    continue
+                inferred = self._infer_function_returns(func)
+                if inferred is not None:
+                    self.inferred_returns[func.name] = inferred
+                    changed = True
+            if not changed:
+                break
+
+    def _infer_function_returns(self, func: 'FunctionDef') -> Optional[str]:
+        """单函数：扫函数体收集 return 表达式类型并统一"""
+        env: Dict[str, str] = {}
+        tp_set = set(func.type_params)
+        for name, ptype, _default in func.params:
+            if ptype not in (None, 'Any') and name not in tp_set:
+                env[name] = ptype
+        types: List[str] = []
+        self._scan_body_for_returns(func.body, env, func, types)
+        unified = None
+        for t in types:
+            unified = t if unified is None else self._unify_inferred(unified, t)
+            if unified is None:
+                return None  # 分支类型不统一 → 不猜
+        return unified
+
+    def _scan_body_for_returns(self, body, env: Dict[str, str],
+                               func: Optional['FunctionDef'],
+                               out: List[str]) -> None:
+        """线性扫块：无标注 let 进 env（链可传递），收集 return 表达式类型"""
+        for stmt in body:
+            if isinstance(stmt, ReturnStmt):
+                t = self._infer(stmt.value, env, func)
+                if t is not None:
+                    out.append(t)
+            elif (isinstance(stmt, VariableDecl) and stmt.var_type is None
+                  and stmt.value is not None):
+                t = self._infer(stmt.value, env, func)
+                if t is not None:
+                    env[stmt.name] = t
+            for value in vars(stmt).values():
+                if (isinstance(value, list) and value
+                        and isinstance(value[0], ASTNode)
+                        and not isinstance(value[0], Expression)):
+                    self._scan_body_for_returns(value, dict(env), func, out)
+
     def check(self) -> List[str]:
         """执行检查, 返回错误列表(空 = 通过)
 
         L3a: 同一作用域的语句共享一份 env（let 链可传递）；
         块边界（if/while/for 体）由 _recurse_value 拷贝隔离。
+        L3b: 先做返回推断收敛, 再跑标注处检查（调用方可借被调方推断）。
         """
+        self._collect_inferred_returns()
         # 全局语句 — 共享一份 env
         global_env: Dict[str, str] = {}
         for stmt in self.ast.statements:
@@ -12508,6 +12571,9 @@ def type_check_code(code: str, code_name: str,
                 print(f"推断: {name}: {checker.inferred_vars[name]}")
         else:
             print("推断: （无标注变量均可推断）")
+        # L3b: 返回推断同样可观测
+        for name in sorted(checker.inferred_returns):
+            print(f"返回推断: {name}: {checker.inferred_returns[name]}")
     if errors:
         print(f"❌ 类型错误: {code_name} ({len(errors)} 处)")
         for err in errors:

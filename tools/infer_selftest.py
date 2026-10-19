@@ -113,6 +113,24 @@ RETURN_CASES = [
     ("无标注返回误用应报错",
      'def f() { return 1; }\ndef main() { let x: String = f(); return 0; }',
      {'f': 'Int'}, 1),
+    ("字符串返回推断",
+     'def s() { return "x"; }\ndef main() { let y: String = s(); return 0; }',
+     {'s': 'String'}, 0),
+    ("调用链借用推断",
+     'def f() { return 1; }\ndef g() { return f(); }\n'
+     'def main() { let z: Int = g(); return 0; }',
+     {'f': 'Int', 'g': 'Int'}, 0),
+    ("分支返回统一(同为 Int)",
+     'def f(c: Bool) { if c { return 1; } else { return 2; } }\n'
+     'def main() { let x: Int = f(true); return 0; }',
+     {'f': 'Int'}, 0),
+    ("分支返回不统一 → 不猜",
+     'def f(c: Bool) { if c { return 1; } else { return "s"; } }\n'
+     'def main() { let x = f(true); return 0; }',
+     {}, 0),
+    ("无 return 的函数不推",
+     'def v() { let a = 1; }\ndef main() { let x = v(); return 0; }',
+     {}, 0),
 ]
 
 
