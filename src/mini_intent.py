@@ -3249,49 +3249,117 @@ class Postmortem:
 
 class Debugger:
     """C7 行级调试器 — 断点/单步/变量检视/调用栈
+    EX4 增强: 条件断点(break N if EXPR)/watch 表达式/源内调试指令
 
     挂在 Interpreter.execute_statement 入口: 每条语句执行前检查
     当前行是否命中断点或处于单步模式, 命中即打印位置并进入命令循环。
     stdin EOF(非交互/管道场景)时自动放行至程序终止 — 保证 exit 0。
     普通执行路径 self.debugger 为 None, 零开销。
+
+    源内指令(EX4, 自包含演示/脚本化调试):
+      // @break 12 if i == 3     ← 条件断点(条件缺省=无条件)
+      // @watch i + total        ← 每次停顿打印观察值
     """
 
     def __init__(self, interpreter):
         self.interp = interpreter
-        self.breakpoints: set = set()
+        # EX4: 行号 → 条件源码(None=无条件) — 条件在命中行时于当前作用域求值
+        self.breakpoints: dict = {}
+        self.watches: list = []
         self.stepping = False
         self._banner_shown = False
 
+    # ── EX4: 源内调试指令 ──
+    def load_directives(self, source: str) -> None:
+        """扫描源码里的 `// @break N [if EXPR]` 与 `// @watch EXPR`"""
+        import re as _re
+        for line in source.splitlines():
+            m = _re.search(r'//\s*@break\s+(\d+)\s*(?:if\s+(.+?))?\s*$', line)
+            if m:
+                self.breakpoints[int(m.group(1))] = (
+                    m.group(2).strip() if m.group(2) else None)
+                continue
+            m = _re.search(r'//\s*@watch\s+(.+?)\s*$', line)
+            if m:
+                self.watches.append(m.group(1).strip())
+
     # ── hook: 每条语句执行前由 execute_statement 调用 ──
     def check(self, stmt) -> None:
-        """行命中(断点/单步) → 展示位置 + 命令循环"""
+        """行命中(断点/单步) → 展示位置 + 观察值 + 命令循环
+
+        条件断点: 命中行后先求值条件, 为真才停(条件求值失败显式报错并停,
+        不静默跳过 — 调试器静默比崩溃更危险)。
+        """
         line = getattr(stmt, 'line', None)
         if not line:
             return
-        if line in self.breakpoints or self.stepping:
-            self._show_location(line)
+        has_bp, cond = self._breakpoint_at(line)
+        if has_bp:
+            if cond:
+                try:
+                    if not self._eval_expr(cond).to_bool():
+                        return
+                except Exception as e:
+                    print(f"[调试器] 条件求值失败({cond}): {e} — 按无条件命中处理")
+            self._show_location(line, '条件断点' if cond else '断点')
+            self._show_watches()
+            self.command_loop()
+        elif self.stepping:
+            self._show_location(line, '单步')
+            self._show_watches()
             self.command_loop()
 
-    def _show_location(self, line: int) -> None:
+    def _breakpoint_at(self, line: int):
+        if line in self.breakpoints:
+            return True, self.breakpoints[line]
+        return False, None
+
+    def _show_location(self, line: int, kind: str = '断点') -> None:
         src = ""
         if self.interp.source_lines and 0 < line <= len(self.interp.source_lines):
             src = self.interp.source_lines[line - 1].strip()
         name = self.interp.current_filename or "<stdin>"
-        print(f"🛑 断点 {name}:{line}  {src}")
+        print(f"🛑 {kind} {name}:{line}  {src}")
+
+    def _show_watches(self) -> None:
+        for expr_src in self.watches:
+            try:
+                val = self._eval_expr(expr_src)
+                print(f"   👁 watch {expr_src} = {self.interp._value_to_str(val)}")
+            except Exception as e:
+                print(f"   👁 watch {expr_src} = <求值失败: {e}>")
+
+    def _eval_expr(self, expr_src: str):
+        """在当前作用域求值任意 Intent 表达式(print/条件/watch 共用)"""
+        src = expr_src if expr_src.rstrip().endswith(';') else expr_src + ';'
+        tokens = Lexer(src).tokenize()
+        program = Parser(tokens, src).parse()
+        stmts = program.statements
+        if not stmts or not isinstance(stmts[0], Expression):
+            raise ValueError(f"无法解析为表达式: {expr_src}")
+        return self.interp.evaluate_expression(stmts[0])
 
     def show_banner(self) -> None:
         if self._banner_shown:
             return
         self._banner_shown = True
-        print("╔══ Intent 调试器 (C7) ═════════════════════════════╗")
-        print("║ 命令: break N 设断点   | step 单步   | continue 放行 ║")
-        print("║       print EXPR 变量检视 | vars 当前变量           ║")
-        print("║       backtrace 调用栈 | breakpoints 断点列表       ║")
+        print("╔══ Intent 调试器 (C7 + EX4) ═══════════════════════╗")
+        print("║ 命令: break N [if EXPR] 设断点  | step 单步         ║")
+        print("║       continue 放行 | print EXPR 表达式求值         ║")
+        print("║       watch EXPR 观察 | unwatch N|all 取消          ║")
+        print("║       vars 变量 | backtrace 调用栈 | breakpoints     ║")
         print("║       quit 退出调试                                  ║")
+        print("║ 源内指令: // @break N if EXPR   // @watch EXPR      ║")
         print("╚═══════════════════════════════════════════════════╝")
 
     def command_loop(self) -> None:
         """断点命令循环 — 返回即放行(step/continue/EOF); quit 抛 DebuggerQuit"""
+        # EX4: 非 TTY(stdin 是管道/重定向)直接放行 —
+        # 管道可能一直开着不写, input() 会永久阻塞(CI 挂死的根因)
+        if not sys.stdin.isatty():
+            print("[调试器] 非交互环境(stdin 非 TTY), 自动放行")
+            self.stepping = False
+            return
         while True:
             try:
                 raw = input("(intent-dbg) ")
@@ -3321,6 +3389,10 @@ class Debugger:
                 self._cmd_delete(rest)
             elif head in ('print', 'p'):
                 self._cmd_print(rest)
+            elif head in ('watch', 'w'):
+                self._cmd_watch(rest)
+            elif head in ('unwatch', 'uw'):
+                self._cmd_unwatch(rest)
             elif head in ('backtrace', 'bt'):
                 self._cmd_backtrace()
             elif head in ('vars', 'v'):
@@ -3335,13 +3407,24 @@ class Debugger:
                 print(f"[调试器] 未知命令: {head} (help 查看命令)")
 
     def _cmd_break(self, rest: str) -> None:
+        """break N [if EXPR] — 条件断点在命中行时于当前作用域求值"""
+        cond = None
+        if ' if ' in rest:
+            rest, cond = rest.split(' if ', 1)
+            cond = cond.strip()
+            if not cond:
+                print("[调试器] if 后需要条件表达式: break 12 if x > 5")
+                return
         try:
-            line_no = int(rest)
+            line_no = int(rest.strip())
         except ValueError:
-            print("[调试器] break 需要行号: break 12")
+            print("[调试器] break 需要行号: break 12 [if x > 5]")
             return
-        self.breakpoints.add(line_no)
-        print(f"[调试器] 断点已设: 第 {line_no} 行")
+        self.breakpoints[line_no] = cond
+        if cond:
+            print(f"[调试器] 条件断点已设: 第 {line_no} 行 if {cond}")
+        else:
+            print(f"[调试器] 断点已设: 第 {line_no} 行")
 
     def _cmd_delete(self, rest: str) -> None:
         if not rest:
@@ -3353,14 +3436,42 @@ class Debugger:
         except ValueError:
             print("[调试器] delete 需要行号: delete 12")
             return
-        self.breakpoints.discard(line_no)
+        self.breakpoints.pop(line_no, None)
         print(f"[调试器] 断点已删: 第 {line_no} 行")
 
     def _cmd_list(self) -> None:
         if not self.breakpoints:
             print("[调试器] 当前无断点")
             return
-        print("[调试器] 断点: " + ", ".join(str(n) for n in sorted(self.breakpoints)))
+        parts = []
+        for n in sorted(self.breakpoints):
+            cond = self.breakpoints[n]
+            parts.append(f"{n} if {cond}" if cond else str(n))
+        print("[调试器] 断点: " + ", ".join(parts))
+        if self.watches:
+            print("[调试器] 观察: " + " | ".join(self.watches))
+
+    def _cmd_watch(self, expr_src: str) -> None:
+        if not expr_src:
+            print("[调试器] watch 需要表达式: watch x + 1")
+            return
+        self.watches.append(expr_src)
+        print(f"[调试器] 观察已加: {expr_src}")
+
+    def _cmd_unwatch(self, rest: str) -> None:
+        if not self.watches:
+            print("[调试器] 当前无观察表达式")
+            return
+        if rest.strip() in ('all', ''):
+            self.watches.clear()
+            print("[调试器] 已清空全部观察")
+            return
+        try:
+            idx = int(rest.strip()) - 1
+            gone = self.watches.pop(idx)
+            print(f"[调试器] 观察已删: {gone}")
+        except (ValueError, IndexError):
+            print("[调试器] unwatch 需要序号(1 起)或 all: unwatch 1")
 
     def _cmd_print(self, expr_src: str) -> None:
         """变量检视 — 在当前作用域求值任意 Intent 表达式"""
@@ -3368,15 +3479,7 @@ class Debugger:
             print("[调试器] print 需要表达式: print x + 1")
             return
         try:
-            # 表达式语句要求分号结尾 — 调试输入补一个, 含分号则不重复加
-            src = expr_src if expr_src.rstrip().endswith(';') else expr_src + ';'
-            tokens = Lexer(src).tokenize()
-            program = Parser(tokens, src).parse()
-            stmts = program.statements
-            if not stmts or not isinstance(stmts[0], Expression):
-                print(f"[调试器] 无法解析为表达式: {expr_src}")
-                return
-            val = self.interp.evaluate_expression(stmts[0])
+            val = self._eval_expr(expr_src)
             print(f"  {expr_src} = {self.interp._value_to_str(val)}")
         except Exception as e:
             print(f"[调试器] 求值失败: {e}")
@@ -10353,7 +10456,7 @@ class IntentREPL:
 
 # ==================== 嵌入 API（BD1: Dynamo/pyRevit 宿主调用） ====================
 
-def run_source(code: str, filename: str = "<embedded>"):
+def run_source(code: str, filename: str = "<embedded>", inject_builtins=None):
     """在宿主进程内运行 Intent 源码, 返回最后一条表达式的原生 Python 值。
 
     BD1 Dynamo 落地入口: Dynamo 的 PythonNet3 节点(CPython 3.11)里
@@ -10373,6 +10476,9 @@ def run_source(code: str, filename: str = "<embedded>"):
 
     interp = Interpreter()
     interp.cli_args = []
+    # I3a: 宿主注入原生函数(如 C 扩展 SDK 注册的 native 函数)
+    if inject_builtins:
+        interp.builtins.update(inject_builtins)
     # 顶层函数注册(与 execute_program 的函数提升一致, 否则调用即 NameError)
     for func in program.functions.values():
         interp.functions[func.name] = func
@@ -12317,6 +12423,8 @@ def run_debug(code: str, code_name: str):
     dbg = Debugger(interpreter)
     interpreter.debugger = dbg
     dbg.show_banner()
+    # EX4: 源内调试指令(// @break N if EXPR / // @watch EXPR) — 自包含演示
+    dbg.load_directives(code)
     try:
         lexer = Lexer(code, code_name)
         tokens = lexer.tokenize()

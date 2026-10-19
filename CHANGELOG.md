@@ -4,6 +4,33 @@
 
 ---
 
+## v2.24.0 — EX4 调试器增强 + I3a C 扩展 SDK（2026-10-19）
+
+> 调试器从「能停」到「停得准」：条件断点与 watch 表达式让断点带脑子。
+> C 扩展 SDK 打通「用 C 写 Intent 原生模块」的握手礼——ABI 先立，
+> 编译产物交给有编译器的机器（本机没有，如实标注）。版本 2.23.0 → 2.24.0。
+
+**EX4 调试器增强**（tests/_demo_conditional_bp.intent 演示，判定含「条件断点」）
+
+- **条件断点**：`break N if EXPR`（交互）+ 源内指令 `// @break N if EXPR`；命中行后于当前作用域求值，为真才停；条件求值失败显式打印原因并按无条件命中（调试器静默比崩溃危险）
+- **watch 表达式**：`watch EXPR` / `unwatch N|all` + 源内指令 `// @watch EXPR`——每次停顿打印观察值，求值失败同样显式标注
+- **非 TTY 自动放行**：stdin 非终端（管道/CI）时命令循环入口直接放行——修掉 `input()` 在「管道开着不写」时永久阻塞的挂死根因（引擎判定第一次就撞上了）
+- 源内指令让演示自包含：不依赖交互输入也能验证条件命中与 watch 输出
+
+**I3a C 扩展 SDK**（tools/csdk/，selftest 含「ABI」）
+
+- `intent_api.h`：ABI v1 契约——`IntentModule{abi_version,count,funcs}` + `IntentFuncEntry{name,arity,fn}` + 注册入口 `intent_module_register`；版本不匹配加载器显式拒绝
+- `example.c`：示例扩展（`native_sum_range` / `native_square`）
+- `loader.py`：`load_native(path)` → 调注册入口读函数表 → 包装为 Intent builtin；`run_source` 新增 `inject_builtins` 注入点（宿主注入原生函数）
+- `selftest.py`：**双路径验证**——检测到 C 编译器（gcc/clang/cl）则编译 example.c 加载真 DLL；没有则用 ctypes 回调表走同一条 load→读表→调用路径。两条路都经 Intent 侧调用断言 `native_sum_range(1,100)=5050` / `native_square(12)=144` + ABI 版本校验
+- **诚实标注**：本机无 C 编译器（gcc/clang/cl 均无），selftest 输出明示「C 编译路径未验证」——ABI 已验证，编译产物待有编译器的机器复验（spec §6 限制 30）
+
+**质量门**：--test 323/324（EX4 仅动调试器路径，普通执行零开销）；vm_diff 76/76；csdk selftest 全通；spec v1.23.0（§5、§6 限制 30-31）。
+
+**LangForge**：74/89（83%），关键路径已通，剩余均为旁路（类型 L2/L3/L4/L5、A3b、M3a-c、I2b、I3b、Q3、L2）。
+
+---
+
 ## v2.23.0 — P3b Ed25519 包签名 + P4 .intentp 构建分发（2026-10-19）
 
 > 包管理补齐末端两环：发布能立字据（签名），制品能成卷（.intentp）。

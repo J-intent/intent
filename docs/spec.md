@@ -599,7 +599,8 @@ python src/mini_intent.py --doc file.intent          # 生成 markdown 模块文
 python src/mini_intent.py --fmt file.intent         # 格式化, 输出到 stdout(重定向即写回)
 python src/mini_intent.py --install [url|dir]  # 安装依赖(url 单个; dir 含 intent.toml 按项目批量; 无参按当前目录批量)
 python src/mini_intent.py --install --dry-run [dir]  # PK1: 依赖解析预演(约束合并/冲突检测, 不安装)
-python src/mini_intent.py --debug file.intent  # C7: 调试模式(断点/单步/变量检视/调用栈)
+python src/mini_intent.py --debug file.intent  # C7+EX4: 调试模式(条件断点 break N if EXPR / watch / 单步 / 调用栈)
+python tools/csdk/selftest.py  # I3a: C 扩展 SDK 端到端自检(ABI v1: 加载→注册→Intent 调用)
 python src/mini_intent.py --postmortem file.intent  # EX2: 事后调试(帧快照存档 + 崩溃后进场检视)
 python src/mini_intent.py --profile file.intent  # M4: 函数级剖析(调用次数/累计/自身时间, cProfile 等价切片)
 python src/mini_intent.py --mem-profile file.intent  # M4: 内存分配热点(MM1 注册表按类型分配计数)
@@ -658,6 +659,8 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 27 | async 生成器（async 函数内 yield）显式拒绝；协程无事件循环/并发调度（`await` 按顺序串行驱动）；`await` 软关键字在「标识符 await 后随表达式」的写法上会被当作 await 表达式 | A3a 已知边界（2026-10-19）；async 生成器与事件循环/IO 多路复用归 A3b 及后续 |
 | 28 | 包签名为自持 Ed25519（RFC 8032 最小参考实现，selftest 用标准向量自证）：工具级，不做侧信道防护；密钥/签名格式为 base64 文本，**不与 minisign 二进制互操作**；签名覆盖「文件清单摘要」（relpath+内容 sha256），不覆盖 zip 时间戳等元数据 | P3b 已知边界（2026-10-19）；对 minisign 格式互操作按需再加适配层 |
 | 29 | `.intentp` 入口点只支持「脚本文件」级（`[scripts] cmd = "x.intent"`），`模块:函数` 级入口未做；`.bat` 启动器按系统 ANSI 编码写（cmd.exe 代码页限制），解释器路径嵌入为安装时的 `sys.executable` | P4 已知边界（2026-10-19）；`:func` 入口与跨机可迁移启动器（路径重定位）留后续 |
+| 30 | C 扩展 SDK（ABI v1）只支持 `long long` 整数、元数 1-2；浮点/字符串/结构体/回调映射未做。本机无 C 编译器——`selftest.py` 自动检测：有编译器则编译 example.c 验真 DLL，无则用 ctypes 回调表验证同一 ABI（输出明示"C 编译路径未验证"） | I3a 已知边界（2026-10-19）；ABI 本身已端到端验证，编译产物待有编译器的机器复验 |
+| 31 | 调试器增强（EX4）未做远程调试；非 TTY stdin 时命令循环直接放行（不读命令）；条件表达式求值失败按无条件命中处理（显式打印原因） | EX4 已知边界（2026-10-19）；远程调试（socket 附加）留后续 |
 
 ---
 
@@ -672,4 +675,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.22.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.23.0：P3b Ed25519 包签名 + P4 .intentp 构建分发——§5 CLI 工具链、§6 限制 28-29；此前 v2.22.0 A3a async/await + P3a HTTP 注册表 + S4b）*
+*规范版本 v1.23.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.24.0：EX4 调试器增强 + I3a C 扩展 SDK——§5 CLI、§6 限制 30-31；此前 v2.23.0 P3b 签名 + P4 分发）*

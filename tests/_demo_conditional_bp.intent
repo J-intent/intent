@@ -1,0 +1,11 @@
+// EX4 演示: 条件断点 + watch 表达式(源内指令; stdin EOF 时自动放行)
+// @break 8 if i == 3
+// @watch i + total
+
+let mut i = 0;
+let mut total = 0;
+while i < 5 {
+    total = total + i;
+    i = i + 1;
+};
+print(total);
