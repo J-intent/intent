@@ -30,7 +30,7 @@ def test_annotation_contract() {
     // 标注与契约共存: requires 在运行期把守
     let mut caught = 0;
     try {
-        let bad = add(-1, 2);
+        let bad = add(-1, 2);  // @refine-off 测试用: 故意违约验证运行期拦截
     } catch e: ContractError {
         caught = 1;
     };

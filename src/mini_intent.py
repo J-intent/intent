@@ -12162,15 +12162,19 @@ class TypeChecker:
       - 类型别名透明解析: type Meters = Float; let m: Meters = 1.5; 通过。
     """
 
-    def __init__(self, ast: 'Program', code_name: str = "<input>"):
+    def __init__(self, ast: 'Program', code_name: str = "<input>",
+                 source_lines: Optional[List[str]] = None):
         self.ast = ast
         self.code_name = code_name
+        # L5: 源码行（@refine-off 抑制标记用）；无源码则不启用抑制
+        self.source_lines = source_lines or []
         self.errors: List[str] = []
         self.aliases: Dict[str, str] = {}
         self.checked_count = 0    # 标注处检查次数
         self.inferred_count = 0   # 推断放过次数(无标注/未知)
         self.inferred_vars: Dict[str, str] = {}  # L3a: 无标注变量的推断结果
         self.inferred_returns: Dict[str, str] = {}  # L3b: 无标注函数的返回推断
+        self.requires: Dict[str, list] = {}  # L5a: 各函数的 requires 精炼子句
         # 预收集类型别名
         for stmt in ast.statements:
             if isinstance(stmt, TypeAliasStmt):
@@ -12401,6 +12405,9 @@ class TypeChecker:
                 self.errors.append(
                     f"{self.code_name}: 调用 {name}() 第 {i + 1} 个参数"
                     f"({param_name}) 标注为 {param_type}, 实际推断为 {actual}")
+        # L5a: 契约即类型 — 字面量实参 vs requires 精炼
+        self._check_refinement(name, target, expr.args,
+                               getattr(expr, 'line', 0) or 0)
 
     # ---------- 语句检查 ----------
 
@@ -12527,13 +12534,112 @@ class TypeChecker:
                         and not isinstance(value[0], Expression)):
                     self._scan_body_for_returns(value, dict(env), func, out)
 
+    # ---------- L5a/L5b: 契约即类型（requires 精炼的字面量检查） ----------
+
+    def _collect_contracts(self) -> None:
+        """收集各函数的 requires 子句（and 拆成独立合取项）"""
+        for func in self.ast.functions.values():
+            clauses = []
+            for req in (getattr(func, 'requires', []) or []):
+                clauses.extend(self._conjuncts(req))
+            if clauses:
+                self.requires[func.name] = clauses
+
+    def _conjuncts(self, expr) -> list:
+        """L5b: `a > 0 and b > 0` → 两个合取项（and 链递归拆分）"""
+        if isinstance(expr, BinaryOp) and expr.op == 'and':
+            return self._conjuncts(expr.left) + self._conjuncts(expr.right)
+        return [expr]
+
+    def _literal_value(self, expr):
+        """字面量取值（int/float + 一元负号）；非字面量 → None（不猜）"""
+        if isinstance(expr, Literal):
+            if expr.literal_type in ('int', 'float'):
+                return float(expr.value)
+            return None
+        if (isinstance(expr, UnaryOp) and expr.op == '-'
+                and isinstance(expr.operand, Literal)
+                and expr.operand.literal_type in ('int', 'float')):
+            return -float(expr.operand.value)
+        return None
+
+    @staticmethod
+    def _fmt_num(v: float) -> str:
+        return str(int(v)) if float(v).is_integer() else str(v)
+
+    def _clause_text(self, clause) -> str:
+        left = (clause.left.name if isinstance(clause.left, Variable)
+                else self._fmt_num(self._literal_value(clause.left)
+                                   if self._literal_value(clause.left) is not None
+                                   else 0))
+        right = (clause.right.name if isinstance(clause.right, Variable)
+                 else self._fmt_num(self._literal_value(clause.right)
+                                    if self._literal_value(clause.right) is not None
+                                    else 0))
+        return f"{left} {clause.op} {right}"
+
+    def _check_refinement(self, name: str, target: 'FunctionDef',
+                          arg_exprs: list, call_line: int = 0) -> None:
+        """L5a: 实参字面量 vs requires 精炼 — 编译期判定
+
+        只处理「param OP 字面量」/「字面量 OP param」形态的比较；
+        实参必须是字面量（含负号）才判——变量/表达式不猜（显式信任）。
+        违约记为类型错误（比警告更硬：契约违约运行时必炸，编译期就该拦）。
+        """
+        clauses = self.requires.get(name)
+        if not clauses:
+            return
+        param_names = [p[0] for p in target.params]
+        for clause in clauses:
+            if not isinstance(clause, BinaryOp) or clause.op not in (
+                    '>', '<', '>=', '<=', '==', '!='):
+                continue
+            lv = rv = None
+            lparam = rparam = None
+            if isinstance(clause.left, Variable) and clause.left.name in param_names:
+                lparam = clause.left.name
+                idx = param_names.index(lparam)
+                if idx < len(arg_exprs):
+                    lv = self._literal_value(arg_exprs[idx])
+            else:
+                lv = self._literal_value(clause.left)
+            if isinstance(clause.right, Variable) and clause.right.name in param_names:
+                rparam = clause.right.name
+                idx = param_names.index(rparam)
+                if idx < len(arg_exprs):
+                    rv = self._literal_value(arg_exprs[idx])
+            else:
+                rv = self._literal_value(clause.right)
+            if lv is None or rv is None:
+                continue
+            ok = {'>': lv > rv, '<': lv < rv, '>=': lv >= rv,
+                  '<=': lv <= rv, '==': lv == rv, '!=': lv != rv}[clause.op]
+            if not ok:
+                # // @refine-off 逃生口: 故意演示违约的调用可显式豁免
+                if self._refine_disabled(call_line):
+                    continue
+                bad = lparam if lparam else rparam
+                bad_val = lv if lparam else rv
+                self.errors.append(
+                    f"{self.code_name}: 契约精炼违约: 调用 {name}() 的 "
+                    f"{bad}={self._fmt_num(bad_val)} 不满足 requires "
+                    f"{self._clause_text(clause)}")
+
+    def _refine_disabled(self, line: int) -> bool:
+        """L5: 该行是否带 `// @refine-off` 抑制标记（故意违约的演示/测试）"""
+        if 0 < line <= len(self.source_lines):
+            return '@refine-off' in self.source_lines[line - 1]
+        return False
+
     def check(self) -> List[str]:
         """执行检查, 返回错误列表(空 = 通过)
 
         L3a: 同一作用域的语句共享一份 env（let 链可传递）；
         块边界（if/while/for 体）由 _recurse_value 拷贝隔离。
         L3b: 先做返回推断收敛, 再跑标注处检查（调用方可借被调方推断）。
+        L5a: 先收集 requires 精炼子句（调用点做字面量判定）。
         """
+        self._collect_contracts()
         self._collect_inferred_returns()
         # 全局语句 — 共享一份 env
         global_env: Dict[str, str] = {}
@@ -12572,7 +12678,7 @@ def type_check_code(code: str, code_name: str,
         for err in parser.errors:
             print(f"   • {err}")
         sys.exit(2)
-    checker = TypeChecker(ast, code_name)
+    checker = TypeChecker(ast, code_name, source_lines=code.splitlines())
     errors = checker.check()
     if show_inferred:
         if checker.inferred_vars:

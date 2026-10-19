@@ -18,7 +18,7 @@ def main() {
     
     // 这会触发契约违反
     print("2. 违反契约的加法 (-5 + 3):");
-    let result2 = add(-5, 3);
+    let result2 = add(-5, 3);  // @refine-off 演示用: 故意违约, 看运行时拦截
     print("结果: ", result2);
     
     return 0;

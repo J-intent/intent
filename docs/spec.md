@@ -169,6 +169,7 @@ def name(params) [: ReturnType] [requires ...] [ensures ...] { body } ;
 - 生成器委派（P1.5）：`yield from expr;`——可迭代对象的元素逐个转发（List/Dict 键/生成器源；生成器源 send 值透传）
 - 协程（A3a）：`async def f(...) {...}` + `await expr` + 内置 `run(coro)`——**调用即惰性**，返回 `<coroutine>`（体一行不跑）；`await` 求值出内层协程后挂起当前协程，`run` 以蹦床递归驱动内层、把结果送回避挂起点。`async`/`await` 均为**软关键字**（后随 `def` / 表达式起点时才取得关键字地位，作标识符不受影响）；支持类内 async 方法；async 函数无显式 `return` 时结果为 `None`（对齐 Python）。底层复用 S3 threadlet（协程线程 + 双队列），暂无事件循环与并发调度（A3b）
 - 结构化类型（L2）：`protocol Name { def m(args) -> Ret; ... }` 声明方法名集合（`protocol` 为软关键字）；运行时 `implements(obj, proto)` 沿继承链查方法存在性（能力即身份，不要求声明关系）、`protocol_methods(proto)` 返回方法名清单；静态侧 `--types` 对标注为协议的位置做结构子类型检查（类方法集 ⊇ 协议方法集，继承链算数）
+- **契约即类型（L5，皇冠）**：`requires` 子句是函数类型的一部分——`--types` 在调用点对**字面量实参**（含负号）求值 `requires` 的比较子句，违约即报「契约精炼违约」（编译期错误，比运行时 ContractViolation 更早）；`and` 链拆成独立合取项逐条判；支持 `param OP 字面量` / `字面量 OP param` / 双参比较（`a < b`）；故意违约的演示/测试用行内 `// @refine-off` 显式豁免。非字面量实参不猜（显式信任）
 
 **契约**（一等公民，Intent 的身份证）：
 ```intent
@@ -591,8 +592,8 @@ python src/mini_intent.py <file>           # 执行
 python src/mini_intent.py <file> [args...] # 执行, 额外参数经 args() 读取
 python src/mini_intent.py -c "code"        # 直接执行代码串
 python src/mini_intent.py --check [file]   # 只解析不执行: 干净退出0, 错误退出2
-python src/mini_intent.py --types [file]   # L1: 渐进类型静态检查(mypy-lite: 标注处检查+推断处放过)
-python src/mini_intent.py --types --show-inferred file.intent  # L3a: 打印无标注变量的推断结果
+python src/mini_intent.py --types [file]   # L1: 渐进类型静态检查(mypy-lite: 标注处检查+推断处放过; L2 协议/L3 推断/L5 契约精炼)
+python src/mini_intent.py --types --show-inferred file.intent  # L3a/L3b: 打印变量与返回的推断结果
 python src/mini_intent.py --compile file.intent [--run-vm]  # M10: 编译字节码(可选 VM 执行)
 python src/mini_intent.py --emit tokens|ast <file>   # 分析结果写文件
 python src/mini_intent.py --test [path]    # 测试(默认 tests/, _ 开头跳过)
@@ -666,6 +667,7 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 32 | 结构化类型（L2）只比方法名，不比参数/返回签名；嵌套 protocol（protocol 内嵌 protocol）不查；运行时鸭子类型缺方法在**调用时**才炸（NameError），`implements` 只是显式检查口 | L2 已知边界（2026-10-19）；签名一致性与递归结构留完整版 |
 | 33 | 局部推断（L3a）覆盖：字面量 / 变量 / 一元 / 二元（数值提升）/ 三元与 if 表达式（分支统一）/ 管道（取目标函数返回标注）/ 类构造（类名）/ 容器字面量（基类）；**不推**：成员访问、下标、闭包返回值、函数体内的跨函数调用链。返回推断（L3b）覆盖：无标注函数从 return 表达式推断（多分支统一、调用链收敛、不统一则不猜；无 return 不推），调用点借用推断结果做标注检查 | L3a/L3b 已知边界（2026-10-19）；推断结果可用 `--show-inferred` 观测，`tools/infer_selftest.py [--returns]` 锁定 |
 | 34 | 泛型深化（L4）覆盖：默认类型参数（`<T = Int>`，未绑定时生效，显式绑定优先，与约束共存；默认值只接受单个类型名）；递归类型别名（`type JSON = Int | String | List<JSON>` 经 --types 验证）。未做：型变标注（协变/逆变）、参数化类型别名（`type Pair<T> = List<T>`）、别名展开深度 >5 的链 | L4 已知边界（2026-10-19）；形变与参数化别名留完整版 |
+| 35 | 契约即类型（L5）只判**字面量实参**；`or`/`not` 谓词、引用变量或函数调用的 requires 子句、方法（类内 def）的 requires 不查；比较限 `> < >= <= == !=`；`@refine-off` 只看调用所在行 | L5 已知边界（2026-10-19）；常量折叠/变量域推断/方法契约留后续 |
 
 ---
 
@@ -680,4 +682,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.27.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.28.0：L4 泛型深化（默认类型参数 + 递归别名）——§6 限制 34；此前 v2.27.0 L3b 返回推断）*
+*规范版本 v1.28.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.29.0：L5a/L5b 契约即类型（requires 精炼）——§3.2 契约即类型、§5 CLI、§6 限制 35；此前 v2.28.0 L4 泛型深化）*
