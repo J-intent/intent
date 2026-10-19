@@ -4,6 +4,40 @@
 
 ---
 
+## v2.30.0 — 多线并进：M3 JIT（1.01x CPython）+ 属性测试 + Python 调 Intent + 官方包（2026-10-19）
+
+> 一次推进六件事，三条线并行（主线程写 JIT，子代理跑属性测试/反向桥/官方包）。
+> **JIT 转译落地：fib(25) 从 3005ms → 7ms，达 CPython 1.01x（目标 0.5x）**。
+> 顺带修掉一个嵌套契约真 bug。版本 2.29.0 → 2.30.0。
+
+**M3b 热点函数 JIT**（`--jit`，判定含 JIT 标记）
+- 方案 C（docs/jit_design.md）：热函数 AST → Python 源码 → exec → 调 CPython 原生性能；`--jit` 启动时**预编译**全部数值子集函数（消暖机：阈值 1000 时暖机 12ms 吃掉全部收益，预编译后 3005ms → **7ms**）
+- 子集：标量参数（Int/Float/Any）/算术/比较/and-or/if-while/return/自递归/白名单内置；**契约函数、装饰器、生成器、协程、类、闭包一律走解释器**（语义零变化）；实参非数值 → deopt
+- 证据：`[JIT] 预编译 N 个函数: …` 输出到 stderr（防「未知 flag 照常执行」的真空通过）；默认关闭（零开销）
+
+**M3c JIT 基准门禁**（benchmarks/run_benchmarks.py --jit）
+- `--jit` 模式跑基准并与 CPython 参考实现（同算法 fib）比倍率：**CPython 7ms / Intent-JIT 7ms = 1.01x（目标 ≥0.5x）**；低于 0.5x 非零退出
+- fib_iter(10000)：108ms → 1ms
+
+**Q3a/Q3b 属性测试**（子代理线，std/property.intent + tests/test_property.intent 19 测试）
+- 纯 Intent 实现：**自持 LCG**（显式种子，确定性——随机数会毁掉 vm_diff 对照）、`for_all`、`shrink_int`/`find_minimal` 失败样本最小化、属性不变式实例（排序长度不变/加法交换律/反转两次等）
+- vm_diff 79/79 MATCH（新测试文件自动纳入且双引擎一致）
+
+**I2b1/I2b2 Python 调 Intent**（子代理线，tools/intent_py.py，selftest 8/8 + round-trip）
+- `load(path)` 把 Intent 模块顶层函数暴露为 Python 可调用（标量/列表/字典/None 双向转换，契约违约转 Python 异常）；顶层初始化照跑；`--selftest` 覆盖正例 + 契约违约
+
+**E6 官方包首批**（子代理线，packages/ 5 包 + tools/package_check.py）
+- 5 个官方包立标杆：cli / logging / figlet / ifc / schedule——每个「契约 + 测试 + README」三件套齐；`package_check.py --all` 逐包检查（清单/契约存在/测试真跑通过/README 行数），不合格非零退出
+
+**真 bug 修复：嵌套 ensures**
+- 症状：`def a() ensures result == b() + 1`（b 也有 ensures）→ 外层报 `RuntimeError('result')`。根因：内层 ensures 用完**无条件删除**全局 `result`，把外层正在用的值一起删了。修法：保存/恢复前一值（try/finally），契约互不踩；tests/test_contracts.intent 增回归用例
+
+**质量门**：--test **357/358 过 0 败 1 跳**（337→357，+20）；vm_diff **79/79 一致**；JIT 基准 1.01x；intent_py selftest 8/8；package_check 5/5；spec v1.29.0（§5 工具链、§6 限制 36-38）。
+
+**LangForge**：**88/89（98%）**，只剩 A3b（事件循环 + http 并发）。
+
+---
+
 ## v2.29.0 — L5a + L5b 契约即类型：requires 成为类型的一部分（2026-10-19）
 
 > **皇冠落地。** 路线图上「Python 生态没有的东西」：契约不再只是运行时

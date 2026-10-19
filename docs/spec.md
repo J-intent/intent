@@ -616,6 +616,10 @@ python tools/registry.py serve [--port P]   # P3a: HTTP 注册表服务(GET /ind
 python tools/registry.py keygen [--out DIR]  # P3b: 生成 sk.key / pk.pub(base64)
 python tools/intent_sign.py --selftest      # P3b: Ed25519 RFC 8032 向量自检
 python tools/pack.py build|inspect|install  # P4: .intentp 包格式(zip+metadata) + console_scripts 入口(bin/)
+python src/mini_intent.py --jit file.intent   # M3b: 热点函数 JIT(数值子集转译 Python; 默认关闭)
+python benchmarks/run_benchmarks.py --jit      # M3c: JIT 基准 + CPython 倍率门禁(≥0.5x)
+python tools/intent_py.py --selftest           # I2b: Python 调 Intent（load + round-trip 自检）
+python tools/package_check.py --all            # E6: 官方包三件套检查（契约/测试/README）
 python src/mini_intent.py --version        # 版本
 python src/mini_intent.py -t / -a          # 只看 tokens / AST
 python src/mini_intent.py -r               # REPL
@@ -668,6 +672,9 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 33 | 局部推断（L3a）覆盖：字面量 / 变量 / 一元 / 二元（数值提升）/ 三元与 if 表达式（分支统一）/ 管道（取目标函数返回标注）/ 类构造（类名）/ 容器字面量（基类）；**不推**：成员访问、下标、闭包返回值、函数体内的跨函数调用链。返回推断（L3b）覆盖：无标注函数从 return 表达式推断（多分支统一、调用链收敛、不统一则不猜；无 return 不推），调用点借用推断结果做标注检查 | L3a/L3b 已知边界（2026-10-19）；推断结果可用 `--show-inferred` 观测，`tools/infer_selftest.py [--returns]` 锁定 |
 | 34 | 泛型深化（L4）覆盖：默认类型参数（`<T = Int>`，未绑定时生效，显式绑定优先，与约束共存；默认值只接受单个类型名）；递归类型别名（`type JSON = Int | String | List<JSON>` 经 --types 验证）。未做：型变标注（协变/逆变）、参数化类型别名（`type Pair<T> = List<T>`）、别名展开深度 >5 的链 | L4 已知边界（2026-10-19）；形变与参数化别名留完整版 |
 | 35 | 契约即类型（L5）只判**字面量实参**；`or`/`not` 谓词、引用变量或函数调用的 requires 子句、方法（类内 def）的 requires 不查；比较限 `> < >= <= == !=`；`@refine-off` 只看调用所在行 | L5 已知边界（2026-10-19）；常量折叠/变量域推断/方法契约留后续 |
+| 36 | JIT（M3b）只覆盖数值子集（标量参数/算术/比较/if-while/return/自递归/白名单内置）；契约函数、装饰器、生成器、协程、类、闭包、print 一律走解释器；实参非 Int/Float/None 即 deopt；`--jit` 默认关闭 | M3b 已知边界（2026-10-19）；列表下标/for 循环/内联小函数留 M3 下（LTS） |
+| 37 | 属性测试（Q3）用自持 LCG（显式种子）保证确定性——内置 random 会让 vm_diff 双引擎对照分歧；收缩为线性候选（`shrink_int`），非完整 shrink tree | Q3 已知边界（2026-10-19）；树形收缩与 Hypothesis 全量策略留后续 |
+| 38 | Python 调 Intent（I2b）通过 `load(path)` 暴露顶层函数；支持标量/列表/字典/None 双向转换；类实例/闭包/生成器返回按不透明处理或报错；每次调用不重建解释器状态（模块顶层 let 只执行一次） | I2b 已知边界（2026-10-19）；反向类型映射与异步协程互操作留后续 |
 
 ---
 
@@ -682,4 +689,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.28.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.29.0：L5a/L5b 契约即类型（requires 精炼）——§3.2 契约即类型、§5 CLI、§6 限制 35；此前 v2.28.0 L4 泛型深化）*
+*规范版本 v1.29.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.30.0：M3b/M3c JIT（1.01x CPython）+ Q3 属性测试 + I2b Python 调 Intent + E6 官方包——§5 工具链、§6 限制 36-38；此前 v2.29.0 L5 契约即类型）*

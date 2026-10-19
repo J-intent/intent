@@ -1,0 +1,45 @@
+// ifc 包回归测试 —— 运行: python src/mini_intent.py --test packages/ifc/test_ifc.intent
+import ifc;
+
+def test_valid_identifier() {
+    assert ifc.is_valid_identifier("IFCWALL-standard-123"), "标准标识合法";
+    assert ifc.is_valid_identifier("IFCSLAB-200mm-7"), "中段可含字母";
+    assert not ifc.is_valid_identifier("IFCWALL-standard"), "缺序号段";
+    assert not ifc.is_valid_identifier("IFCWALL-standard-12a"), "序号必须全数字";
+    assert not ifc.is_valid_identifier("WALL-standard-123"), "必须以 IFC 开头";
+    assert not ifc.is_valid_identifier("IFC--123"), "中段不能为空";
+};
+
+def test_parse_ok_with_match() {
+    let r = ifc.parse("IFCWALL-standard-123");
+    assert ifc.ok_q(r), "合法标识解析成功";
+    match r {
+        Ok(v) => {
+            assert v["class"] == "IFCWALL", "解析类名";
+            assert v["kind"] == "standard", "解析规格";
+            assert v["serial"] == "123", "解析序号";
+        },
+        Err(e) => {
+            assert false, "不应失败: " + e;
+        },
+    };
+};
+
+def test_parse_err_with_match() {
+    let r = ifc.parse("IFCWALL-bad");
+    assert not ifc.ok_q(r), "非法标识返回 Err";
+    match r {
+        Ok(v) => {
+            assert false, "非法标识不应 Ok";
+        },
+        Err(e) => {
+            assert starts_with(e, "无效的 IFC 标识"), "错误原因可读";
+        },
+    };
+};
+
+def test_serial_class_and_normalize() {
+    assert ifc.serial_number("IFCBEAM-steel-42") == 42, "序号转整数";
+    assert ifc.ifc_class("IFCBEAM-steel-42") == "IFCBEAM", "取类名段";
+    assert ifc.normalize("IFCBEAM-STEEL-42") == "IFCBEAM-steel-42", "规格统一小写";
+};

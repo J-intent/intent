@@ -1,0 +1,72 @@
+// cli —— 极简命令行参数解析（子命令 + flag + 位置参数）
+// 纯 Intent 实现，无外部依赖。约定：
+//   `build main.intent --verbose -q` → command="build", args=["main.intent"], flags=["verbose","q"]
+
+// 以 "-" 开头的 token 视为 flag
+def is_flag(token: String): Bool
+    requires len(token) > 0
+    ensures type_of(result) == "Bool" {
+    return starts_with(token, "-");
+};
+
+// 去掉前导 "-" 或 "--"，得到 flag 名
+def flag_name(token: String): String
+    requires is_flag(token)
+    requires len(token) > 1
+    ensures len(result) > 0 {
+    if starts_with(token, "--") {
+        return substr(token, 2, len(token));
+    };
+    return substr(token, 1, len(token));
+};
+
+// 解析 argv：首个非 flag token 为子命令，其余非 flag token 为位置参数
+def parse_args(argv: List): Dict
+    ensures len(result["flags"]) <= len(argv)
+    ensures len(result["args"]) <= len(argv) {
+    let out = {"command": "", "flags": [], "args": []};
+    let mut seen_command = false;
+    for token in argv {
+        if is_flag(token) and len(token) > 1 {
+            push(out["flags"], flag_name(token));
+        } else if not seen_command {
+            out["command"] = token;
+            seen_command = true;
+        } else {
+            push(out["args"], token);
+        };
+    };
+    return out;
+};
+
+// flag 是否出现（按去掉前缀后的名字查询）
+def has_flag(parsed: Dict, name: String): Bool
+    requires name != ""
+    ensures result == (name in parsed["flags"]) {
+    return name in parsed["flags"];
+};
+
+// 取子命令；未给出子命令时返回空串
+def command_of(parsed: Dict): String
+    ensures result == parsed["command"] {
+    return parsed["command"];
+};
+
+// 取位置参数列表
+def args_of(parsed: Dict): List
+    ensures len(result) == len(parsed["args"]) {
+    return parsed["args"];
+};
+
+// 校验子命令：必须出现，且在白名单内
+def validate(parsed: Dict, allowed: List): Result
+    requires len(allowed) > 0
+    ensures starts_with(type_of(result), "Result") {
+    if parsed["command"] == "" {
+        return Err("缺少子命令");
+    };
+    if not (parsed["command"] in allowed) {
+        return Err("未知子命令: " + parsed["command"]);
+    };
+    return Ok(parsed);
+};

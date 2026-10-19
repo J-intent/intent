@@ -1,0 +1,32 @@
+// logging 包回归测试 —— 运行: python src/mini_intent.py --test packages/logging/test_logging.intent
+import logging;
+
+def test_level_order() {
+    assert logging.level_value("DEBUG") == 10, "DEBUG=10";
+    assert logging.level_value("INFO") == 20, "INFO=20";
+    assert logging.level_value("WARN") == 30, "WARN=30";
+    assert logging.level_value("ERROR") == 40, "ERROR=40";
+};
+
+def test_should_log_threshold() {
+    assert logging.should_log(20, "ERROR"), "高于阈值保留";
+    assert logging.should_log(20, "INFO"), "等于阈值保留";
+    assert not logging.should_log(20, "DEBUG"), "低于阈值过滤";
+};
+
+def test_format_line() {
+    let line = logging.format_line("WARN", "磁盘空间不足");
+    assert line == "[WARN] 磁盘空间不足", "格式为 [LEVEL] message";
+    assert starts_with(line, "[WARN]"), "以级别标签开头";
+};
+
+def test_logger_filters_and_collects() {
+    let logger = logging.Logger(20);
+    logger.log("DEBUG", "被过滤");
+    logger.log("INFO", "启动完成");
+    logger.log("ERROR", "崩溃");
+    assert logger.count() == 2, "DEBUG 被阈值过滤";
+    let text = logger.text();
+    assert contains(split(text, "\n"), "[INFO] 启动完成"), "INFO 行保留";
+    assert contains(split(text, "\n"), "[ERROR] 崩溃"), "ERROR 行保留";
+};

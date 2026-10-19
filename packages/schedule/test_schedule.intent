@@ -1,0 +1,50 @@
+// schedule 包回归测试 —— 运行: python src/mini_intent.py --test packages/schedule/test_schedule.intent
+import schedule;
+
+def sample() {
+    return [
+        {"id": "W1", "type": "Wall", "floor": "L1", "volume": 3},
+        {"id": "W2", "type": "Wall", "floor": "L2", "volume": 5},
+        {"id": "S1", "type": "Slab", "floor": "L1", "volume": 9},
+        {"id": "D1", "type": "Door", "floor": "L2", "volume": 1},
+    ];
+};
+
+def test_count_by_floor() {
+    let counts = schedule.count_by(sample(), "floor");
+    assert counts["L1"] == 2, "L1 两个构件";
+    assert counts["L2"] == 2, "L2 两个构件";
+    assert len(keys(counts)) == 2, "共两个楼层";
+};
+
+def test_count_by_type() {
+    let counts = schedule.count_by(sample(), "type");
+    assert counts["Wall"] == 2, "墙两个";
+    assert counts["Slab"] == 1, "板一个";
+    assert counts["Door"] == 1, "门一个";
+};
+
+def test_sort_by_volume_desc() {
+    let ordered = schedule.sort_by_volume(sample());
+    assert len(ordered) == 4, "排序不丢失构件";
+    assert ordered[0]["volume"] == 9, "体积最大者在前";
+    assert ordered[1]["volume"] == 5, "次大者第二";
+    assert ordered[3]["volume"] == 1, "体积最小者在末尾";
+};
+
+def test_filter_by_floor() {
+    let l1 = schedule.filter_by_floor(sample(), "L1");
+    assert len(l1) == 2, "L1 过滤出两个";
+    assert l1[0]["id"] == "W1", "过滤保持原顺序";
+    let none = schedule.filter_by_floor(sample(), "L9");
+    assert len(none) == 0, "不存在的楼层返回空列表";
+};
+
+def test_total_and_summary() {
+    assert schedule.total_volume(sample()) == 18, "体积合计 18";
+    let lines = schedule.summary(sample());
+    assert len(lines) == 2, "按楼层输出两行";
+    assert contains(lines, "L1: 2"), "L1 汇总";
+    assert contains(lines, "L2: 2"), "L2 汇总";
+    assert schedule.total_volume([]) == 0, "空清单体积为 0";
+};

@@ -5479,6 +5479,20 @@ class ModuleSystem:
             self.loading_modules.discard(module_name)
 
 # ==================== 解释执行器 ====================
+# ── M3b: 热点函数 JIT（设计见 docs/jit_design.md）──────────
+# 方案 C：热函数 AST → Python 源码 → exec → 直接调用（借 CPython 原生速度）。
+# 子集：标量参数/算术/比较/if/while/return/自递归/白名单内置；
+# 契约函数、类、闭包、生成器、协程不 JIT（走解释器，语义零变化）。
+
+_JIT_MISS = object()      # 未命中 JIT 的特化（回退解释器）
+HOT_THRESHOLD = 1000      # 调用计数达到即尝试编译
+_JIT_BUILTIN_WHITELIST = {'abs', 'min', 'max', 'len', 'int', 'float', 'bool'}
+
+
+class _JitReject(Exception):
+    """函数不在 JIT 子集内（或编译产物运行期拒绝）——标记后永不重试"""
+
+
 class Interpreter:
     """解释执行器"""
 
@@ -5529,6 +5543,13 @@ class Interpreter:
         # ── S3: 当前协程线程的生成器控制器(主线程为 None) ──
         # yield 经它握手; 上下文切换时随 _GEN_CTX_ATTRS 保存/恢复
         self._active_gen = None
+        # ── M3b: 热点函数 JIT(仅 --jit 模式启用; 关闭时零开销) ──
+        self.jit_enabled = False
+        self.jit_counts: Dict[str, int] = {}
+        self.jit_cache: Dict[str, dict] = {}
+        self.jit_disabled: set = set()
+        self._jit_ns: dict = {}
+        self._jit_in_slow = False
 
     def _exit_scope(self, old_scope: 'Scope'):
         """退出当前作用域，执行 defer 栈"""
@@ -7874,6 +7895,10 @@ class Interpreter:
                 if not module_mode:
                     self.current_scope.declare(func.name, fv, False, allow_redefine=True)
 
+        # ── M3b: --jit 时预编译数值子集函数（消除热点探测的暖机开销）──
+        if getattr(self, 'jit_enabled', False) and not module_mode:
+            self._jit_precompile()
+
         # 执行全局语句(变量声明等)
         result = IntValue(0)
         for stmt in program.statements:
@@ -9126,8 +9151,213 @@ class Interpreter:
 
         return None
 
-    def execute_function(self, func, args: List[RuntimeValue],
-                         closure_scope: Optional[Scope] = None,
+    # ── M3b: 热点函数 JIT ──────────────────────────────
+
+    def _jit_native_arg(self, v):
+        """RuntimeValue → 原生数值（JIT 边界）；不可 → _JIT_MISS"""
+        if isinstance(v, IntValue):
+            return v.value
+        if isinstance(v, FloatValue):
+            return v.value
+        if isinstance(v, NoneValue):
+            return None
+        return _JIT_MISS
+
+    def _jit_precompile(self):
+        """M3b: --jit 启动时预编译全部数值子集函数（冷启动零暖机）"""
+        for name, func_def in list(self.functions.items()):
+            if name in self.jit_cache or name in self.jit_disabled:
+                continue
+            src = self._jit_compile_func(func_def)
+            if src is None:
+                self.jit_disabled.add(name)
+                continue
+            ns = self._jit_ns
+            ns['_jit_call'] = self._jit_call_dispatch
+            ns['_jit_slow'] = self._jit_slow_call
+            try:
+                exec(compile(src, f"<jit:{name}>", "exec"), ns)
+            except Exception:
+                self.jit_disabled.add(name)
+                continue
+            self.jit_cache[name] = {'fn': ns['__jit_' + name], 'src': src}
+        if self.jit_cache:
+            print(f"[JIT] 预编译 {len(self.jit_cache)} 个函数: "
+                  f"{', '.join(sorted(self.jit_cache))}", file=sys.stderr)
+
+    def _jit_try_call(self, name, func_def, args):
+        """JIT 入口：命中特化 → 跑编译产物；未命中 → 计数/编译；否则回退"""
+        if getattr(self, '_jit_in_slow', False):
+            return _JIT_MISS
+        native = [self._jit_native_arg(a) for a in args]
+        if any(x is _JIT_MISS for x in native):
+            return _JIT_MISS
+        entry = self.jit_cache.get(name)
+        if entry is not None:
+            return self._jit_invoke(name, entry, native)
+        if name in self.jit_disabled:
+            return _JIT_MISS
+        self.jit_counts[name] = self.jit_counts.get(name, 0) + 1
+        if self.jit_counts[name] < HOT_THRESHOLD:
+            return _JIT_MISS
+        src = self._jit_compile_func(func_def)
+        if src is None:
+            self.jit_disabled.add(name)
+            return _JIT_MISS
+        ns = self._jit_ns
+        ns['_jit_call'] = self._jit_call_dispatch
+        ns['_jit_slow'] = self._jit_slow_call
+        try:
+            exec(compile(src, f"<jit:{name}>", "exec"), ns)
+        except Exception:
+            self.jit_disabled.add(name)
+            return _JIT_MISS
+        entry = {'fn': ns['__jit_' + name], 'src': src}
+        self.jit_cache[name] = entry
+        print(f"[JIT] 热点编译: {name}", file=sys.stderr)
+        return self._jit_invoke(name, entry, native)
+
+    def _jit_invoke(self, name, entry, native):
+        try:
+            out = entry['fn'](*native)
+        except _JitReject:
+            self.jit_disabled.add(name)
+            self.jit_cache.pop(name, None)
+            return _JIT_MISS
+        return _py_to_intent(out)
+
+    def _jit_call_dispatch(self, name, *native_args):
+        """生成代码里的跨函数调用：已编译直调，否则回退解释器桥"""
+        entry = self.jit_cache.get(name)
+        if entry is not None:
+            return entry['fn'](*native_args)
+        return self._jit_slow_call(name, *native_args)
+
+    def _jit_slow_call(self, name, *native_args):
+        """JIT 代码调未编译的 Intent 函数：原生 → RuntimeValue → 解释器 → 原生"""
+        func = self.functions.get(name)
+        if func is None:
+            raise _JitReject(f"未知函数 {name}")
+        rv_args = [_py_to_intent(a) for a in native_args]
+        self._jit_in_slow = True
+        try:
+            out = self.execute_function(func, rv_args)
+        finally:
+            self._jit_in_slow = False
+        return _py_from_intent(out)
+
+    def _jit_compile_func(self, func_def):
+        """M3b: 函数 → Python 源码；不在子集 → None（显式拒绝，不半支持）"""
+        if (getattr(func_def, 'is_generator', False)
+                or getattr(func_def, 'is_async', False)
+                or getattr(func_def, 'decorators', None)
+                or getattr(func_def, 'requires', None)
+                or getattr(func_def, 'ensures', None)):
+            return None  # 契约/生成器/协程/装饰器函数走解释器（语义零变化）
+        params = []
+        for pname, ptype, default in func_def.params:
+            if default is not None:
+                return None  # 默认参数留解释器
+            if ptype not in (None, 'Any', 'Int', 'Float'):
+                return None  # 只 JIT 数值核（String/Bool 语义差异风险）
+            params.append(pname)
+        try:
+            body = self._jit_block(func_def.body, 1, func_def.name)
+        except _JitReject:
+            return None
+        head = f"def __jit_{func_def.name}({', '.join(params)}):"
+        lines = [head] + (body if body else ["    return None"])
+        return "\n".join(lines) + "\n"
+
+    def _jit_block(self, stmts, indent: int, self_name: str) -> List[str]:
+        pad = '    ' * indent
+        out: List[str] = []
+        for stmt in stmts:
+            if isinstance(stmt, VariableDecl):
+                if stmt.value is None:
+                    raise _JitReject('无初值声明')
+                out.append(f"{pad}{stmt.name} = "
+                           f"{self._jit_expr(stmt.value, self_name)}")
+            elif isinstance(stmt, Assignment):
+                rhs = self._jit_expr(stmt.value, self_name)
+                op = stmt.op if stmt.op in ('+=', '-=', '*=', '/=', '%=', '**=') else '='
+                out.append(f"{pad}{stmt.target} {op} {rhs}")
+            elif isinstance(stmt, IfStmt):
+                out.append(f"{pad}if {self._jit_expr(stmt.condition, self_name)}:")
+                out.extend(self._jit_block(stmt.then_branch, indent + 1, self_name))
+                for cond, branch in stmt.elif_branches:
+                    out.append(f"{pad}elif {self._jit_expr(cond, self_name)}:")
+                    out.extend(self._jit_block(branch, indent + 1, self_name))
+                if stmt.else_branch:
+                    out.append(f"{pad}else:")
+                    out.extend(self._jit_block(stmt.else_branch, indent + 1, self_name))
+            elif isinstance(stmt, WhileStmt):
+                out.append(f"{pad}while {self._jit_expr(stmt.condition, self_name)}:")
+                out.extend(self._jit_block(stmt.body, indent + 1, self_name))
+            elif isinstance(stmt, ReturnStmt):
+                if stmt.value is None:
+                    out.append(f"{pad}return None")
+                else:
+                    out.append(f"{pad}return {self._jit_expr(stmt.value, self_name)}")
+            elif isinstance(stmt, BreakStmt):
+                out.append(f"{pad}break")
+            elif isinstance(stmt, ContinueStmt):
+                out.append(f"{pad}continue")
+            elif isinstance(stmt, Expression):
+                out.append(f"{pad}{self._jit_expr(stmt, self_name)}")
+            else:
+                raise _JitReject(f"语句不在 JIT 子集: {type(stmt).__name__}")
+        return out
+
+    def _jit_expr(self, expr, self_name: str) -> str:
+        if isinstance(expr, Literal):
+            if expr.literal_type == 'string':
+                return repr(expr.value)
+            if expr.literal_type == 'bool':
+                return 'True' if expr.value else 'False'
+            if expr.literal_type == 'none':
+                return 'None'
+            return repr(expr.value)
+        if isinstance(expr, Variable):
+            return expr.name
+        if isinstance(expr, UnaryOp):
+            operand = self._jit_expr(expr.operand, self_name)
+            if expr.op in ('!', 'not'):
+                return f"(not {operand})"
+            if expr.op == '-':
+                return f"(-{operand})"
+            return operand
+        if isinstance(expr, BinaryOp):
+            left = self._jit_expr(expr.left, self_name)
+            right = self._jit_expr(expr.right, self_name)
+            if expr.op in ('and', 'or'):
+                return f"bool({left} {expr.op} {right})"
+            if expr.op in ('+', '-', '*', '/', '%', '**',
+                           '==', '!=', '<', '>', '<=', '>='):
+                return f"({left} {expr.op} {right})"
+            raise _JitReject(f"运算符不在 JIT 子集: {expr.op}")
+        if isinstance(expr, TernaryExpr):
+            return (f"({self._jit_expr(expr.then_expr, self_name)} if "
+                    f"{self._jit_expr(expr.condition, self_name)} else "
+                    f"{self._jit_expr(expr.else_expr, self_name)})")
+        if isinstance(expr, CallExpr):
+            name = expr.func if isinstance(expr.func, str) else (
+                expr.func.name if isinstance(expr.func, Variable) else None)
+            if name is None:
+                raise _JitReject('非裸名调用')
+            args = [self._jit_expr(a, self_name) for a in expr.args]
+            if name == self_name:
+                return f"__jit_{name}({', '.join(args)})"
+            if name in _JIT_BUILTIN_WHITELIST and name not in self.functions:
+                return f"{name}({', '.join(args)})"
+            if name in self.functions:
+                quoted = repr(name)
+                return (f"_jit_call({quoted}"
+                        + (', ' + ', '.join(args) if args else '') + ')')
+            raise _JitReject(f"调用不在 JIT 子集: {name}")
+        raise _JitReject(f"表达式不在 JIT 子集: {type(expr).__name__}")
+
+    def execute_function(self, func, args: List[RuntimeValue],                         closure_scope: Optional[Scope] = None,
                          gen_mode: bool = False) -> RuntimeValue:
         """执行函数(带调用栈跟踪) — 委托 _execute_function_inner
 
@@ -9198,6 +9428,13 @@ class Interpreter:
 
         # LambdaExpr 没有 name 属性，用特殊名称
         func_name = getattr(func_def, 'name', '<lambda>')
+
+        # ── M3b: 热点函数 JIT（仅 --jit；未命中/子集外回退解释器） ──
+        if (getattr(self, 'jit_enabled', False) and not gen_mode
+                and func_name and not str(func_name).startswith('<')):
+            jit_value = self._jit_try_call(func_name, func_def, args)
+            if jit_value is not _JIT_MISS:
+                return jit_value
 
         # ── S3: 生成器函数 — 调用即惰性, 建控制器交 GeneratorValue ──
         if getattr(func_def, 'is_generator', False) and not gen_mode:
@@ -9331,12 +9568,24 @@ class Interpreter:
         # 验证后置条件
         func_ensures = getattr(func_def, 'ensures', [])
         if func_ensures and not (is_gen and gen_mode):
-            # 将 result 放入全局作用域,使 ensures 表达式的 result 可解析
+            # 将 result 放入全局作用域,使 ensures 表达式的 result 可解析。
+            # E6 实测坑: ensures 里调用另一个带 ensures 的函数时, 内层会
+            # 覆盖并删除全局 result → 外层报 RuntimeError('result')。
+            # 修法: 保存/恢复前一值(嵌套契约互不踩), 不无条件 delete。
+            had_prev = 'result' in self.global_scope.symbols
+            prev_result = self.global_scope.symbols.get('result')
             self.global_scope.symbols['result'] = result
-            if not self.contract_verifier.verify_ensures(func_ensures, result, context):
+            try:
+                ensures_ok = self.contract_verifier.verify_ensures(
+                    func_ensures, result, context)
+            finally:
+                if had_prev:
+                    self.global_scope.symbols['result'] = prev_result
+                else:
+                    self.global_scope.symbols.pop('result', None)
+            if not ensures_ok:
                 errs = self.contract_verifier.get_errors()
                 first = errs[0] if errs else "后置条件未满足"
-                del self.global_scope.symbols['result']
                 self._exit_scope(old_scope)
                 raise ContractViolation(
                     f"契约违约(ensures): {first} — 函数 {func_name} 未兑现承诺",
@@ -9344,7 +9593,6 @@ class Interpreter:
                     expected=first,
                     line=self.current_line, column=self.current_col,
                     stack=list(self.call_stack), filename=self.current_filename)
-            del self.global_scope.symbols['result']
 
         # 恢复作用域（执行 defer）
         self._exit_scope(old_scope)
@@ -10671,6 +10919,8 @@ def main():
                         help='L1: 渐进类型静态检查(mypy-lite: 标注处检查+推断处放过)')
     parser.add_argument('--show-inferred', action='store_true',
                         help='L3a: 与 --types 联用, 打印无标注变量的推断结果')
+    parser.add_argument('--jit', action='store_true',
+                        help='M3b: 热点函数 JIT(转译为 Python, 数值核加速)')
     parser.add_argument('--emit', nargs=2, metavar=('KIND', 'FILE'),
                         help='将词法/语法结果写入文件: --emit tokens out.txt | --emit ast out.txt')
     parser.add_argument('--install', nargs='?', const='__BATCH__', default=None,
@@ -10717,6 +10967,8 @@ def main():
 
     # 创建解释器
     interpreter = Interpreter()
+    # M3b: --jit 开关（默认关闭, 关闭时零开销）
+    interpreter.jit_enabled = bool(getattr(args, 'jit', False))
 
     # --version: 只报版本
     if args.version:

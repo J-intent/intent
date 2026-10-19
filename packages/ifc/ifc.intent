@@ -1,0 +1,92 @@
+// ifc —— BIM 领域：IFC 风格构件标识解析
+// 标识格式：<IFC类名>-<样式/规格>-<数字序号>，例如 "IFCWALL-standard-123"。
+// 校验规则：三段；首段以 IFC 开头且长度 > 3；中段非空；末段全为数字。
+
+def is_digit(ch: String): Bool
+    requires len(ch) == 1
+    ensures result == (ord(ch) >= 48 and ord(ch) <= 57) {
+    return ord(ch) >= 48 and ord(ch) <= 57;
+};
+
+// 整个字符串是否全为 ASCII 数字
+def all_digits(s: String): Bool
+    requires len(s) > 0
+    ensures type_of(result) == "Bool" {
+    let mut i = 0;
+    while i < len(s) {
+        if not is_digit(substr(s, i, i + 1)) {
+            return false;
+        };
+        i = i + 1;
+    };
+    return true;
+};
+
+// 标识是否合法（不抛错，只回答 Bool）
+def is_valid_identifier(identifier: String): Bool
+    ensures type_of(result) == "Bool" {
+    let parts = split(identifier, "-");
+    if len(parts) != 3 {
+        return false;
+    };
+    if not starts_with(parts[0], "IFC") {
+        return false;
+    };
+    if len(parts[0]) <= 3 {
+        return false;
+    };
+    if len(parts[1]) == 0 {
+        return false;
+    };
+    if len(parts[2]) == 0 {
+        return false;
+    };
+    return all_digits(parts[2]);
+};
+
+// 解析为 Result：合法时返回 {class, kind, serial}，非法时返回 Err(原因)
+def parse(identifier: String): Result
+    requires len(identifier) > 0
+    ensures starts_with(type_of(result), "Result") {
+    if not is_valid_identifier(identifier) {
+        return Err("无效的 IFC 标识: " + identifier);
+    };
+    let parts = split(identifier, "-");
+    return Ok({"class": parts[0], "kind": parts[1], "serial": parts[2]});
+};
+
+// Result 是否为 Ok（用于在调用侧快速分支）
+def ok_q(r: Result): Bool
+    ensures type_of(result) == "Bool" {
+    match r {
+        Ok(v) => {
+            return true;
+        },
+        Err(e) => {
+            return false;
+        },
+    };
+};
+
+// 取数字序号；调用前必须保证标识合法
+def serial_number(identifier: String): Int
+    requires is_valid_identifier(identifier)
+    ensures result >= 0 {
+    let parts = split(identifier, "-");
+    return int(parts[2]);
+};
+
+// 取类名段（如 IFCWALL）
+def ifc_class(identifier: String): String
+    requires is_valid_identifier(identifier)
+    ensures starts_with(result, "IFC") {
+    return split(identifier, "-")[0];
+};
+
+// 规范化：类名大写、规格小写、序号保持
+def normalize(identifier: String): String
+    requires is_valid_identifier(identifier)
+    ensures starts_with(result, "IFC") {
+    let parts = split(identifier, "-");
+    return to_upper(parts[0]) + "-" + to_lower(parts[1]) + "-" + parts[2];
+};

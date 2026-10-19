@@ -1,0 +1,162 @@
+// std/property.intent — 属性测试库（Hypothesis 等价核心的最小确定性实现）
+//
+// 心学为体：属性是「意」的普遍形式——一次成立不算数，处处成立才算。
+// 禅道为翼：随机的表象之下必须有一颗确定的种子；可复现，方可信任。
+// 马哲为用：用最小反例把抽象的失败变成具体的证据。
+//
+// 设计约束（为什么不用内置 random()/randint）：
+//   内置随机数依赖 Python 的全局随机状态，解释器与 VM 两条执行路径会
+//   取到不同序列 → 差分测试 DIVERGE。本库自带 LCG（纯整数算术、显式
+//   种子），同一 seed 在任何执行路径上都得到同一序列。
+//
+// 公开 API：
+//   make_gen(seed)               → 生成器（带 next_int / next_between / next_list）
+//   for_all(gen, n, pred)        → 跑 n 次；失败返回失败样本，全过返回 null
+//   shrink_int(n)                → 更小的候选样本（失败用例最小化）
+//   find_minimal(gen, n, pred)   → 最小失败样本；全过返回 null
+
+// LCG 参数（glibc / Numerical Recipes 同族的经典取值）
+//   state' = (A * state + C) % M，M = 2^31 - 1（梅森素数，周期长且算术简单）
+def lcg_next(state: Int) -> Int
+    requires state >= 0
+    ensures result >= 0 and result < 2147483647
+{
+    return (1103515245 * state + 12345) % 2147483647;
+}
+
+// 生成器：状态显式保存在实例字段里（不碰任何全局随机源）
+class PropGen {
+    // seed 先归一到 [0, M)，保证状态始终落在 LCG 定义域内
+    def init(seed: Int) {
+        this.state = seed % 2147483647;
+    }
+
+    // 下一个原始随机整数——取模到 [0, 999]，让属性测试的样本可读、可复现
+    def next_int() -> Int
+        ensures result >= 0 and result <= 999
+    {
+        this.state = lcg_next(this.state);
+        return this.state % 1000;
+    }
+
+    // 指定闭区间 [lo, hi] 内的下一个整数
+    def next_between(lo: Int, hi: Int) -> Int
+        requires lo <= hi
+        ensures result >= lo and result <= hi
+    {
+        return lo + (this.next_int() % (hi - lo + 1));
+    }
+
+    // n 个 [0, 999] 的整数样本
+    def next_list(n: Int) -> List
+        requires n >= 0
+        ensures len(result) == n
+    {
+        return this.next_list_between(n, 0, 999);
+    }
+
+    // n 个 [lo, hi] 的整数样本（列表型属性的取样入口）
+    def next_list_between(n: Int, lo: Int, hi: Int) -> List
+        requires n >= 0
+        requires lo <= hi
+        ensures len(result) == n
+    {
+        let mut out = [];
+        let mut i = 0;
+        while i < n {
+            out = out + [this.next_between(lo, hi)];
+            i = i + 1;
+        }
+        return out;
+    }
+}
+
+// 用显式种子创建生成器。种子相同 → 序列完全相同。
+def make_gen(seed: Int)
+    requires seed >= 0
+{
+    return PropGen(seed);
+}
+
+// 属性检查：跑 n 次，pred 收到生成样本。
+//   全部通过 → null；一旦失败 → 立刻返回该失败样本（便于定位与最小化）。
+def for_all(gen, n: Int, pred)
+    requires n > 0
+{
+    let mut i = 0;
+    while i < n {
+        let x = gen.next_int();
+        if not pred(x) {
+            return x;
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
+// 失败样本的收缩候选：折半 + 减一（去重后严格小于 n）。
+//   0 → []（已无可收缩）；1 → [0]；2 → [1]；其余 → [n/2, n-1]
+def shrink_int(n: Int) -> List
+    requires n >= 0
+{
+    if n <= 0 {
+        return [];
+    }
+    let half = int(n / 2);
+    if half == 0 {
+        return [0];
+    }
+    if half == n - 1 {
+        return [half];
+    }
+    return [half, n - 1];
+}
+
+// 把单个失败样本反复收缩，直到所有候选都通过（局部最优 = 最小反例）
+def shrink_to_min(x: Int, pred) -> Int
+    requires x >= 0
+{
+    let mut cur = x;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let cands = shrink_int(cur);
+        let mut j = 0;
+        while j < len(cands) {
+            let c = cands[j];
+            if not pred(c) {
+                cur = c;
+                changed = true;
+                // 立即重开外层循环：新样本可能有新的收缩候选
+                j = len(cands);
+            } else {
+                j = j + 1;
+            }
+        }
+    }
+    return cur;
+}
+
+// 找最小失败样本：对所有失败样本分别收缩，取其中最小者。
+//   全部通过 → null；n 必须为正（否则「测零次」没有意义）。
+def find_minimal(gen, n: Int, pred)
+    requires n > 0
+{
+    let mut i = 0;
+    let mut best = null;
+    while i < n {
+        let x = gen.next_int();
+        if not pred(x) {
+            let m = shrink_to_min(x, pred);
+            if best == null {
+                best = m;
+            } else {
+                if m < best {
+                    best = m;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}

@@ -1,0 +1,44 @@
+// cli 包回归测试 —— 运行: python src/mini_intent.py --test packages/cli/test_cli.intent
+import cli;
+
+def test_is_flag() {
+    assert cli.is_flag("-v"), "单横线是 flag";
+    assert cli.is_flag("--verbose"), "双横线是 flag";
+    assert not cli.is_flag("build"), "普通词不是 flag";
+};
+
+def test_parse_subcommand_and_args() {
+    let parsed = cli.parse_args(["build", "main.intent", "extra.intent"]);
+    assert cli.command_of(parsed) == "build", "首个位置参数是子命令";
+    assert len(cli.args_of(parsed)) == 2, "其余位置参数保留";
+    assert cli.args_of(parsed)[0] == "main.intent", "位置参数顺序稳定";
+};
+
+def test_parse_flags() {
+    let parsed = cli.parse_args(["build", "main.intent", "--verbose", "-q"]);
+    assert cli.has_flag(parsed, "verbose"), "长 flag 去掉双横线";
+    assert cli.has_flag(parsed, "q"), "短 flag 去掉单横线";
+    assert not cli.has_flag(parsed, "v"), "未出现的 flag 不误报";
+    assert len(parsed["flags"]) == 2, "flag 总数为 2";
+};
+
+def test_validate_result() {
+    let ok_case = cli.validate(cli.parse_args(["build", "a.intent"]), ["build", "test"]);
+    match ok_case {
+        Ok(v) => {
+            assert v["command"] == "build", "合法子命令通过校验";
+        },
+        Err(e) => {
+            assert false, "不应失败: " + e;
+        },
+    };
+    let bad_case = cli.validate(cli.parse_args(["deploy"]), ["build", "test"]);
+    match bad_case {
+        Ok(v) => {
+            assert false, "未知子命令不应通过";
+        },
+        Err(e) => {
+            assert starts_with(e, "未知子命令"), "错误原因可读";
+        },
+    };
+};

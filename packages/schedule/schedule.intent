@@ -1,0 +1,81 @@
+// schedule —— BIM 领域：构件清单排序与分组统计
+// 构件用字典表示：{"id": "...", "type": "...", "floor": "...", "volume": N}
+// 纯内存计算，不读写文件。
+
+// 按字段聚合计数（field 支持 "type" / "floor"）
+def count_by(elements: List, field: String): Dict
+    requires field in ["type", "floor"]
+    ensures sum(values(result)) == len(elements) {
+    let out = {};
+    for e in elements {
+        let key = e[field];
+        if key in out {
+            out[key] = out[key] + 1;
+        } else {
+            out[key] = 1;
+        };
+    };
+    return out;
+};
+
+// 按体积降序排序（冒泡，稳定不依赖外部 sort key）
+def sort_by_volume(elements: List): List
+    requires len(elements) >= 0
+    ensures len(result) == len(elements) {
+    let out = [];
+    for e in elements {
+        push(out, e);
+    };
+    let n = len(out);
+    let mut i = 0;
+    while i < n {
+        let mut j = 0;
+        while j < n - 1 - i {
+            if out[j]["volume"] < out[j + 1]["volume"] {
+                let tmp = out[j];
+                out[j] = out[j + 1];
+                out[j + 1] = tmp;
+            };
+            j = j + 1;
+        };
+        i = i + 1;
+    };
+    return out;
+};
+
+// 只保留指定楼层的构件，保持原顺序
+def filter_by_floor(elements: List, floor: String): List
+    requires floor != ""
+    ensures len(result) <= len(elements) {
+    let out = [];
+    for e in elements {
+        if e["floor"] == floor {
+            push(out, e);
+        };
+    };
+    return out;
+};
+
+// 全部构件体积之和
+def total_volume(elements: List): Int
+    requires len(elements) >= 0
+    ensures result >= 0 {
+    let mut total = 0;
+    for e in elements {
+        total = total + e["volume"];
+    };
+    return total;
+};
+
+// 按楼层汇总为可读行：["L1: 2", "L2: 2"]
+def summary(elements: List): List
+    requires len(elements) >= 0
+    ensures len(result) <= len(elements) {
+    let counts = count_by(elements, "floor");
+    let order = keys(counts);
+    let out = [];
+    for floor in order {
+        push(out, floor + ": " + str(counts[floor]));
+    };
+    return out;
+};

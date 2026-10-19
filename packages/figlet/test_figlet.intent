@@ -1,0 +1,46 @@
+// figlet 包回归测试 —— 运行: python src/mini_intent.py --test packages/figlet/test_figlet.intent
+import figlet;
+
+def test_glyph_shape() {
+    let g = figlet.glyph("A");
+    assert len(g) == 5, "字模固定 5 行";
+    let mut i = 0;
+    while i < 5 {
+        assert len(g[i]) == 5, "每行固定 5 列";
+        i = i + 1;
+    };
+    assert g[0] == " ### ", "A 顶行形状";
+    assert g[2] == "#####", "A 中横";
+};
+
+def test_render_width() {
+    let rows = figlet.render("AB");
+    assert len(rows) == 5, "渲染结果 5 行";
+    assert len(rows[0]) == 10, "两个字符宽 10 列";
+    assert len(rows[4]) == 10, "末行同样对齐";
+    assert figlet.width("ABE") == 15, "width 与字符数一致";
+};
+
+def test_banner_is_five_lines() {
+    let text = figlet.banner("A");
+    let lines = split(text, "\n");
+    assert len(lines) == 5, "横幅由 5 行组成";
+    assert lines[2] == "#####", "第三行保留 A 的中横";
+};
+
+def test_supported_and_placeholder() {
+    assert figlet.is_supported("A"), "A 已收录";
+    assert figlet.is_supported(" "), "空格已收录";
+    assert not figlet.is_supported("Z"), "Z 未收录";
+    let box = figlet.glyph("Z");
+    assert box[0] == "#####", "未收录字符用方框占位";
+    assert len(box) == 5, "占位字模尺寸一致";
+};
+
+def test_space_row_is_blank() {
+    let rows = figlet.render(" ");
+    assert rows[0] == "     ", "空格渲染为 5 个空格";
+    let lines = split(figlet.banner(" "), "\n");
+    assert len(lines) == 5, "空格横幅仍是 5 行";
+    assert replace(lines[4], " ", "") == "", "末行没有可见像素";
+};

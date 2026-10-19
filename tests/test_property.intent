@@ -1,0 +1,197 @@
+// 属性测试（Q3a/Q3b）— std.property 的确定性回归
+//
+// 判定哲学：属性测试的价值在于「可复现」——种子固定，样本序列与最小
+//           反例都必须逐位一致。任何依赖时间/全局随机/文件系统的写法
+//           都会让解释器与 VM 产生不同输出（DIVERGE），故全部禁止。
+//
+// 覆盖：LCG 确定性 / 样本边界 / for_all 通过+失败 / 收缩 / 最小反例 /
+//       排序·反转·交换律·绝对值 四类不变式 / 契约违约。
+
+import std.property;
+
+// ── LCG：确定性与种子敏感性 ──
+
+def test_lcg_same_seed_same_sequence() {
+    let g1 = make_gen(12345);
+    let g2 = make_gen(12345);
+    let mut i = 0;
+    while i < 10 {
+        assert g1.next_int() == g2.next_int(), "同种子必须生成相同序列";
+        i = i + 1;
+    }
+};
+
+def test_lcg_different_seeds_differ() {
+    let g1 = make_gen(1);
+    let g2 = make_gen(2);
+    let mut same = 0;
+    let mut i = 0;
+    while i < 10 {
+        if g1.next_int() == g2.next_int() {
+            same = same + 1;
+        }
+        i = i + 1;
+    }
+    assert same < 10, "不同种子不应生成完全相同的序列";
+};
+
+def test_lcg_reference_vector() {
+    // 锁定算法本身：LCG(1) 的前两个状态是公开可复算的参考值
+    assert lcg_next(1) == 1103527590, "LCG 第一步与参考值一致";
+    assert lcg_next(1103527590) == 944465040, "LCG 第二步与参考值一致";
+};
+
+// ── 生成器：边界与列表取样 ──
+
+def test_next_int_bounds() {
+    let g = make_gen(7);
+    let mut i = 0;
+    while i < 200 {
+        let x = g.next_int();
+        assert x >= 0 and x <= 999, "next_int 落在 [0, 999]";
+        i = i + 1;
+    }
+};
+
+def test_next_between_bounds() {
+    let g = make_gen(99);
+    let mut i = 0;
+    while i < 200 {
+        let x = g.next_between(-50, 50);
+        assert x >= -50 and x <= 50, "next_between 遵守闭区间";
+        i = i + 1;
+    }
+};
+
+def test_next_list_deterministic_and_sized() {
+    let g1 = make_gen(2026);
+    let g2 = make_gen(2026);
+    let xs = g1.next_list(8);
+    let ys = g2.next_list(8);
+    assert len(xs) == 8, "next_list 长度等于 n";
+    assert xs == ys, "同种子的列表样本逐位相同";
+};
+
+// ── for_all：全过与失败 ──
+
+def test_for_all_all_pass_returns_null() {
+    let g = make_gen(3);
+    let r = for_all(g, 50, fn(x) { return x >= 0; });
+    assert r == null, "全部通过时 for_all 返回 null";
+};
+
+def test_for_all_returns_failing_sample() {
+    let g = make_gen(5);
+    let r = for_all(g, 100, fn(x) { return x < 10; });
+    assert r != null, "存在失败时必须返回样本而不是 null";
+    assert r >= 10, "返回的样本确实是反例";
+    assert (r < 10) == false, "反例不满足属性";
+};
+
+def test_for_all_requires_positive_n() {
+    let err = expect_error(fn() {
+        return for_all(make_gen(1), 0, fn(x) { return true; });
+    }, "ContractViolation");
+    assert err.type == "ContractViolation", "n=0 违反 requires n > 0";
+};
+
+// ── 收缩：候选必须更小且完整覆盖 ──
+
+def test_shrink_int_candidates() {
+    assert shrink_int(100) == [50, 99], "折半与减一两个候选";
+    assert shrink_int(2) == [1], "去重后只剩一个候选";
+    assert shrink_int(1) == [0], "1 收缩到 0";
+    assert shrink_int(0) == [], "0 已无可收缩";
+};
+
+def test_shrink_candidates_are_smaller() {
+    let mut n = 1;
+    while n <= 100 {
+        let cands = shrink_int(n);
+        let mut i = 0;
+        while i < len(cands) {
+            assert cands[i] < n, "每个收缩候选都严格小于原样本";
+            i = i + 1;
+        }
+        n = n + 1;
+    }
+};
+
+// ── find_minimal：最小反例 ──
+
+def test_find_minimal_returns_ten() {
+    // 生成范围 [0, 999]，属性 x < 10 → 最小反例恒为 10
+    let g = make_gen(1);
+    let m = find_minimal(g, 50, fn(x) { return x < 10; });
+    assert m == 10, "最小失败样本应为 10";
+};
+
+def test_find_minimal_null_when_all_pass() {
+    let g = make_gen(8);
+    let m = find_minimal(g, 30, fn(x) { return x <= 999; });
+    assert m == null, "没有失败样本时返回 null";
+};
+
+def test_find_minimal_requires_positive_n() {
+    let err = expect_error(fn() {
+        return find_minimal(make_gen(1), 0, fn(x) { return true; });
+    }, "ContractViolation");
+    assert err.type == "ContractViolation", "find_minimal 同样要求 n > 0";
+};
+
+// ── 属性不变式：排序 / 反转 / 交换律 / 绝对值 ──
+
+def test_property_sort_preserves_length() {
+    let g = make_gen(11);
+    let mut i = 0;
+    while i < 20 {
+        let xs = g.next_list(12);
+        assert len(sorted(xs)) == len(xs), "排序后长度不变";
+        i = i + 1;
+    }
+};
+
+def test_property_sort_is_ordered() {
+    let g = make_gen(12);
+    let mut i = 0;
+    while i < 20 {
+        let ys = sorted(g.next_list(12));
+        let mut j = 1;
+        while j < len(ys) {
+            assert ys[j - 1] <= ys[j], "排序结果非降";
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+};
+
+def test_property_reverse_twice_is_identity() {
+    let g = make_gen(13);
+    let mut i = 0;
+    while i < 20 {
+        let xs = g.next_list(10);
+        assert reversed(reversed(xs)) == xs, "反转两次等于原列表";
+        i = i + 1;
+    }
+};
+
+def test_property_addition_commutative_on_pairs() {
+    let g = make_gen(14);
+    let mut i = 0;
+    while i < 50 {
+        let a = g.next_between(-100, 100);
+        let b = g.next_between(-100, 100);
+        assert a + b == b + a, "整数加法交换律";
+        i = i + 1;
+    }
+};
+
+def test_property_abs_is_non_negative() {
+    let g = make_gen(15);
+    let mut i = 0;
+    while i < 50 {
+        let x = g.next_int() - 500;
+        assert abs(x) >= 0, "绝对值非负";
+        i = i + 1;
+    }
+};

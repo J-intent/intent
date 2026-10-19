@@ -1,0 +1,62 @@
+// figlet —— ASCII 大字横幅（5x5 点阵，支持 A-E 与空格）
+// 每个字符由 5 行、每行 5 列组成，用 '#' 与空格绘制。
+// 未收录字符用空心方框占位，保证输出尺寸稳定。
+
+// 取单个字符的 5 行点阵
+def glyph(ch: String): List
+    requires len(ch) == 1
+    ensures len(result) == 5
+    ensures len(result[0]) == 5 and len(result[4]) == 5 {
+    let font = {
+        "A": [" ### ", "#   #", "#####", "#   #", "#   #"],
+        "B": ["#### ", "#   #", "#### ", "#   #", "#### "],
+        "C": [" ####", "#    ", "#    ", "#    ", " ####"],
+        "D": ["#### ", "#   #", "#   #", "#   #", "#### "],
+        "E": ["#####", "#    ", "#### ", "#    ", "#####"],
+        " ": ["     ", "     ", "     ", "     ", "     "],
+    };
+    if ch in font {
+        return font[ch];
+    };
+    return ["#####", "#   #", "#   #", "#   #", "#####"];
+};
+
+// 该字符是否有专用字模
+def is_supported(ch: String): Bool
+    requires len(ch) == 1
+    ensures type_of(result) == "Bool" {
+    return ch == "A" or ch == "B" or ch == "C" or ch == "D" or ch == "E" or ch == " ";
+};
+
+// 把整段文本渲染成 5 行，每行宽度 = 5 * 字符数
+def render(text: String): List
+    requires len(text) > 0
+    ensures len(result) == 5
+    ensures len(result[0]) == 5 * len(text) {
+    let mut rows = ["", "", "", "", ""];
+    let mut i = 0;
+    while i < len(text) {
+        let g = glyph(substr(text, i, i + 1));
+        let mut r = 0;
+        while r < 5 {
+            rows[r] = rows[r] + g[r];
+            r = r + 1;
+        };
+        i = i + 1;
+    };
+    return rows;
+};
+
+// 用换行拼成可直接打印的横幅
+def banner(text: String): String
+    requires len(text) > 0
+    ensures len(split(result, "\n")) == 5 {
+    return join("\n", render(text));
+};
+
+// 横幅占用的列数（只对已收录字符精确）
+def width(text: String): Int
+    requires len(text) > 0
+    ensures result == 5 * len(text) {
+    return 5 * len(text);
+};

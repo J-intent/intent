@@ -1,0 +1,69 @@
+// logging —— 极简日志：级别过滤 + 单行格式化
+// 纯内存实现（日志收集到列表），不写文件、不依赖外部库。
+// 级别顺序: DEBUG(10) < INFO(20) < WARN(30) < ERROR(40)
+
+def level_value(name: String): Int
+    requires name in ["DEBUG", "INFO", "WARN", "ERROR"]
+    ensures result >= 10 and result <= 40 {
+    return match name {
+        "DEBUG" => 10,
+        "INFO" => 20,
+        "WARN" => 30,
+        _ => 40,
+    };
+};
+
+// 当前阈值下是否应输出该级别日志
+def should_log(threshold: Int, level: String): Bool
+    requires threshold >= 10 and threshold <= 40
+    requires level in ["DEBUG", "INFO", "WARN", "ERROR"]
+    ensures result == (match level {
+        "DEBUG" => 10,
+        "INFO" => 20,
+        "WARN" => 30,
+        _ => 40,
+    } >= threshold) {
+    return level_value(level) >= threshold;
+};
+
+// 单行格式: "[LEVEL] message"
+def format_line(level: String, message: String): String
+    requires level in ["DEBUG", "INFO", "WARN", "ERROR"]
+    requires message != ""
+    ensures starts_with(result, "[" + level + "]") {
+    return "[" + level + "] " + message;
+};
+
+// 把多行日志拼成一段文本
+def render(lines: List): String
+    requires len(lines) > 0
+    ensures len(split(result, "\n")) == len(lines) {
+    return join("\n", lines);
+};
+
+class Logger {
+    def init(threshold: Int) requires threshold >= 10 and threshold <= 40 {
+        this.threshold = threshold;
+        this.lines = [];
+    }
+
+    // 低于阈值直接丢弃，高于等于阈值则格式化入内存
+    def log(level: String, message: String)
+        requires level in ["DEBUG", "INFO", "WARN", "ERROR"]
+        requires message != "" {
+        if should_log(this.threshold, level) {
+            push(this.lines, format_line(level, message));
+        };
+    }
+
+    def count(): Int
+        ensures result == len(this.lines) {
+        return len(this.lines);
+    }
+
+    def text(): String
+        requires len(this.lines) > 0
+        ensures starts_with(result, "[") {
+        return render(this.lines);
+    }
+}

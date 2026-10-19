@@ -23,3 +23,18 @@ def test_multi_requires() {
     };
     assert clamp(5, 1, 10) == 5, "多条 requires 同时满足";
 };
+
+// E6 实测坑回归: ensures 里调用另一个带 ensures 的函数 —
+// 内层不得覆盖/删除全局 result（原实现外层会报 RuntimeError('result')）
+def _inner_double(x: Int): Int ensures result == x * 2 {
+    return x * 2;
+};
+
+def _outer_plus_one(x: Int): Int ensures result == _inner_double(x) + 1 {
+    return _inner_double(x) + 1;
+};
+
+def test_nested_ensures_call() {
+    assert _outer_plus_one(3) == 7, "嵌套 ensures 互不踩: 外层承诺按外层 result 验";
+    assert _inner_double(5) == 10, "内层 ensure 独立成立";
+};
