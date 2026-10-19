@@ -168,6 +168,7 @@ def name(params) [: ReturnType] [requires ...] [ensures ...] { body } ;
   - 实现：线程协作式协程（threadlet）——体跑独立线程，双队列握手；共享解释器状态在切换点按白名单保存/恢复（§6 限制表列边界）
 - 生成器委派（P1.5）：`yield from expr;`——可迭代对象的元素逐个转发（List/Dict 键/生成器源；生成器源 send 值透传）
 - 协程（A3a）：`async def f(...) {...}` + `await expr` + 内置 `run(coro)`——**调用即惰性**，返回 `<coroutine>`（体一行不跑）；`await` 求值出内层协程后挂起当前协程，`run` 以蹦床递归驱动内层、把结果送回避挂起点。`async`/`await` 均为**软关键字**（后随 `def` / 表达式起点时才取得关键字地位，作标识符不受影响）；支持类内 async 方法；async 函数无显式 `return` 时结果为 `None`（对齐 Python）。底层复用 S3 threadlet（协程线程 + 双队列），暂无事件循环与并发调度（A3b）
+- 结构化类型（L2）：`protocol Name { def m(args) -> Ret; ... }` 声明方法名集合（`protocol` 为软关键字）；运行时 `implements(obj, proto)` 沿继承链查方法存在性（能力即身份，不要求声明关系）、`protocol_methods(proto)` 返回方法名清单；静态侧 `--types` 对标注为协议的位置做结构子类型检查（类方法集 ⊇ 协议方法集，继承链算数）
 
 **契约**（一等公民，Intent 的身份证）：
 ```intent
@@ -478,13 +479,13 @@ let text = json.dumps({"a": 1});    // import python.json 后
 
 ## 4. 标准库
 
-### 4.1 内置函数（164，`_setup_builtins` mini_intent.py:4305）
+### 4.1 内置函数（166，`_setup_builtins` mini_intent.py:4305）
 
 | 类别 | 函数（签名） |
 |---|---|
 | 输出断言 | `print(...)` `assert(cond, msg)` |
 | 集合 | `len(x)` `keys(d)` `values(d)` `push(l, v)` `pop(l)` `insert(l, i, v)` `remove_at(l, i)` `enumerate(l)` `zip(a, b)` `range(...)` `reversed(x)` `sorted(x)` `any(l)` `all(l)` `contains(x, v)` |
-| 协议（X3） | `next(it)`（迭代器下一元素，耗尽返回 `None`） `repr(x)`（调试表示，实例走 `__repr__`） `run(coro)`（A3a 驱动协程至完成，返回其返回值） |
+| 协议（X3） | `next(it)`（迭代器下一元素，耗尽返回 `None`） `repr(x)`（调试表示，实例走 `__repr__`） `run(coro)`（A3a 驱动协程至完成，返回其返回值） `implements(obj, proto)`（L2 结构化符合性，能力即身份） `protocol_methods(proto)`（L2 方法名清单） |
 | 缓存诊断（M2） | `cache_stats()`（`[命中, 未命中]`） `cache_reset()`（清零，微基准/测试的确定性起点） |
 | 反射（X2） | `getattr(obj, name)` `setattr(obj, name, v)` `hasattr(obj, name)` `dir(obj)`（字段+方法含继承链，排序） `callable(x)`（函数/类/FFI/桥/mock/有 `__call__` 的实例） |
 | 类型转换 | `int(x)` `float(x)` `str(x)` `bool(x)` `type_of(x)` `type(x)` |
@@ -661,6 +662,7 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 29 | `.intentp` 入口点只支持「脚本文件」级（`[scripts] cmd = "x.intent"`），`模块:函数` 级入口未做；`.bat` 启动器按系统 ANSI 编码写（cmd.exe 代码页限制），解释器路径嵌入为安装时的 `sys.executable` | P4 已知边界（2026-10-19）；`:func` 入口与跨机可迁移启动器（路径重定位）留后续 |
 | 30 | C 扩展 SDK（ABI v1）只支持 `long long` 整数、元数 1-2；浮点/字符串/结构体/回调映射未做。GC 钩子 = 原生模块弱引用生命周期登记（加载登记/卸载注销，`live_native_modules` 可观测），不是让 C 代码持有/释放 Intent 值的对象模型。本机无 C 编译器——`selftest.py` 自动检测：有编译器则编译 example.c 验真 DLL，无则用 ctypes 回调表验证同一 ABI（输出明示"C 编译路径未验证"） | I3a/I3b 已知边界（2026-10-19）；ABI 与 GC 钩子已端到端验证，编译产物待有编译器的机器复验 |
 | 31 | 调试器增强（EX4）未做远程调试；非 TTY stdin 时命令循环直接放行（不读命令）；条件表达式求值失败按无条件命中处理（显式打印原因） | EX4 已知边界（2026-10-19）；远程调试（socket 附加）留后续 |
+| 32 | 结构化类型（L2）只比方法名，不比参数/返回签名；嵌套 protocol（protocol 内嵌 protocol）不查；运行时鸭子类型缺方法在**调用时**才炸（NameError），`implements` 只是显式检查口 | L2 已知边界（2026-10-19）；签名一致性与递归结构留完整版 |
 
 ---
 
@@ -675,4 +677,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.23.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.24.0：EX4 调试器增强 + I3a C 扩展 SDK——§5 CLI、§6 限制 30-31；此前 v2.23.0 P3b 签名 + P4 分发）*
+*规范版本 v1.24.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.25.0：L2 结构化类型（Protocol）——§3.2 协议语义、§4.1 内置 166（+implements/protocol_methods）、§6 限制 32；此前 v2.24.x EX4 + I3a/b）*

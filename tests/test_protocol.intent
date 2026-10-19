@@ -1,0 +1,124 @@
+// L2 结构化类型回归测试 — Protocol 显式接口 + 鸭子类型
+// 语义: protocol 声明方法名集合；implements(obj, proto) 沿继承链查方法存在性。
+//      「能力即身份」—— 不要求声明 implements 关系（鸭子类型）。
+// 静态侧（--types）由 tools/typecheck_selftest.py 的协议用例覆盖；
+// 本文件测运行时机制。
+// 边界（spec §6 限制 32）：只比方法名，不比参数/返回签名；嵌套 protocol 不查。
+
+protocol Drawable {
+    def draw() -> String;
+}
+
+protocol Sized {
+    def width() -> Int;
+    def height() -> Int;
+}
+
+class Circle {
+    def init(r: Int) {
+        this.r = r;
+    }
+    def draw() -> String {
+        return "circle";
+    }
+}
+
+class Rect {
+    def init(w: Int, h: Int) {
+        this.w = w;
+        this.h = h;
+    }
+    def draw() -> String {
+        return "rect";
+    }
+    def width() -> Int {
+        return this.w;
+    }
+}
+
+class Blob {
+    def init() {
+        this.v = 0;
+    }
+    def paint() -> String {
+        return "blob";
+    }
+}
+
+class BaseShape {
+    def draw() -> String {
+        return "base";
+    }
+}
+
+class ChildShape < BaseShape {
+    def init() {}
+}
+
+// 鸭子类型: 函数不声明协议也能调用 —— 运行时只看有没有这个方法
+def paint_anything(x) -> String {
+    return x.draw() + "!";
+}
+
+// ── 测试 ──
+
+def test_protocol_conforming_class() {
+    let c = Circle(3);
+    assert implements(c, Drawable), "有 draw 方法即符合 Drawable";
+    assert implements(c, Drawable) == true, "返回值是 Bool";
+};
+
+def test_protocol_missing_method() {
+    let b = Blob();
+    assert !implements(b, Drawable), "缺 draw 方法不符合 Drawable";
+};
+
+def test_protocol_multi_method() {
+    let r = Rect(4, 5);
+    assert !implements(r, Sized), "Sized 要 width+height, Rect 只有 width";
+    assert implements(r, Drawable), "Rect 的 draw 符合 Drawable";
+    let c = Circle(1);
+    assert !implements(c, Sized), "Circle 缺 width/height";
+};
+
+def test_protocol_inheritance_chain() {
+    let ch = ChildShape();
+    assert implements(ch, Drawable), "继承链上的 draw 算数(方法集含父类)";
+};
+
+def test_protocol_class_object() {
+    assert implements(Circle, Drawable), "类对象本身也可做能力检查";
+    assert !implements(Blob, Drawable), "Blob 类对象缺 draw";
+};
+
+def test_protocol_non_instance_values() {
+    assert !implements(42, Drawable), "标量没有方法 → 不符合";
+    assert !implements("text", Drawable), "字符串没有 draw → 不符合";
+};
+
+def test_protocol_methods_reflection() {
+    let ms = protocol_methods(Sized);
+    assert len(ms) == 2, "Sized 有 2 个方法";
+    assert ms[0] == "width" and ms[1] == "height", "方法名按声明序";
+};
+
+def test_protocol_duck_typing_runtime() {
+    assert paint_anything(Circle(1)) == "circle!", "鸭子类型: 不声明也能用";
+    // 缺方法的类在真正调用时才炸 —— 运行时鸭子类型的诚实边界
+    let err = expect_error(fn() {
+        return paint_anything(Blob());
+    }, "NameError");
+    assert err.type == "NameError", "缺 draw 的类调用时报错, 不静默";
+};
+
+def test_protocol_bad_arg() {
+    let err = expect_error(fn() {
+        return implements(42, 7);
+    }, "TypeError");
+    assert err.type == "TypeError", "第二个参数必须是 protocol";
+};
+
+def test_protocol_str() {
+    // 值语义: str/repr 走 value(协议名) — 与其它 RuntimeValue 一致
+    assert str(Drawable) == "Drawable", "protocol 值字符串化为协议名";
+};

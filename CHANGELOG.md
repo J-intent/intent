@@ -4,6 +4,27 @@
 
 ---
 
+## v2.25.0 — L2 结构化类型：Protocol + 鸭子类型静态化（2026-10-19）
+
+> 类型线开打。结构化类型不问「你是谁家的孩子」（继承声明），
+> 只问「你会做什么」（方法集）——鸭子类型的静态化。
+> 运行时 `implements` 是检查口，`--types` 在标注处当场拦截。
+> 版本 2.24.1 → 2.25.0。
+
+**L2 结构化类型**（tests/test_protocol.intent 10 测试 + typecheck 4 用例）
+
+- 语法：`protocol Name { def m1() -> T; def m2(...); }`——`protocol` 为**软关键字**（identifier + 「名字 + `{`」才生效，作变量名不受影响）；AST 新节点 `ProtocolDef`（只记方法名，签名一致性留完整版）
+- 运行时：`ProtocolValue` 登记方法名集合；`implements(obj, proto)` 沿继承链查方法存在性（实例/类对象均可用，标量→false）；`protocol_methods(proto)` 出方法名清单（诊断用）；非 protocol 参数显式抛 TypeError
+- **静态侧（--types）**：`TypeChecker` 预收集 protocol 方法集与 class 方法集（继承链两遍收敛）；`_infer_call` 对类构造返回类名；`_compatible_one` 遇协议标注做结构子类型检查（`类方法集 ⊇ 协议方法集`）——缺方法在标注处/实参处当场报错，未知实际类型仍按「推断处放过」原则信任
+- 测试：运行时 10/10（符合/缺方法/多方法/继承链/类对象/标量/反射/鸭子类型/错误参数/字符串化）；--types 新增 4 用例（覆盖通过/缺方法报错/继承链算数/实参传递报错），typecheck_selftest 25/25
+- 边界（诚实清单）：只比方法名不比签名；嵌套 protocol 不查；运行时鸭子类型缺方法仍在调用时炸（NameError），`implements` 只是显式检查口（spec §6 限制 32）
+
+**质量门**：--test **333/334 过 0 败 1 跳**（323→333，+10）；vm_diff **77/77 一致**（新测试文件自动纳入）；--check 过；typecheck_selftest 25/25；spec v1.24.0（§3.2 协议语义、§4.1 内置 166、§6 限制 32）。
+
+**LangForge**：75/89（84%），关键路径已通，剩余旁路 14（类型 L3/L4/L5、A3b、M3a-c、I2b1/2、Q3a/b、E6）。
+
+---
+
 ## v2.24.1 — I3b C 扩展 GC 钩子 + 判定防真空第三例（2026-10-19）
 
 > 自己的判定自己咬：I3b 的 `contains ["gc"]` 被输出里 **"gcc"** 的三个字母

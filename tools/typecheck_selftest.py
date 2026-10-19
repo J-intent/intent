@@ -59,6 +59,25 @@ CASES = [
     ("正确实参传递",
      'def add(a: Int, b: Int) -> Int { return a + b; }\n'
      'def main() { let s = add(1, 2); return 0; }', 0),
+    # ---- L2 结构化类型: 协议符合性(方法集覆盖) ----
+    ("协议: 方法集覆盖通过",
+     'protocol Drawable { def draw() -> String; }\n'
+     'class Circle {\n def init() {}\n def draw() -> String { return "c"; }\n}\n'
+     'def main() { let d: Drawable = Circle(); return 0; }', 0),
+    ("协议: 缺方法应报错",
+     'protocol Drawable { def draw() -> String; }\n'
+     'class Blob {\n def init() {}\n def paint() -> String { return "b"; }\n}\n'
+     'def main() { let d: Drawable = Blob(); return 0; }', 1),
+    ("协议: 继承链方法算数",
+     'protocol Drawable { def draw() -> String; }\n'
+     'class Base {\n def draw() -> String { return "b"; }\n}\n'
+     'class Sub < Base {\n def init() {}\n}\n'
+     'def main() { let d: Drawable = Sub(); return 0; }', 0),
+    ("协议: 实参传递缺方法报错",
+     'protocol Drawable { def draw() -> String; }\n'
+     'class Blob {\n def paint() -> String { return "b"; }\n}\n'
+     'def render(d: Drawable) -> String { return d.draw(); }\n'
+     'def main() { let r = render(Blob()); return 0; }', 1),
 ]
 
 

@@ -696,6 +696,20 @@ class TypeAliasStmt(ASTNode):
     name: str = ""
     aliased_type: str = ""
     line: int = 0
+
+
+@dataclass
+class ProtocolDef(ASTNode):
+    """L2 结构化接口声明 — protocol Name { def m(args) -> Ret; ... }
+
+    结构化类型: 不靠继承声明「我是什么」，只靠方法集合证明「我能做什么」
+    (鸭子类型的静态化)。最小切片只记方法名 — 参数/返回签名的一致性
+    检查留完整版(spec §6 限制 32)。
+    """
+    name: str = ""
+    method_names: List[str] = field(default_factory=list)
+    line: int = 0
+    column: int = 0
     column: int = 0
 
 @dataclass
@@ -1503,6 +1517,17 @@ class Parser:
                 return self.parse_type_alias()
             self.pos = saved_pos
 
+        # L2: protocol 声明 — 软关键字(identifier protocol 后随 IDENT + '{')
+        if self.match(TokenType.IDENTIFIER, 'protocol'):
+            saved_pos = self.pos
+            self.advance()
+            if (self.match(TokenType.IDENTIFIER)
+                    and self.pos + 1 < len(self.tokens)
+                    and self.tokens[self.pos + 1].type == TokenType.SYMBOL
+                    and self.tokens[self.pos + 1].value == '{'):
+                return self.parse_protocol_def()
+            self.pos = saved_pos
+
         # defer 语句
         if self.match(TokenType.KEYWORD, 'defer'):
             token = self.current_token
@@ -1717,6 +1742,53 @@ class Parser:
         self.expect(TokenType.SYMBOL, ';')
         return TypeAliasStmt(name=name, aliased_type=aliased,
                              line=start_token.line, column=start_token.column)
+
+    def parse_protocol_def(self) -> 'ProtocolDef':
+        """L2: protocol Name { def m(args) -> Ret; ... } — 结构化接口
+
+        调用时 current token 已是协议名(软关键字分支已跳过 protocol)。
+        方法签名只取方法名: 结构化检查看「有没有这个方法」;
+        参数/返回签名一致性留完整版(spec §6 限制 32)。
+        """
+        start_token = self.current_token
+        name = self.expect(TokenType.IDENTIFIER).value
+        proto = ProtocolDef(name=name, line=start_token.line,
+                            column=start_token.column)
+        while self.match(TokenType.NEWLINE):
+            self.advance()
+        self.expect(TokenType.SYMBOL, '{')
+        while not self.match(TokenType.SYMBOL, '}') and not self.match(TokenType.EOF):
+            if self.match(TokenType.NEWLINE) or self.match(TokenType.SYMBOL, ';'):
+                self.advance()
+                continue
+            if self.match(TokenType.KEYWORD, 'def'):
+                self.advance()
+                proto.method_names.append(
+                    self.expect(TokenType.IDENTIFIER).value)
+                # 跳过形参列表与可选返回标注, 到 ';' 或 '}' 为止
+                depth = 0
+                while not self.match(TokenType.EOF):
+                    tok = self.current_token
+                    if tok.type == TokenType.SYMBOL and tok.value == '(':
+                        depth += 1
+                        self.advance()
+                        continue
+                    if tok.type == TokenType.SYMBOL and tok.value == ')':
+                        depth = max(0, depth - 1)
+                        self.advance()
+                        continue
+                    if (depth == 0 and tok.type == TokenType.SYMBOL
+                            and tok.value in (';', '}')):
+                        break
+                    self.advance()
+                if self.match(TokenType.SYMBOL, ';'):
+                    self.advance()
+                continue
+            self.error(self.current_token,
+                       "protocol 内只允许方法签名 def m(...) [-> T];")
+            self.advance()
+        self.expect(TokenType.SYMBOL, '}')
+        return proto
 
     def parse_with_stmt(self) -> 'WithStmt':
         """解析 with 语句(P1.1): with expr [as name] { body }"""
@@ -5003,6 +5075,26 @@ class ClassValue(RuntimeValue):
 
 
 @dataclass
+class ProtocolValue(RuntimeValue):
+    """L2: 结构化接口值 — 方法名集合 + 运行时符合性检查
+
+    `implements(obj, proto)` 沿继承链查方法存在性；
+    不要求声明 implements 关系 — 能力即身份（鸭子类型）。
+    """
+
+    def __init__(self, name: str, method_names: list):
+        super().__init__(StringType(), name)
+        self.name = name
+        self.method_names = list(method_names)
+        # 覆盖实例方法 __str__ 的常规路径: 显式返回便于打印
+    def __str__(self):
+        return f"<protocol {self.name}({', '.join(self.method_names)})>"
+
+    def copy(self):
+        return self
+
+
+@dataclass
 class InstanceValue(RuntimeValue):
     """类实例 - 持有字段和方法表的对象"""
     klass: ClassValue = None
@@ -5518,6 +5610,8 @@ class Interpreter:
             'zip': self._builtin_zip,
             'range': self._builtin_range,
             'run': self._builtin_run,
+            'implements': self._builtin_implements,
+            'protocol_methods': self._builtin_protocol_methods,
             'abs': self._builtin_abs,
             'min': self._builtin_min,
             'max': self._builtin_max,
@@ -5963,6 +6057,36 @@ class Interpreter:
                 continue
             raise TypeError(
                 f"async 函数只能 await 协程, 交出了 {getattr(v, 'get_type', lambda: type(v))()}")
+
+    def _builtin_implements(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """L2: implements(obj, proto) — 结构化符合性检查（能力即身份）
+
+        实例沿继承链查方法存在性；类对象查自身方法表；
+        其他值（无方法的标量）→ false。协议参数类型错误显式抛 TypeError。
+        """
+        if len(args) != 2:
+            raise TypeError("implements() 期望2个参数(obj, protocol)")
+        obj, proto = args
+        if not isinstance(proto, ProtocolValue):
+            raise TypeError(
+                f"implements() 第二个参数必须是 protocol, 得到 {proto.get_type()}")
+        needed = proto.method_names
+        if isinstance(obj, InstanceValue):
+            klass = obj.klass
+            ok = all(klass is not None and klass.find_method(m) is not None
+                     for m in needed)
+            return BoolValue(ok)
+        if isinstance(obj, ClassValue):
+            return BoolValue(all(obj.find_method(m) is not None
+                                 for m in needed))
+        return BoolValue(False)
+
+    def _builtin_protocol_methods(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """L2: protocol_methods(proto) — 方法名清单（诊断用）"""
+        if len(args) != 1 or not isinstance(args[0], ProtocolValue):
+            raise TypeError("protocol_methods() 期望1个 protocol 参数")
+        return ListValue([StringValue(m) for m in args[0].method_names],
+                         StringType())
 
     def _builtin_range(self, args: List[RuntimeValue]) -> RuntimeValue:
         """内置range函数:生成整数序列"""
@@ -7815,6 +7939,12 @@ class Interpreter:
             return self.execute_class_decl(stmt)
         elif isinstance(stmt, EnumDef):
             return self.execute_enum_def(stmt)
+        elif isinstance(stmt, ProtocolDef):
+            # L2: 结构化接口声明 — 登记 ProtocolValue(方法名集合)
+            proto = ProtocolValue(stmt.name, stmt.method_names)
+            self.current_scope.declare(stmt.name, proto, False,
+                                       allow_redefine=True)
+            return proto
         elif isinstance(stmt, AssertStmt):
             return self.execute_assert(stmt)
         elif isinstance(stmt, FunctionDef):
@@ -12031,6 +12161,32 @@ class TypeChecker:
         for stmt in ast.statements:
             if isinstance(stmt, TypeAliasStmt):
                 self.aliases[stmt.name] = stmt.aliased_type
+        # L2: 预收集协议方法集与类方法集（结构化类型检查的依据）
+        self.protocols: Dict[str, set] = {}
+        self.classes: Dict[str, set] = {}
+        self._collect_structural(ast)
+
+    def _collect_structural(self, ast: 'Program') -> None:
+        """收集 protocol 方法名与 class 方法名（含继承链）"""
+        class_defs: Dict[str, Any] = {}
+        for stmt in ast.statements:
+            if isinstance(stmt, ProtocolDef):
+                self.protocols[stmt.name] = set(stmt.method_names)
+            elif isinstance(stmt, ClassStmt):
+                class_defs[stmt.name] = stmt
+        # 方法集按继承链解析（父类可能后声明 — 两遍收敛）
+        for _ in range(len(class_defs) + 1):
+            changed = False
+            for name, stmt in class_defs.items():
+                methods = {m.name for m in stmt.methods}
+                sup = getattr(stmt, 'superclass', None)
+                if sup and sup in self.classes:
+                    methods |= self.classes[sup]
+                if self.classes.get(name) != methods:
+                    self.classes[name] = methods
+                    changed = True
+            if not changed:
+                break
 
     # ---------- 类型解析与兼容 ----------
 
@@ -12069,6 +12225,14 @@ class TypeChecker:
         # 数值互通(spec §2.1): Int <-> Float 双向宽松
         if declared in _NUMERIC_TYPES and actual in _NUMERIC_TYPES:
             return True
+        # L2: 结构化子类型 — 协议看「方法集是否覆盖」
+        if declared in self.protocols:
+            needed = self.protocols[declared]
+            if actual in self.classes:
+                return needed <= self.classes[actual]
+            if actual in self.protocols:
+                return needed <= self.protocols[actual]
+            return True  # 实际类型未知/非类 → 显式信任（推断处放过原则）
         # 容器/泛型: 只查基类(最小切片不查元素类型)
         return _base_type(declared) == _base_type(actual)
 
@@ -12141,6 +12305,9 @@ class TypeChecker:
         if '.' not in name and name in self.ast.functions:
             target = self.ast.functions[name]
             return target.return_type if target.return_type else None
+        # L2: 类构造调用 → 类型即类名（结构化检查的 actual 来源）
+        if name in self.classes:
+            return name
         return None
 
     # ---------- 表达式检查(实参 vs 形参标注) ----------
