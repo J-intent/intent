@@ -1,8 +1,10 @@
-// 装饰器回归测试（X1 最小切片）— @deco 语法 + functools 系(compose/memoize)
-// 机制基线: parser 收集装饰器名 + execute_program 应用 dec_func(fv) 本已就绪;
-// 本切片补 functools 家族与行为锁定。
-// 已知边界(完整 X1 剩余): 带参装饰器 @deco(1,2) / 函数体内的装饰器不应用 /
-//   wraps / partial / lru 淘汰。
+// 装饰器回归测试（X1 切片）— @deco / @deco(args) + functools 系
+// 机制基线: parser _parse_decorators 收集声明 +
+//   execute_program/execute_statement 应用 dec_func(fv) — 自外向内;
+//   带参形态先求值 deco(args...) 出真装饰器; 语句级(函数体内)def 同样生效。
+// 完整 X1 剩余(已 note 断点): wraps(需函数元数据内省, X2)、
+//   partial(需 *args 变长形参, 语言级)、模块导入装饰器的提升期时序
+//   (import 早于提升期应用 — 需「def 即语句执行」改造, spec §6 限制 21)。
 
 import std.functools;
 
@@ -115,4 +117,145 @@ def test_memoize_decorated_form_local() {
 def test_compose() {
     let f = compose(inc_fn, dbl);
     assert f(5) == 11, "compose(inc, dbl)(5) = inc(dbl(5)) = 11(右先生效)";
+};
+
+// ── X1 二批: 带参装饰器 + 语句级装饰器 + lru_cache ──
+
+let mut fire_log = [];
+
+// 带参装饰器工厂: 内层函数重复调用 times 次(返回 null, 副作用记账)
+def repeat(times) {
+    return fn(f) {
+        return fn(x) {
+            let mut i = 0;
+            while i < times {
+                f(x);
+                i = i + 1;
+            };
+            return null;
+        };
+    };
+}
+
+@repeat(3)
+def fire(n: Int) -> Int {
+    push(fire_log, n);
+    return n;
+};
+
+// 带标签记账工厂: 裸形态 @tag 下 label 未绑定 — 调用即错,
+// 以此锁定 @tag("x") 必须走 is_call 求值路径
+def tag(label) {
+    return fn(f) {
+        return fn(x) {
+            push(call_log, label);
+            return f(x);
+        };
+    };
+}
+
+@tag("tagged")
+def tagged(n: Int) -> Int {
+    return n * 3;
+};
+
+// 带参+裸装饰栈序: 应用顺序 = 声明顺序(自上而下), 先应用者居内 —
+// 即末位(@logged)最外, repeat(2) 居内; 与 Python 的首位最外相反(锁定现状)
+@logged
+@repeat(2)
+def twice(n: Int) -> Int {
+    return n * n;
+};
+
+// 零参调用形态 @setup(): 工厂无外部依赖, 返回值即真装饰器
+// (裸形态 @setup 下 zfn(1) 返回的是内层 lambda 而非 101 — 行为即锁定)
+def setup() {
+    return fn(f) {
+        return fn(x) {
+            return f(x) + 100;
+        };
+    };
+}
+
+@setup()
+def zfn(n: Int) -> Int {
+    return n;
+};
+
+def test_param_decorator_factory() {
+    let mut before = len(fire_log);
+    fire(7);
+    assert len(fire_log) == before + 3, "@repeat(3): 内层被调用三次";
+};
+
+def test_param_decorator_label() {
+    let mut before = len(call_log);
+    assert tagged(5) == 15, "带参装饰器不改变内层语义";
+    assert len(call_log) == before + 1, "工厂求值出的包装器记账一次";
+    assert call_log[len(call_log) - 1] == "tagged", "参数透传进装饰器闭包";
+};
+
+def test_param_decorator_zero_args() {
+    assert zfn(1) == 101, "零参调用形态: setup() 的返回值即真装饰器(裸形态下返回的是 lambda)";
+};
+
+def test_param_decorator_stacked() {
+    // @logged @repeat(2): 末位最外 — repeat(2) 驱动内层 logged 记 2 条
+    let mut before = len(call_log);
+    twice(5);
+    assert len(call_log) == before + 2, "带参+裸装饰栈序: 外层 repeat(2) 驱动内层 logged 两次";
+};
+
+def test_statement_level_decorator() {
+    // 函数体内(语句级)def 的装饰器 — 执行时机在 let 之后,
+    // 闭包变量对装饰器工厂可见(提升期时序限制不适用于语句级)
+    let mut factory_calls = 0;
+    let mut hits = 0;
+    def make_adder(k) {
+        factory_calls = factory_calls + 1;
+        return fn(f) {
+            return fn(x) {
+                hits = hits + 1;
+                return f(x) + k;
+            };
+        };
+    };
+    def outer() -> Int {
+        @make_adder(10)
+        def inner(n: Int) -> Int {
+            return n + 1;
+        };
+        return inner(20);
+    };
+    assert outer() == 31, "函数体内带参装饰器: (20+1)+10 == 31";
+    assert factory_calls == 1, "工厂在装饰期恰调用一次";
+    assert hits == 1, "包装器恰被调用一次";
+};
+
+def test_lru_cache_eviction() {
+    // 真 LRU: 命中刷新访问序; 满容淘汰最久未访问
+    let mut calc = 0;
+    def counted(n: Int) -> Int {
+        calc = calc + 1;
+        return n * 10;
+    };
+    let cached = lru_cache(counted, 2);
+    assert cached(1) == 10, "首次计算";
+    assert cached(2) == 20, "第二键入序";
+    assert cached(1) == 10, "命中(1 的访问序刷新到序尾)";
+    assert calc == 2, "三次调用只算两次";
+    assert cached(3) == 30, "第三键 — 淘汰最久未访问的 2";
+    assert calc == 3, "触发一次新计算";
+    assert cached(2) == 20, "2 已淘汰 — 重算";
+    assert calc == 4, "淘汰后重算";
+    assert cached(1) == 10, "1 在 cached(2) 重算时已被淘汰 — 再重算";
+    assert calc == 5, "序头淘汰链正确";
+};
+
+def test_lru_cache_bad_cap() {
+    // cap < 1 显式失败 — 不静默降级
+    let err = expect_error(fn() {
+        return lru_cache(fn(x) { return x; }, 0);
+    }, "ValueError");
+    assert err.type == "ValueError", "cap=0 抛 ValueError";
 };

@@ -1,10 +1,13 @@
-// std/functools.intent — 函数工具（X1 装饰器最小切片的 functools 系）
+// std/functools.intent — 函数工具（X1 装饰器切片）
 //
-// 装饰器语法(@deco)与解释器应用机制本已就绪(parser 收集装饰器名 +
-// execute_program 应用 dec_func(fv)); 本模块补的是 functools 家族:
-//   compose / memoize — 纯 Intent, 无内置依赖
-// 完整 X1 剩余(已 note 断点): 带参装饰器 @deco(1,2)(parser 只存名字)、
-//   wraps(需函数元数据内省)、partial(需 *args 变长形参)、lru 淘汰策略。
+// 装饰器语法(@deco / @deco(args))与解释器应用机制:
+//   parser _parse_decorators 收集声明 + execute_program/execute_statement
+//   (VM 委托通道经此) 应用 dec_func(fv) — 自外向内; 带参形态先求值
+//   deco(args...) 出真装饰器。语句级(函数体内)def 的装饰器同样生效。
+// 本模块是 functools 家族: compose / memoize / lru_cache — 纯 Intent, 无内置依赖。
+// 完整 X1 剩余(已 note 断点): wraps(需函数元数据内省, X2)、
+//   partial(需 *args 变长形参, 语言级)、模块导入装饰器的提升期时序
+//   (import 早于提升期应用 — 需「def 即语句执行」改造, spec §6 限制 21)。
 
 // 组合: compose(f, g) → fn(x) { f(g(x)) } — 右先生效
 def compose(f, g) {
@@ -24,6 +27,57 @@ def memoize(f) {
         };
         let r = f(x);
         cache[x] = r;
+        return r;
+    };
+}
+
+// 有界记忆化(真 LRU): 容量满时淘汰最久未访问的键
+//   - 命中即刷新访问序(命中键移到序尾); 插入超容淘汰序头
+//   - Intent 字典无 delete — 刷新与淘汰都靠重建字典(闭包重绑定已实证)
+//   - 代价: 命中 O(cap) 重建 — cap 宜取小值(演示/教学级, 非高性能缓存)
+//   - cap < 1 显式报错(显式失败不静默)
+// 键限标量(Intent 字典键规范), 富键调用方自行编码
+def lru_cache(f, cap) {
+    if cap < 1 {
+        raise error("ValueError", "lru_cache() 期望 cap >= 1, 收到 " + str(cap));
+    };
+    let mut cache = {};
+    let mut order = [];   // 访问序: 越靠前越久未访问
+    return fn(x) {
+        if cache.has_key(x) {
+            // 命中: 重建字典把命中键移到序尾(访问序刷新)
+            let hit = cache[x];
+            let mut fresh = {};
+            let mut kept = [];
+            for i in range(0, len(order)) {
+                if order[i] != x {
+                    fresh[order[i]] = cache[order[i]];
+                    push(kept, order[i]);
+                };
+            };
+            fresh[x] = hit;
+            push(kept, x);
+            cache = fresh;
+            order = kept;
+            return hit;
+        };
+        let r = f(x);
+        if len(order) >= cap {
+            // 满容: 淘汰序头(最久未访问), 原样搬移其余键后追加新键
+            let mut fresh = {};
+            let mut kept = [];
+            for i in range(1, len(order)) {
+                fresh[order[i]] = cache[order[i]];
+                push(kept, order[i]);
+            };
+            fresh[x] = r;
+            push(kept, x);
+            cache = fresh;
+            order = kept;
+        } else {
+            cache[x] = r;
+            push(order, x);
+        };
         return r;
     };
 }

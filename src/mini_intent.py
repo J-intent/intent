@@ -492,6 +492,18 @@ class Program(ASTNode):
         self.functions[func.name] = func
 
 @dataclass
+class Decorator(ASTNode):
+    """X1: 装饰器声明 — @name(裸形态) 或 @name(args)(带参工厂形态)
+
+    裸形态: 装饰器本身即函数值, 应用为 dec(fn)
+    带参形态: deco(args...) 先求值出真装饰器, 再应用为 deco(args)(fn)
+    is_call 区分 @deco 与 @deco()(零参调用形态, 对齐 Python 语义)
+    """
+    name: str = ""
+    args: List['Expression'] = field(default_factory=list)
+    is_call: bool = False
+
+@dataclass
 class FunctionDef(ASTNode):
     """函数定义节点"""
     name: str = ""
@@ -505,7 +517,7 @@ class FunctionDef(ASTNode):
     is_pure: bool = False
     effects: List[str] = field(default_factory=list)
     is_generator: bool = False  # 包含 yield 则为 True
-    decorators: List[str] = field(default_factory=list)  # 装饰器名列表
+    decorators: List['Decorator'] = field(default_factory=list)  # 装饰器声明列表(@name 或 @name(args))
 
     def get_param_names(self) -> List[str]:
         return [name for name, _, _ in self.params]
@@ -902,15 +914,8 @@ class Parser:
                 continue
 
             try:
-                # 收集装饰器 (如 @log, @timed)
-                decorators = []
-                while self.match(TokenType.SYMBOL, '@'):
-                    self.advance()
-                    dec_name = self.expect(TokenType.IDENTIFIER).value
-                    decorators.append(dec_name)
-                    # 跳过行尾换行
-                    while self.match(TokenType.NEWLINE):
-                        self.advance()
+                # 收集装饰器 (如 @log, @timed, @repeat(3))
+                decorators = self._parse_decorators()
 
                 # 解析函数定义
                 if self.match(TokenType.KEYWORD, 'def'):
@@ -962,6 +967,38 @@ class Parser:
 
         self.expect(TokenType.SYMBOL, '}')
         return EnumDef(name=name, variants=variants)
+
+    def _parse_decorators(self) -> List['Decorator']:
+        """X1: 收集装饰器序列 @name / @name(args) — 顶层与语句级共用
+
+        每条装饰器后允许换行(@ 与 def 可分行书写);
+        带参形态的参数沿用 parse_call_expr 的括号约定(括号内可换行)。
+        """
+        decorators = []
+        while self.match(TokenType.SYMBOL, '@'):
+            at_token = self.current_token
+            self.advance()
+            dec_name = self.expect(TokenType.IDENTIFIER).value
+            dec = Decorator(name=dec_name, line=at_token.line,
+                            column=at_token.column)
+            # 带参形态: @deco(arg1, arg2)
+            if self.match(TokenType.SYMBOL, '('):
+                dec.is_call = True
+                self.advance()
+                if not self.match(TokenType.SYMBOL, ')'):
+                    self._skip_newlines()
+                    dec.args.append(self.parse_expression())
+                    while self.match(TokenType.SYMBOL, ','):
+                        self.advance()
+                        self._skip_newlines()
+                        dec.args.append(self.parse_expression())
+                self._skip_newlines()
+                self.expect(TokenType.SYMBOL, ')')
+            decorators.append(dec)
+            # 跳过行尾换行
+            while self.match(TokenType.NEWLINE):
+                self.advance()
+        return decorators
 
     def parse_function_def(self) -> FunctionDef:
         """解析函数定义"""
@@ -1215,6 +1252,19 @@ class Parser:
         if self.match(TokenType.SYMBOL, ';'):
             self.advance()
             return None
+
+        # 装饰器语句(X1 二批): @deco / @deco(args) 必须紧跟 def —
+        # 覆盖函数体内等语句级位置的 def(顶层走 program() 收集路径)
+        if self.match(TokenType.SYMBOL, '@'):
+            decorators = self._parse_decorators()
+            if not self.match(TokenType.KEYWORD, 'def'):
+                self.error(self.current_token, "装饰器 @ 必须紧跟函数定义")
+                self.synchronize()
+                return None
+            func = self.parse_function_def()
+            if func is not None:
+                func.decorators = decorators
+            return func
 
         # 变量声明
         if self.match(TokenType.KEYWORD, 'let') or self.match(TokenType.KEYWORD, 'var') or self.match(TokenType.KEYWORD, 'const'):
@@ -6550,29 +6600,45 @@ class Interpreter:
 
     def _apply_decorators(self, func: 'FunctionDef',
                           fv: 'FunctionValue') -> 'FunctionValue':
-        """X1: 应用装饰器栈 dec_func(fv), 自外向内; 返回包装后的函数值
+        """X1: 应用装饰器栈; 返回包装后的函数值
 
+        每条装饰器两形态:
+          @deco       — 裸形态: deco(fv)
+          @deco(args) — 带参工厂: deco(args...)(fv), 先求值出真装饰器
+        应用顺序 = 声明顺序(自上而下), 先应用者居内 — 末位装饰器最外
+        (与 Python 的首位最外相反; 既有行为, 测试锁定)。
         提升期(execute_program)与语句期(execute_statement FunctionDef,
         VM 委托通道经此)共用 — 两引擎行为一致的唯一挂点。
-        已知边界: 提升期早于顶层 import 执行, 模块导入的装饰器
-        (如 @memoize from std.functools)在提升期找不到 — 完整 X1
-        的「带参装饰器 + def 即语句执行」改造一并解决(已 note 断点)。
+        已知边界: 提升期早于顶层 import/let — 装饰器名或参数引用模块
+        符号/顶层变量时找不到(spec §6 限制 21); 语句级 def(函数体内)
+        执行时机在 import/let 之后, 不受此限。
         """
-        for dec_name in func.decorators:
-            dec_func = self.current_scope.get_opt(dec_name)
+        for dec in func.decorators:
+            dec_func = self.current_scope.get_opt(dec.name)
             # 作用域中没有则查解释器内部函数表
-            if dec_func is None and dec_name in self.functions:
-                dec_func = self.functions[dec_name]
+            if dec_func is None and dec.name in self.functions:
+                dec_func = self.functions[dec.name]
             # 可能是原始 FunctionDef（scope 中存储的原始声明）
             if isinstance(dec_func, FunctionDef):
                 dec_func = FunctionValue(dec_func, self.current_scope)
+            if not isinstance(dec_func, FunctionValue):
+                print(f"[警告] 装饰器 '{dec.name}' 未找到或不是函数")
+                continue
+            if dec.is_call:
+                # 带参装饰器: deco(args...) → 真装饰器 → (fn)
+                # 参数在当前作用域求值(提升期即全局作用域)
+                arg_values = [self.evaluate_expression(a) for a in dec.args]
+                dec_func = self._execute_method(dec_func, None, arg_values)
+                if not isinstance(dec_func, FunctionValue):
+                    print(f"[警告] 装饰器 '{dec.name}(...)' 未返回函数")
+                    continue
             if isinstance(dec_func, FunctionValue):
                 # decorator(fn) → 返回包装后的 FunctionValue
                 dec_result = self._execute_method(dec_func, None, [fv])
                 if isinstance(dec_result, FunctionValue):
                     fv = dec_result
             else:
-                print(f"[警告] 装饰器 '{dec_name}' 未找到或不是函数")
+                print(f"[警告] 装饰器 '{dec.name}' 未找到或不是函数")
         return fv
 
     def execute_program(self, program: Program, module_mode: bool = False) -> RuntimeValue:

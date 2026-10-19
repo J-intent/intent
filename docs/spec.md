@@ -155,7 +155,7 @@ def name(params) [: ReturnType] [requires ...] [ensures ...] { body } ;
 - 默认参数：`def f(x: Int, y: Int = 10) { ... }`
 - Lambda：`fn(x) { return x * 2; }` 或 `fn(x) => x * 2` 🔜（箭头体未实现，用块体）
 - 闭包：函数可嵌套定义，携带诞生环境（`_t_clret.intent` 验证）
-- 装饰器：`@deco def f() {...}` 🔜（解析支持，执行路径有限）
+- 装饰器（X1）：`@deco def f() {...}`（裸形态）/ `@deco(args) def f() {...}`（带参工厂，先求值 `deco(args)` 出真装饰器再应用）；应用顺序 = 声明顺序（自上而下），先应用者居内——末位装饰器最外（与 Python 的首位最外相反，测试锁定）；语句级（函数体内）`def` 的装饰器同样生效
 - 生成器：函数体内 `yield expr;`，收集为 List 返回（mini_intent.py:5367）
 - 生成器委派（P1.5）：`yield from expr;`——可迭代对象的元素逐个转发（支持 List/Dict 键）
 
@@ -490,7 +490,7 @@ let text = json.dumps({"a": 1});    // import python.json 后
 | `argparse`（SL1） | parse, get（--key value 对 + 裸 --flag 置真；演示级） |
 | `pathlib`（SL1） | name, stem, suffix, parent, join_path, with_suffix（纯 Intent；不叫 join——避让核心内置） |
 | `memory`（MM1） | mem_live, alloc_total, mem_stats, gc_collect, ref_count（寄生策略：弱引用注册表 + 宿主分代 GC；docs/memory_design.md） |
-| `functools`（X1） | compose(f, g)（右先生效的组合）/ memoize(f)（单参记忆化，无淘汰子集） |
+| `functools`（X1） | compose(f, g)（右先生效的组合）/ memoize(f)（单参记忆化，无淘汰子集）/ lru_cache(f, cap)（真 LRU：命中刷新访问序，满容淘汰最久未访问；cap<1 显式抛 ValueError；Intent 字典无 delete，刷新与淘汰靠重建字典） |
 | `bim/*` | unit(单位换算) / geometry(Vector3D 等) / transform(矩阵) / solid / polygon / pipe / pipe_fittings / pipe_routing(A* 3D 寻路) / **cbwd**(BD4：洞口合并——连通分量+空间哈希预筛，与 CBWD 参考逐例一致) |
 
 字典方法（P3.1）：`d.has_key(k)` / `d.keys()` / `d.values()`；dict 键统一为 Python 标量形态（`DictValue._norm_key`），int/float/str/bool 键均可，`{1: "a"}` 与 `squares[3]` 自然工作。
@@ -580,7 +580,7 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 18 | FFI 仅最小切片：无回调/数组/联合/varargs/头文件解析/`foreign` 语法糖 | I1 剩余部分（20 人日中的未做部分，ROADMAP 维度 8 已注断点） |
 | 19 | `run_source` 对容器返回 RuntimeValue 树（ListValue.value 内为 IntValue 等），非原生类型 | 桥侧已脱壳（tools/revit_bridge.py `_to_native`）；宿主接入时需自行转换 |
 | 20 | Python 桥（I2a）无关键字参数/类实例化/回调 | 最小切片边界（spec §3.16）；完整版随 I2a 剩余部分 |
-| 21 | 装饰器在提升期应用，早于顶层 import — 模块导入的装饰器（`@memoize` from std.functools）找不到；函数体内的 `@deco` 不解析 | X1 已知边界（2026-10-19 实证）；本文件定义的装饰器可用；完整版随「def 即语句执行」改造（X1 断点） |
+| 21 | 装饰器在提升期应用，早于顶层 import/let — 模块导入的装饰器（`@memoize` from std.functools）或引用顶层变量的装饰器参数找不到 | X1 已知边界（2026-10-19 实证）；**带参装饰器 / 零参调用形态 / 语句级（函数体内）装饰器已于 v2.12.0 支持**（语句级执行时机在 import/let 之后，不受此限）；本文件定义的装饰器可用；根治随「def 即语句执行」改造（X1 断点） |
 
 ---
 
@@ -595,4 +595,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.11.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.11.0：X1 装饰器最小切片——@deco + functools 系 + 顶层函数一等值修复；§4.2 functools）*
+*规范版本 v1.12.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.12.0：X1 二批装饰器完整化切片——带参/零参/语句级装饰器 + lru_cache；§3.2 装饰器形态、§4.2 functools、§6 限制 21 更新）*
