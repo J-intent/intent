@@ -4,6 +4,34 @@
 
 ---
 
+## v2.23.0 — P3b Ed25519 包签名 + P4 .intentp 构建分发（2026-10-19）
+
+> 包管理补齐末端两环：发布能立字据（签名），制品能成卷（.intentp）。
+> 签名不依赖 openssl/GPG——纯标准库自持 RFC 8032 最小实现，
+> 用标准向量自证正确性（第一次跑就抓出漏 clamping 的实现偏差）。
+> 版本 2.22.0 → 2.23.0。
+
+**P3b Ed25519 包签名**（tools/intent_sign.py + registry 集成，selftest 含「签名」）
+
+- 新模块 `tools/intent_sign.py`：RFC 8032 Ed25519 最小实现（纯标准库，零外部依赖）——`keygen` 生成 sk.key/pk.pub（base64）、`--selftest` 用 RFC 8032 §7.1 测试向量 1 逐字节自证（公钥/签名/篡改拒绝/清单敏感性四项）
+- 签名对象 = **文件清单摘要**（`relpath:sha256(content)` 排序拼接）——增/删/改任一文件都会改变摘要；与包格式解耦
+- registry 集成：`publish --sign-key` 签名并写入索引（signature/pubkey）；`install` 先验签后落盘，篡改即拒；HTTP 通道同样携带/校验签名（验签失败不接触磁盘）
+- selftest 扩签名链路：keygen → 签名发布 → 验签安装（正例）→ 篡改快照 → 安装必须失败（本地 + HTTP 双路）
+- 踩坑两处：① 漏了 RFC 8032 的私钥标量 clamping，自签自验能过但公钥对不上标准向量——自证正确性的价值；② Windows 文本模式写文件 `\n→\r\n` 会改变清单摘要字节，HTTP 验签必失败——落盘改二进制写
+
+**P4 .intentp 构建分发**（tools/pack.py，selftest 含 round-trip）
+
+- 格式（format_version 1）：zip = `metadata.json`（name/version/files/entry_points/built_at）+ `files/<原结构>`——标准库可拆开看，不造私有二进制
+- `build <pkg-dir>`（校验 [project]/[scripts] 与包内文件存在性）；`inspect`；`install --dest`：解包到 `dest/<name>/` + 按 `[scripts]` 生成 `bin/<cmd>.bat`（Windows）与 `bin/<cmd>`（sh），解释器路径嵌入 `sys.executable`
+- selftest 真跑启动器（subprocess 执行 .bat 断言包程序输出）——round-trip 的终点是「装完能执行」，不是「文件在那儿」
+- 踩坑：`.bat` 必须按系统 ANSI 编码写（cmd.exe 按代码页读脚本，UTF-8 写的含中文用户名路径会乱码成「找不到路径」）；子进程输出按 UTF-8 容错解码（中文 Windows 代码页不一致）
+
+**质量门**：registry selftest 全通（publish/重复拒绝/list/默认最新/旧版/不存在 + 签名: keygen/签名发布/验签安装/篡改检测 + http round-trip）；pack selftest 全通；``--test`` 323/324（无回归）；vm_diff 76/76；spec v1.22.0（§5 工具链、§6 限制 28-29）。
+
+**LangForge**：**P 链关键路径全线打通**（P3a→P3b→P4 三连），进度 71/89（79%），剩余均为旁路轨道（类型/互操作/属性测试/调试）。
+
+---
+
 ## v2.22.0 — Phase 7 首批：A3a async/await + P3a HTTP 注册表 + S4b doc 收口（2026-10-19）
 
 > 协程从语言进入语法：async 即惰性，await 即挂起，run 即蹦床——

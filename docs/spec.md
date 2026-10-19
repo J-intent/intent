@@ -607,6 +607,11 @@ python src/mini_intent.py --coverage file.intent  # E3: 语句覆盖率(执行�
 python src/mini_intent.py --coverage --contracts file.intent  # Q2: 叠加契约覆盖率(requires/ensures 子句级)
 python benchmarks/run_benchmarks.py [filter] [--update]  # Q4: 基准套件(每基准3次取最小; --update 重写基线; 超+20%判回退)
 python tools/venv.py create|install|list|activate  # PK2: 虚拟环境(.venv 隔离 + 全局缓存 + PATH)
+python tools/registry.py publish|list|install [--registry-url URL] [--sign-key KEY]  # P3: 本地/HTTP 注册表 + Ed25519 签名
+python tools/registry.py serve [--port P]   # P3a: HTTP 注册表服务(GET /index.json、GET /pkg/<n>/<v>/<f>、POST /publish)
+python tools/registry.py keygen [--out DIR]  # P3b: 生成 sk.key / pk.pub(base64)
+python tools/intent_sign.py --selftest      # P3b: Ed25519 RFC 8032 向量自检
+python tools/pack.py build|inspect|install  # P4: .intentp 包格式(zip+metadata) + console_scripts 入口(bin/)
 python src/mini_intent.py --version        # 版本
 python src/mini_intent.py -t / -a          # 只看 tokens / AST
 python src/mini_intent.py -r               # REPL
@@ -651,6 +656,8 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 25 | 生成器异常在调用方 `next()/send()/throw()` 处抛出的栈快照为「生成器创建链 + 生成器帧」，不含 pull 点的调用链 | S3 已知边界（2026-10-19）；与 Python「生成器帧单独显示」同向 |
 | 26 | 生成器线程阻塞在无界操作（如 channel 接收）时，`close()` 有界返回（2s），留 daemon 线程 | S3 已知边界（2026-10-19）；不无限等，也不强杀 |
 | 27 | async 生成器（async 函数内 yield）显式拒绝；协程无事件循环/并发调度（`await` 按顺序串行驱动）；`await` 软关键字在「标识符 await 后随表达式」的写法上会被当作 await 表达式 | A3a 已知边界（2026-10-19）；async 生成器与事件循环/IO 多路复用归 A3b 及后续 |
+| 28 | 包签名为自持 Ed25519（RFC 8032 最小参考实现，selftest 用标准向量自证）：工具级，不做侧信道防护；密钥/签名格式为 base64 文本，**不与 minisign 二进制互操作**；签名覆盖「文件清单摘要」（relpath+内容 sha256），不覆盖 zip 时间戳等元数据 | P3b 已知边界（2026-10-19）；对 minisign 格式互操作按需再加适配层 |
+| 29 | `.intentp` 入口点只支持「脚本文件」级（`[scripts] cmd = "x.intent"`），`模块:函数` 级入口未做；`.bat` 启动器按系统 ANSI 编码写（cmd.exe 代码页限制），解释器路径嵌入为安装时的 `sys.executable` | P4 已知边界（2026-10-19）；`:func` 入口与跨机可迁移启动器（路径重定位）留后续 |
 
 ---
 
@@ -665,4 +672,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.21.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.22.0：A3a async/await 协程 + P3a HTTP 注册表 + S4b doc 页收口——§3.2 协程语义（软关键字/惰性/run 蹦床/async 方法/无 return 即 None）、§4.1 内置 164（+run）、§6 限制 27；此前 v2.21.0 S3 生成器完整化）*
+*规范版本 v1.22.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.23.0：P3b Ed25519 包签名 + P4 .intentp 构建分发——§5 CLI 工具链、§6 限制 28-29；此前 v2.22.0 A3a async/await + P3a HTTP 注册表 + S4b）*

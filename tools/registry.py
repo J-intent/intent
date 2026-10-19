@@ -44,6 +44,9 @@ PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_REGISTRY = os.path.join(PROJECT, 'registry')
 DEFAULT_DEST = os.path.join(PROJECT, 'lib')
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import intent_sign  # noqa: E402  P3b: Ed25519 签名（同目录模块，零外部依赖）
+
 NAME_PAT = re.compile(r'^[a-z0-9][a-z0-9-]*$')
 VER_PAT = re.compile(r'^\d+\.\d+\.\d+$')
 
@@ -74,8 +77,9 @@ def _save_registry_index(registry_dir: str, index: dict) -> None:
         json.dump(index, f, ensure_ascii=False, indent=2)
 
 
-def cmd_publish(pkg_dir: str, registry_dir: str) -> int:
-    """发布：校验包 → 快照进注册表 → 更新索引"""
+def cmd_publish(pkg_dir: str, registry_dir: str,
+                sign_key: str = None) -> int:
+    """发布：校验包 → 快照进注册表 → 更新索引（可选 Ed25519 签名）"""
     pkg_dir = os.path.abspath(pkg_dir)
     manifest_path = os.path.join(pkg_dir, 'intent.toml')
     if not os.path.isfile(manifest_path):
@@ -111,14 +115,52 @@ def cmd_publish(pkg_dir: str, registry_dir: str) -> int:
     index = _registry_index(registry_dir)
     entry = index['packages'].setdefault(name, {'versions': {}})
     # files 清单：HTTP install 按清单逐文件下载（本地 install 仍 copytree 整目录）
-    entry['versions'][version] = {
+    version_entry = {
         'path': os.path.relpath(snapshot, registry_dir).replace(os.sep, '/'),
         'files': _snapshot_files(snapshot),
         'published': _now_iso(),
     }
+    # P3b: 签名覆盖「文件清单摘要」——增/删/改任一文件都会改变摘要
+    if sign_key:
+        try:
+            sk = _load_signing_key(sign_key)
+            sig, pk = intent_sign.sign_manifest(
+                _read_snapshot_bytes(snapshot), sk)
+        except Exception as e:
+            print(f"❌ 签名失败: {e}")
+            return 2
+        version_entry['signature'] = sig
+        version_entry['pubkey'] = pk
+    entry['versions'][version] = version_entry
     _save_registry_index(registry_dir, index)
-    print(f"✅ 已发布 {name} v{version} → {os.path.relpath(snapshot, PROJECT)}")
+    signed = "（已签名）" if sign_key else ""
+    print(f"✅ 已发布 {name} v{version} → "
+          f"{os.path.relpath(snapshot, PROJECT)}{signed}")
     return 0
+
+
+def _load_signing_key(path: str) -> bytes:
+    """读私钥文件（base64 文本，由 intent_sign keygen 生成）"""
+    with open(path, 'r', encoding='ascii') as f:
+        return intent_sign.unb64(f.read().strip())
+
+
+def _read_snapshot_bytes(snapshot: str) -> dict:
+    """快照全文件读为 {relpath: bytes}（签名/验签共用的清单来源）"""
+    out = {}
+    for rel in _snapshot_files(snapshot):
+        with open(os.path.join(snapshot, rel), 'rb') as f:
+            out[rel] = f.read()
+    return out
+
+
+def _verify_entry_signature(entry: dict, files: dict) -> bool:
+    """按索引里的 signature/pubkey 验清单；无签名的包视为未签名（True）"""
+    sig = entry.get('signature')
+    pk = entry.get('pubkey')
+    if not sig or not pk:
+        return True
+    return intent_sign.verify_manifest(files, sig, pk)
 
 
 def _snapshot_files(snapshot: str) -> list:
@@ -172,6 +214,13 @@ def cmd_install(name: str, version: str, dest_dir: str,
         print(f"❌ 目标已存在: {os.path.relpath(target, PROJECT)}"
               f"（先删除再装，或换 dest）")
         return 1
+    # P3b: 先验签后安装 — 篡改一字节即拒绝
+    entry = pkg['versions'][version]
+    if entry.get('signature'):
+        if not _verify_entry_signature(entry, _read_snapshot_bytes(src)):
+            print("❌ 签名校验失败: 包内容与发布签名不符（可能被篡改）")
+            return 1
+        print("   🔏 签名校验通过")
     os.makedirs(dest_dir, exist_ok=True)
     shutil.copytree(src, target,
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
@@ -211,7 +260,8 @@ def _validate_package(name: str, version: str, filenames) -> bool:
 
 
 def _store_files(registry_dir: str, name: str, version: str,
-                 files: dict) -> str:
+                 files: dict, signature: str = None,
+                 pubkey: str = None) -> str:
     """把 {relpath: 文本内容} 落成快照并更新索引；版本已存在抛 RuntimeError"""
     snapshot = os.path.join(registry_dir, name, version)
     if os.path.isdir(snapshot):
@@ -221,15 +271,22 @@ def _store_files(registry_dir: str, name: str, version: str,
     for rel, content in files.items():
         dst = os.path.join(snapshot, rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        with open(dst, 'w', encoding='utf-8') as f:
-            f.write(content)
+        # 二进制写: 文本模式的换行翻译会破坏签名清单摘要
+        # (摘要按内容字节算 — Windows 上 \n→\r\n 会让验签必然失败)
+        with open(dst, 'wb') as f:
+            f.write(content.encode('utf-8') if isinstance(content, str)
+                    else content)
     index = _registry_index(registry_dir)
     entry = index['packages'].setdefault(name, {'versions': {}})
-    entry['versions'][version] = {
+    version_entry = {
         'path': f"{name}/{version}",
         'files': sorted(files.keys()),
         'published': _now_iso(),
     }
+    if signature and pubkey:
+        version_entry['signature'] = signature
+        version_entry['pubkey'] = pubkey
+    entry['versions'][version] = version_entry
     _save_registry_index(registry_dir, index)
     return f"{name}/{version}"
 
@@ -311,7 +368,10 @@ def _make_handler(registry_dir: str):
                 self._send_json({'error': '包校验失败'}, 400)
                 return
             try:
-                rel_path = _store_files(registry_dir, name, version, files)
+                rel_path = _store_files(
+                    registry_dir, name, version, files,
+                    signature=payload.get('signature'),
+                    pubkey=payload.get('pubkey'))
             except RuntimeError as e:
                 self._send_json({'error': str(e)}, 409)
                 return
@@ -355,8 +415,9 @@ def _http_get(url: str) -> bytes:
         return resp.read()
 
 
-def cmd_publish_url(pkg_dir: str, registry_url: str) -> int:
-    """发布到 HTTP 注册表：读目录文本文件 → POST /publish"""
+def cmd_publish_url(pkg_dir: str, registry_url: str,
+                    sign_key: str = None) -> int:
+    """发布到 HTTP 注册表：读目录文本文件 → POST /publish（可选签名）"""
     pkg_dir = os.path.abspath(pkg_dir)
     manifest_path = os.path.join(pkg_dir, 'intent.toml')
     if not os.path.isfile(manifest_path):
@@ -373,17 +434,26 @@ def cmd_publish_url(pkg_dir: str, registry_url: str) -> int:
     files = _read_pkg_files(pkg_dir)
     if not _validate_package(name, version, files.keys()):
         return 2
+    payload = {'name': name, 'version': version, 'files': files}
+    if sign_key:
+        try:
+            sk = _load_signing_key(sign_key)
+            sig, pk = intent_sign.sign_manifest(files, sk)
+        except Exception as e:
+            print(f"❌ 签名失败: {e}")
+            return 2
+        payload['signature'] = sig
+        payload['pubkey'] = pk
     try:
-        resp = _http_post_json(registry_url.rstrip('/') + '/publish',
-                               {'name': name, 'version': version,
-                                'files': files})
+        resp = _http_post_json(registry_url.rstrip('/') + '/publish', payload)
     except Exception as e:
         print(f"❌ 发布失败(HTTP): {e}")
         return 1
     if not resp.get('ok'):
         print(f"❌ 服务端拒绝: {resp.get('error')}")
         return 1
-    print(f"✅ 已发布(HTTP) {name} v{version} → {registry_url}")
+    signed = "（已签名）" if sign_key else ""
+    print(f"✅ 已发布(HTTP) {name} v{version} → {registry_url}{signed}")
     return 0
 
 
@@ -416,18 +486,26 @@ def cmd_install_url(name: str, version, dest_dir: str,
         print(f"❌ 目标已存在: {os.path.relpath(target, PROJECT)}"
               f"（先删除再装，或换 dest）")
         return 1
-    os.makedirs(target, exist_ok=True)
     base = registry_url.rstrip('/')
+    # 先全量下载到内存 → 验签 → 再落盘（验签失败的包不接触磁盘）
     try:
+        contents = {}
         for rel in entry.get('files', []):
-            content = _http_get(f"{base}/pkg/{name}/{version}/{rel}")
-            dst = os.path.join(target, rel)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            with open(dst, 'wb') as f:
-                f.write(content)
+            contents[rel] = _http_get(f"{base}/pkg/{name}/{version}/{rel}")
     except Exception as e:
         print(f"❌ 下载失败: {e}")
         return 1
+    if entry.get('signature'):
+        if not _verify_entry_signature(entry, contents):
+            print("❌ 签名校验失败: 包内容与发布签名不符（可能被篡改）")
+            return 1
+        print("   🔏 签名校验通过")
+    os.makedirs(target, exist_ok=True)
+    for rel, content in contents.items():
+        dst = os.path.join(target, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, 'wb') as f:
+            f.write(content)
     print(f"✅ 已安装(HTTP) {name} v{version} → "
           f"{os.path.relpath(target, PROJECT)}"
           f"（{len(entry.get('files', []))} 个文件）")
@@ -493,9 +571,45 @@ def selftest() -> int:
     # 7) HTTP round-trip：serve → publish(HTTP) → index(HTTP) → install(HTTP)
     if not _selftest_http(tmp):
         return 1
+    # 8) 签名链路：keygen → 签名发布 → 验签安装 → 篡改被拒
+    if not _selftest_signature(tmp):
+        return 1
     print("✅ 注册表 selftest 全通（publish/拒绝重复/list/默认最新/指定旧版/"
-          "拒绝不存在 + http round-trip: serve/publish/index/install）")
+          "拒绝不存在 + 签名: keygen/签名发布/验签安装/篡改检测"
+          " + http round-trip: serve/publish/index/install）")
     return 0
+
+
+def _selftest_signature(tmp: str) -> bool:
+    """本地签名链路：密钥对 → 签名发布 → 验签安装 → 篡改后安装必须失败"""
+    reg = os.path.join(tmp, 'sig-registry')
+    sk, _pk = intent_sign.generate_keypair()
+    sk_path = os.path.join(tmp, 'sig-sk.key')
+    with open(sk_path, 'w', encoding='ascii') as f:
+        f.write(intent_sign.b64(sk))
+    pkg_dir = os.path.join(tmp, 'sig-src', 'signed-pkg')
+    os.makedirs(pkg_dir)
+    with open(os.path.join(pkg_dir, 'intent.toml'), 'w',
+              encoding='utf-8') as f:
+        f.write('[project]\nname = "signed-pkg"\nversion = "1.0.0"\n')
+    with open(os.path.join(pkg_dir, 'pkg.intent'), 'w',
+              encoding='utf-8') as f:
+        f.write('def hello() -> String { return "signed"; }\n')
+    if cmd_publish(pkg_dir, reg, sign_key=sk_path) != 0:
+        print("❌ selftest: 签名发布失败")
+        return False
+    if cmd_install('signed-pkg', None, os.path.join(tmp, 'sig-lib'), reg) != 0:
+        print("❌ selftest: 验签安装失败(正例)")
+        return False
+    # 篡改快照一个字节 → 安装必须被签名拒绝
+    tamper = os.path.join(reg, 'signed-pkg', '1.0.0', 'pkg.intent')
+    with open(tamper, 'a', encoding='utf-8') as f:
+        f.write('\n// tampered\n')
+    if cmd_install('signed-pkg', None, os.path.join(tmp, 'sig-lib2'),
+                   reg) == 0:
+        print("❌ selftest: 篡改包未被拒绝")
+        return False
+    return True
 
 
 def _selftest_http(tmp: str) -> bool:
@@ -546,6 +660,33 @@ def _selftest_http(tmp: str) -> bool:
         if cmd_publish_url(pkg_dir, url) == 0:
             print("❌ selftest: HTTP 重复发布未被拒绝")
             return False
+        # 5) 签名包 HTTP round-trip：签名发布 → 验签安装 → 篡改被拒
+        sk, _pk = intent_sign.generate_keypair()
+        sk_path = os.path.join(tmp, 'http-sk.key')
+        with open(sk_path, 'w', encoding='ascii') as f:
+            f.write(intent_sign.b64(sk))
+        spkg = os.path.join(tmp, 'http-src', 'signed-http')
+        os.makedirs(spkg)
+        with open(os.path.join(spkg, 'intent.toml'), 'w',
+                  encoding='utf-8') as f:
+            f.write('[project]\nname = "signed-http"\nversion = "1.0.0"\n')
+        with open(os.path.join(spkg, 'pkg.intent'), 'w',
+                  encoding='utf-8') as f:
+            f.write('def hello() -> String { return "signed-http"; }\n')
+        if cmd_publish_url(spkg, url, sign_key=sk_path) != 0:
+            print("❌ selftest: HTTP 签名发布失败")
+            return False
+        sdest = os.path.join(tmp, 'http-sig-lib')
+        if cmd_install_url('signed-http', None, sdest, url) != 0:
+            print("❌ selftest: HTTP 验签安装失败(正例)")
+            return False
+        tamper = os.path.join(reg, 'signed-http', '1.0.0', 'pkg.intent')
+        with open(tamper, 'a', encoding='utf-8') as f:
+            f.write('\n// tampered\n')
+        if cmd_install_url('signed-http', None,
+                           os.path.join(tmp, 'http-sig-lib2'), url) == 0:
+            print("❌ selftest: HTTP 篡改包未被拒绝")
+            return False
         return True
     finally:
         server.shutdown()
@@ -554,13 +695,14 @@ def _selftest_http(tmp: str) -> bool:
 
 USAGE = """用法:
   python tools/registry.py publish <pkg-dir> [--registry DIR] [--registry-url URL]
-                                                                 发布包(URL 则走 HTTP)
-  python tools/registry.py list [--registry DIR]                列出注册表
+                                        [--sign-key KEY]          发布包(URL 则走 HTTP; KEY 则签名)
+  python tools/registry.py list [--registry DIR]                    列出注册表
   python tools/registry.py install <name> [--version V] [--dest DIR] [--registry DIR] [--registry-url URL]
-                                                                 安装到 dest(默认 lib/; URL 则走 HTTP)
+                                                                    安装到 dest(默认 lib/; URL 则走 HTTP)
   python tools/registry.py serve [--registry DIR] [--host H] [--port P]
-                                                                 启动 HTTP 注册表服务
-  python tools/registry.py --selftest                           临时目录 round-trip 自检(含 HTTP)
+                                                                    启动 HTTP 注册表服务
+  python tools/registry.py keygen [--out DIR]                      生成 Ed25519 密钥对
+  python tools/registry.py --selftest                              临时目录 round-trip 自检(含 HTTP/签名)
 """
 
 
@@ -574,8 +716,13 @@ def main(argv: list) -> int:
     rest = argv[1:]
     registry_dir = DEFAULT_REGISTRY
     registry_url = None
+    sign_key = None
     host, port = '127.0.0.1', 8471
     # 通用选项提取
+    if '--sign-key' in rest:
+        i = rest.index('--sign-key')
+        sign_key = rest[i + 1]
+        del rest[i:i + 2]
     if '--registry-url' in rest:
         i = rest.index('--registry-url')
         registry_url = rest[i + 1]
@@ -594,13 +741,20 @@ def main(argv: list) -> int:
         del rest[i:i + 2]
     if cmd == 'serve':
         return cmd_serve(registry_dir, host, port)
+    if cmd == 'keygen':
+        out = '.'
+        if '--out' in rest:
+            i = rest.index('--out')
+            out = rest[i + 1]
+            del rest[i:i + 2]
+        return intent_sign._keygen(out)
     if cmd == 'publish':
         if len(rest) != 1:
             print(USAGE)
             return 2
         if registry_url:
-            return cmd_publish_url(rest[0], registry_url)
-        return cmd_publish(rest[0], registry_dir)
+            return cmd_publish_url(rest[0], registry_url, sign_key=sign_key)
+        return cmd_publish(rest[0], registry_dir, sign_key=sign_key)
     if cmd == 'list':
         return cmd_list(registry_dir)
     if cmd == 'install':
