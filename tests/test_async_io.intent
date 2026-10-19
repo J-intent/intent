@@ -1,0 +1,84 @@
+// A3b 事件循环 + 并发回归测试
+// 语义：gather 并发驱动多个协程（定时器/线程 future 挂起实现 I/O 重叠），
+//      结果按参数顺序返回；任一协程失败 → 整体抛出（其余协程关门）。
+// 边界（spec §6 限制 39）：单执行权协作调度（非抢占）；async_sleep/async_http_get
+//      只能在 async 函数内调用；事件循环无 socket 多路复用（HTTP 走工作线程）。
+
+async def slow_a() -> String {
+    async_sleep(120);
+    return "a";
+};
+
+async def slow_b() -> String {
+    async_sleep(120);
+    return "b";
+};
+
+async def slow_c() -> String {
+    async_sleep(120);
+    return "c";
+};
+
+async def quick(x: Int) -> Int {
+    return x * 2;
+};
+
+async def outer_with_await() -> Int {
+    let v = await quick(21);
+    return v + 1;
+};
+
+async def boom() -> Int {
+    async_sleep(10);
+    return 1 / 0;
+};
+
+def test_gather_order() {
+    let rs = gather(quick(1), quick(2), quick(3));
+    assert rs[0] == 2 and rs[1] == 4 and rs[2] == 6, "结果按参数顺序返回";
+};
+
+def test_gather_concurrency() {
+    let t0 = now();
+    let rs = gather(slow_a(), slow_b(), slow_c());
+    let ms = (now() - t0) * 1000.0;
+    assert rs[0] == "a" and rs[1] == "b" and rs[2] == "c", "三个协程结果齐全";
+    assert ms < 300, "3×120ms 挂起应重叠(<300ms), 实测 " + str(int(ms)) + "ms";
+    print("并发: gather 3 协程 x120ms 总耗时 " + str(int(ms)) + " ms");
+};
+
+def test_gather_nested_await() {
+    let rs = gather(outer_with_await(), quick(5));
+    assert rs[0] == 43 and rs[1] == 10, "协程内 await 在 gather 下正常";
+};
+
+def test_gather_exception() {
+    let err = expect_error(fn() {
+        return gather(quick(1), boom());
+    }, "ZeroDivisionError");
+    assert err.message != "", "任一协程失败 → gather 整体抛出";
+};
+
+def test_async_sleep_outside_coroutine() {
+    let err = expect_error(fn() {
+        return async_sleep(1);
+    }, "RuntimeError");
+    assert err.type == "RuntimeError", "非协程内调用 async_sleep 显式报错";
+};
+
+def test_gather_rejects_non_coroutine() {
+    let err = expect_error(fn() {
+        return gather(1);
+    }, "TypeError");
+    assert err.type == "TypeError", "gather 只接受协程";
+};
+
+def test_serial_await_still_works() {
+    // 无 gather 时 await 仍是串行驱动（A3a 语义不变）
+    let t0 = now();
+    let a = run(slow_a());
+    let b = run(slow_b());
+    let ms = (now() - t0) * 1000.0;
+    assert a == "a" and b == "b", "run 单独驱动仍可用";
+    assert ms >= 230, "串行 2×120ms 应 >=230ms, 实测 " + str(int(ms)) + "ms";
+};

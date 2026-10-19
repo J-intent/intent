@@ -169,6 +169,7 @@ def name(params) [: ReturnType] [requires ...] [ensures ...] { body } ;
 - 生成器委派（P1.5）：`yield from expr;`——可迭代对象的元素逐个转发（List/Dict 键/生成器源；生成器源 send 值透传）
 - 协程（A3a）：`async def f(...) {...}` + `await expr` + 内置 `run(coro)`——**调用即惰性**，返回 `<coroutine>`（体一行不跑）；`await` 求值出内层协程后挂起当前协程，`run` 以蹦床递归驱动内层、把结果送回避挂起点。`async`/`await` 均为**软关键字**（后随 `def` / 表达式起点时才取得关键字地位，作标识符不受影响）；支持类内 async 方法；async 函数无显式 `return` 时结果为 `None`（对齐 Python）。底层复用 S3 threadlet（协程线程 + 双队列），暂无事件循环与并发调度（A3b）
 - 结构化类型（L2）：`protocol Name { def m(args) -> Ret; ... }` 声明方法名集合（`protocol` 为软关键字）；运行时 `implements(obj, proto)` 沿继承链查方法存在性（能力即身份，不要求声明关系）、`protocol_methods(proto)` 返回方法名清单；静态侧 `--types` 对标注为协议的位置做结构子类型检查（类方法集 ⊇ 协议方法集，继承链算数）
+- 并发（A3b）：`gather(c1, c2, ...)` 并发驱动多个协程（就绪队列 + 定时器堆 + future 轮询的协作式事件循环，单执行权，并发来自挂起）；`async_sleep(ms)` 挂起当前协程；`async_http_get(url[, timeout_ms])` 把阻塞 socket 交给工作线程、协程挂起等 future —— HTTP 并发化的最小路径；`run()` 无事件循环，挂起信号退化为阻塞（A3a 串行语义不变）。任一协程失败 → `gather` 整体抛出并关掉其余协程
 - **契约即类型（L5，皇冠）**：`requires` 子句是函数类型的一部分——`--types` 在调用点对**字面量实参**（含负号）求值 `requires` 的比较子句，违约即报「契约精炼违约」（编译期错误，比运行时 ContractViolation 更早）；`and` 链拆成独立合取项逐条判；支持 `param OP 字面量` / `字面量 OP param` / 双参比较（`a < b`）；故意违约的演示/测试用行内 `// @refine-off` 显式豁免。非字面量实参不猜（显式信任）
 
 **契约**（一等公民，Intent 的身份证）：
@@ -480,13 +481,13 @@ let text = json.dumps({"a": 1});    // import python.json 后
 
 ## 4. 标准库
 
-### 4.1 内置函数（166，`_setup_builtins` mini_intent.py:4305）
+### 4.1 内置函数（178，`_setup_builtins` mini_intent.py:4305）
 
 | 类别 | 函数（签名） |
 |---|---|
 | 输出断言 | `print(...)` `assert(cond, msg)` |
 | 集合 | `len(x)` `keys(d)` `values(d)` `push(l, v)` `pop(l)` `insert(l, i, v)` `remove_at(l, i)` `enumerate(l)` `zip(a, b)` `range(...)` `reversed(x)` `sorted(x)` `any(l)` `all(l)` `contains(x, v)` |
-| 协议（X3） | `next(it)`（迭代器下一元素，耗尽返回 `None`） `repr(x)`（调试表示，实例走 `__repr__`） `run(coro)`（A3a 驱动协程至完成，返回其返回值） `implements(obj, proto)`（L2 结构化符合性，能力即身份） `protocol_methods(proto)`（L2 方法名清单） |
+| 协议（X3） | `next(it)`（迭代器下一元素，耗尽返回 `None`） `repr(x)`（调试表示，实例走 `__repr__`） `run(coro)`（A3a 驱动协程至完成，返回其返回值） `implements(obj, proto)`（L2 结构化符合性，能力即身份） `protocol_methods(proto)`（L2 方法名清单） `gather(...)`（A3b 并发驱动协程） `async_sleep(ms)`（A3b 挂起） `async_http_get(url[, timeout_ms])`（A3b 线程化 HTTP） |
 | 缓存诊断（M2） | `cache_stats()`（`[命中, 未命中]`） `cache_reset()`（清零，微基准/测试的确定性起点） |
 | 反射（X2） | `getattr(obj, name)` `setattr(obj, name, v)` `hasattr(obj, name)` `dir(obj)`（字段+方法含继承链，排序） `callable(x)`（函数/类/FFI/桥/mock/有 `__call__` 的实例） |
 | 类型转换 | `int(x)` `float(x)` `str(x)` `bool(x)` `type_of(x)` `type(x)` |
@@ -620,6 +621,7 @@ python src/mini_intent.py --jit file.intent   # M3b: 热点函数 JIT(数值子�
 python benchmarks/run_benchmarks.py --jit      # M3c: JIT 基准 + CPython 倍率门禁(≥0.5x)
 python tools/intent_py.py --selftest           # I2b: Python 调 Intent（load + round-trip 自检）
 python tools/package_check.py --all            # E6: 官方包三件套检查（契约/测试/README）
+python tools/async_http_check.py               # A3b: 本地慢服务器验证 HTTP 真并发（并发 vs 串行对照）
 python src/mini_intent.py --version        # 版本
 python src/mini_intent.py -t / -a          # 只看 tokens / AST
 python src/mini_intent.py -r               # REPL
@@ -675,6 +677,7 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 | 36 | JIT（M3b）只覆盖数值子集（标量参数/算术/比较/if-while/return/自递归/白名单内置）；契约函数、装饰器、生成器、协程、类、闭包、print 一律走解释器；实参非 Int/Float/None 即 deopt；`--jit` 默认关闭 | M3b 已知边界（2026-10-19）；列表下标/for 循环/内联小函数留 M3 下（LTS） |
 | 37 | 属性测试（Q3）用自持 LCG（显式种子）保证确定性——内置 random 会让 vm_diff 双引擎对照分歧；收缩为线性候选（`shrink_int`），非完整 shrink tree | Q3 已知边界（2026-10-19）；树形收缩与 Hypothesis 全量策略留后续 |
 | 38 | Python 调 Intent（I2b）通过 `load(path)` 暴露顶层函数；支持标量/列表/字典/None 双向转换；类实例/闭包/生成器返回按不透明处理或报错；每次调用不重建解释器状态（模块顶层 let 只执行一次） | I2b 已知边界（2026-10-19）；反向类型映射与异步协程互操作留后续 |
+| 39 | 事件循环（A3b）为单执行权协作调度（非抢占）；无 socket 多路复用（selector/完整 asyncio 未做，HTTP 走工作线程）；无取消/超时传播；`gather` 首错即整体失败（不做部分结果）；`async_sleep`/`async_http_get` 只能在 async 函数内调用 | A3b 已知边界（2026-10-19）；selector 多路复用与取消语义留完整版 |
 
 ---
 
@@ -689,4 +692,4 @@ banner 与 pyreadline 提示只在 TTY 显示（`--fmt > file` 等管道场景�
 
 ---
 
-*规范版本 v1.29.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.30.0：M3b/M3c JIT（1.01x CPython）+ Q3 属性测试 + I2b Python 调 Intent + E6 官方包——§5 工具链、§6 限制 36-38；此前 v2.29.0 L5 契约即类型）*
+*规范版本 v1.30.0 · 2026-10-19 从实现提取 · 与 mini_intent.py 工作区对齐（v2.31.0：A3b 事件循环 + HTTP 并发——§3.2 并发语义、§4.1 内置 178（实测校正：旧文档 166 已漂 9 个）、§5、§6 限制 39；此前 v2.30.0 M3 JIT + Q3/I2b/E6）*

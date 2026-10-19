@@ -4902,10 +4902,14 @@ class GeneratorController:
                 result = interp.execute_function(self.func, self.args,
                                                  gen_mode=True)
             self.final_result = result
+            self.finished = True
             self.out_q.put(('done', result))
         except _GenExitSignal:
+            self.finished = True
             self.out_q.put(('done', None))
         except BaseException as e:
+            # A3b: 异常路径同样置位 — 否则事后 close() 会把驱动线程卡死在 out_q
+            self.finished = True
             self.out_q.put(('error', e))
 
     def do_yield(self, value):
@@ -5493,6 +5497,23 @@ class _JitReject(Exception):
     """函数不在 JIT 子集内（或编译产物运行期拒绝）——标记后永不重试"""
 
 
+class _WaitSignal(RuntimeValue):
+    """A3b: 协程挂起信号 — 定时器（async_sleep）或线程 future（async_http_get）
+
+    协程侧通过 do_yield 交出它；事件循环把它转成「等到某时刻」或
+    「等某线程结束」，到点/完成后用 ('send', 结果) 恢复协程。
+    do_yield 的返回值即恢复值：sleep 为 None，http 为响应体。
+    """
+
+    def __init__(self, seconds: float = None, thread=None, box: dict = None,
+                 kind: str = 'timer'):
+        super().__init__(AnyType(), None)
+        self.kind = kind
+        self.seconds = seconds
+        self.thread = thread
+        self.box = box
+
+
 class Interpreter:
     """解释执行器"""
 
@@ -5639,6 +5660,9 @@ class Interpreter:
             'zip': self._builtin_zip,
             'range': self._builtin_range,
             'run': self._builtin_run,
+            'gather': self._builtin_gather,
+            'async_sleep': self._builtin_async_sleep,
+            'async_http_get': self._builtin_async_http_get,
             'implements': self._builtin_implements,
             'protocol_methods': self._builtin_protocol_methods,
             'abs': self._builtin_abs,
@@ -6055,6 +6079,159 @@ class Interpreter:
             result.append(ListValue(row, AnyType()))
         return ListValue(result, AnyType())
 
+    # ── A3b: 事件循环（定时器 + 线程 future 的协作式并发）──
+
+    def _current_coroutine(self, who: str) -> 'GeneratorController':
+        ctrl = getattr(self, '_active_gen', None)
+        if ctrl is None:
+            raise RuntimeError(
+                f"{who}() 只能在 async 函数内调用(当前不在协程中)")
+        return ctrl
+
+    def _builtin_async_sleep(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """A3b: async_sleep(ms) — 挂起当前协程 ms 毫秒（事件循环定时器）"""
+        if len(args) != 1:
+            raise TypeError("async_sleep() 期望1个参数(毫秒)")
+        ctrl = self._current_coroutine('async_sleep')
+        try:
+            secs = float(args[0].value) / 1000.0
+        except (AttributeError, TypeError, ValueError):
+            raise TypeError("async_sleep() 参数须为数字(毫秒)")
+        ctrl.do_yield(_WaitSignal(seconds=secs, kind='timer'))
+        return NoneValue()
+
+    def _builtin_async_http_get(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """A3b: async_http_get(url[, timeout_ms]) — 线程内阻塞取 HTTP, 协程挂起
+
+        阻塞 socket 交给工作线程（线程内只跑 urllib，不碰解释器状态），
+        协程挂起后事件循环可继续调度其它协程 —— 这就是 http 并发化的路径。
+        """
+        if not 1 <= len(args) <= 2:
+            raise TypeError(
+                "async_http_get() 期望1-2个参数(url[, timeout_ms])")
+        url = getattr(args[0], 'value', None)
+        if not isinstance(url, str):
+            raise TypeError("async_http_get() 第一个参数须为 URL 字符串")
+        timeout = 5.0
+        if len(args) == 2:
+            timeout = float(args[1].value) / 1000.0
+        ctrl = self._current_coroutine('async_http_get')
+        box: dict = {}
+
+        def fetch():
+            try:
+                import urllib.request
+                with urllib.request.urlopen(url, timeout=timeout) as resp:
+                    box['body'] = resp.read().decode('utf-8', 'replace')
+            except Exception as exc:  # 网络错误显式带到协程侧
+                box['error'] = exc
+
+        t = threading.Thread(target=fetch, name="intent-http", daemon=True)
+        t.start()
+        ctrl.do_yield(_WaitSignal(thread=t, box=box, kind='future'))
+        if 'error' in box:
+            raise RuntimeError(f"HTTP 请求失败({url}): {box['error']}")
+        return StringValue(box.get('body', ''))
+
+    def _event_loop(self, roots: list) -> dict:
+        """A3b: 协作式事件循环 — 就绪队列 + 定时器堆 + future 轮询
+
+        单执行权：任一时刻只有一个协程在执行（其余阻塞在自己的队列上），
+        并发来自「挂起」——定时器到点、future 线程结束才恢复。
+        await 建立等待关系（waiters）：内层完成时把结果 send 回外层挂起点。
+        """
+        import heapq
+        from collections import deque
+        ready = deque((c, NoneValue()) for c in roots)
+        timers: list = []   # (deadline, seq, ctrl)
+        futures: list = []  # (thread, box, ctrl)
+        pending = set(roots)
+        results: dict = {}
+        waiters: dict = {}
+        seq = 0
+        try:
+            while pending:
+                if ready:
+                    ctrl, send_value = ready.popleft()
+                    if ctrl not in pending:
+                        continue
+                    v = ctrl.send(send_value) if ctrl.started else ctrl.next()
+                    if v is _GEN_DONE:
+                        res = (ctrl.final_result
+                               if ctrl.final_result is not None else NoneValue())
+                        results[ctrl] = res
+                        pending.discard(ctrl)
+                        parent = waiters.pop(ctrl, None)
+                        if parent is not None and parent in pending:
+                            ready.append((parent, res))
+                    elif isinstance(v, _WaitSignal):
+                        if v.kind == 'timer':
+                            seq += 1
+                            heapq.heappush(
+                                timers,
+                                (time.time() + (v.seconds or 0.0), seq, ctrl))
+                        else:
+                            futures.append((v.thread, v.box, ctrl))
+                    elif isinstance(v, AsyncValue):
+                        waiters[v._ctrl] = ctrl
+                        pending.add(v._ctrl)
+                        ready.append((v._ctrl, NoneValue()))
+                    else:
+                        raise TypeError(
+                            "async 函数只能 await 协程, 交出了 "
+                            f"{getattr(v, 'get_type', lambda: type(v))()}")
+                    continue
+                # 无就绪: 到点的定时器 → 就绪
+                if timers and timers[0][0] <= time.time():
+                    _, _, ctrl = heapq.heappop(timers)
+                    ready.append((ctrl, NoneValue()))
+                    continue
+                # 完成的 future → 就绪(带响应体)
+                if futures:
+                    done = [f for f in futures if not f[0].is_alive()]
+                    if done:
+                        for f in done:
+                            futures.remove(f)
+                        for _thread, box, ctrl in done:
+                            if 'error' in box:
+                                raise RuntimeError(
+                                    f"HTTP 请求失败: {box['error']}")
+                            ready.append(
+                                (ctrl, StringValue(box.get('body', ''))))
+                        continue
+                    time.sleep(0.002)
+                    continue
+                if timers:
+                    delta = timers[0][0] - time.time()
+                    if delta > 0:
+                        time.sleep(min(delta, 0.05))
+                    continue
+                raise RuntimeError(
+                    f"事件循环死锁: {len(pending)} 个协程无法推进")
+        except Exception:
+            for c in list(pending):   # 失败即关门: 不让协程线程悬在队列上
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            raise
+        return results
+
+    def _builtin_gather(self, args: List[RuntimeValue]) -> RuntimeValue:
+        """A3b: gather(c1, c2, ...) — 并发驱动多个协程, 按参数序返回结果列表
+
+        asyncio.gather 等价：全部完成才返回；任一失败即整体抛出（其余协程关门）。
+        """
+        if not args:
+            return ListValue([], AnyType())
+        for a in args:
+            if not isinstance(a, AsyncValue):
+                raise TypeError(
+                    "gather() 只接受协程(async 函数调用的结果), "
+                    f"得到 {a.get_type()}")
+        results = self._event_loop([a._ctrl for a in args])
+        return ListValue([results[a._ctrl] for a in args])
+
     def _builtin_run(self, args: List[RuntimeValue]) -> RuntimeValue:
         """A3a: run(coro) — 驱动协程至完成, 返回 async 函数的返回值
 
@@ -6083,6 +6260,17 @@ class Interpreter:
                 return result if result is not None else NoneValue()
             if isinstance(v, AsyncValue):
                 send_value = self._drive_coroutine(v._ctrl, NoneValue())
+                continue
+            # A3b: 串行驱动下挂起信号退化为阻塞（run 没有事件循环）
+            if isinstance(v, _WaitSignal):
+                if v.kind == 'timer':
+                    time.sleep(v.seconds or 0.0)
+                    send_value = NoneValue()
+                else:
+                    v.thread.join()
+                    if 'error' in v.box:
+                        raise RuntimeError(f"HTTP 请求失败: {v.box['error']}")
+                    send_value = StringValue(v.box.get('body', ''))
                 continue
             raise TypeError(
                 f"async 函数只能 await 协程, 交出了 {getattr(v, 'get_type', lambda: type(v))()}")
