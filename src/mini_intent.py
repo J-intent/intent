@@ -50,7 +50,7 @@ except ImportError:
             print("安装命令: pip install pyreadline3", file=sys.stderr)
 
 # ==================== 常量定义 ====================
-VERSION = "2.21.0"
+VERSION = "2.31.0"
 PHILOSOPHY_SLOGAN = "心学为体,禅道为翼,马哲为用"
 
 # ==================== 哲学翻译器 ====================
