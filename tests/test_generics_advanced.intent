@@ -1,0 +1,50 @@
+// L4 泛型深化回归 — 默认类型参数（运行时校验可观测）
+// 语义: 类型参数未被实参绑定时使用声明的默认值, 否则 Any;
+//      显式绑定优先于默认值。
+// 边界（spec §6 限制 34）：型变标注(协变/逆变)未做；
+//      默认值只接受单个类型名（`T = List<Int>` 未做）；参数化类型别名未做。
+// 递归类型别名（type JSON = Int | String | List<JSON>）由 --types 侧覆盖
+// （tools/typecheck_selftest.py 的递归别名用例）。
+
+// T 只出现在返回标注 → 实参绑定不到 → 走默认值
+def make_label<T = String>(x: Int) -> T {
+    return "label";
+};
+
+def bad_label<T = Int>(x: Int) -> T {
+    return "oops";
+};
+
+// T 出现在形参 → 实参绑定优先, 默认值不生效
+def echo<T = Int>(x: T) -> T {
+    return x;
+};
+
+// 默认值 + 约束共存: T: Comparable, 默认 Int
+def max_like<T: Comparable = Int>(a: T, b: T) -> T {
+    if a > b {
+        return a;
+    };
+    return b;
+};
+
+def test_default_type_param_ok() {
+    assert make_label(1) == "label", "默认 T=String: 返回字符串合法";
+};
+
+def test_default_type_param_violation() {
+    // 默认 T=Int → 返回 "oops" 在运行时校验处违约(显式失败)
+    let err = expect_error(fn() {
+        return bad_label(1);
+    }, "TypeError");
+    assert err.type == "TypeError", "默认类型参数参与运行时校验";
+};
+
+def test_explicit_binding_wins() {
+    assert echo("hi") == "hi", "实参绑定 T=String 覆盖默认 Int";
+    assert echo(42) == 42, "实参绑定 T=Int";
+};
+
+def test_default_with_constraint() {
+    assert max_like(2, 7) == 7, "默认值 + 约束共存: 数值满足 Comparable";
+};

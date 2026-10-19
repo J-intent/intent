@@ -569,6 +569,7 @@ class FunctionDef(ASTNode):
     name: str = ""
     type_params: List[str] = field(default_factory=list)  # 泛型参数如 ['T', 'U']
     type_param_constraints: Dict[str, str] = field(default_factory=dict)  # P1.3b: {'T': 'Comparable'}
+    type_param_defaults: Dict[str, str] = field(default_factory=dict)  # L4: {'T': 'Int'}
     params: List[Tuple[str, str, Any]] = field(default_factory=list)  # (参数名, 类型, 默认值表达式或None)
     return_type: Optional[str] = None
     requires: List['Expression'] = field(default_factory=list)  # 前置条件
@@ -1132,6 +1133,7 @@ class Parser:
         func.name = self.expect(TokenType.IDENTIFIER).value
 
         # 泛型参数: identity<T>(x: T) -> T; 约束(P1.3b): max_of<T: Comparable>
+        # L4: 默认类型参数 — pick<T = Int>(x: T)
         if self.match(TokenType.OPERATOR, '<'):
             self.advance()
             tp_name = self.expect(TokenType.IDENTIFIER).value
@@ -1139,6 +1141,9 @@ class Parser:
             if self.match(TokenType.SYMBOL, ':'):
                 self.advance()
                 func.type_param_constraints[tp_name] = self.expect(TokenType.IDENTIFIER).value
+            if self.match(TokenType.OPERATOR, '='):
+                self.advance()
+                func.type_param_defaults[tp_name] = self.expect(TokenType.IDENTIFIER).value
             while self.match(TokenType.SYMBOL, ','):
                 self.advance()
                 tp_name = self.expect(TokenType.IDENTIFIER).value
@@ -1146,6 +1151,9 @@ class Parser:
                 if self.match(TokenType.SYMBOL, ':'):
                     self.advance()
                     func.type_param_constraints[tp_name] = self.expect(TokenType.IDENTIFIER).value
+                if self.match(TokenType.OPERATOR, '='):
+                    self.advance()
+                    func.type_param_defaults[tp_name] = self.expect(TokenType.IDENTIFIER).value
             self.expect(TokenType.OPERATOR, '>')
 
         # 参数列表
@@ -9215,10 +9223,11 @@ class Interpreter:
                 param_name, decl_type = param_tuple[0], param_tuple[1]
                 if decl_type:
                     self._unify_types(decl_type, arg_value.get_type(), type_bindings)
-            # 未绑定类型参数的 fallback
+            # 未绑定类型参数的 fallback（L4: 声明了默认值则用默认, 否则 Any）
+            tp_defaults = getattr(func_def, 'type_param_defaults', {})
             for tp in type_params:
                 if tp not in type_bindings:
-                    type_bindings[tp] = "Any"
+                    type_bindings[tp] = tp_defaults.get(tp, "Any")
             # 泛型约束检查(P1.3b): 约束违反走契约错误通道 —
             # 「类型参数的要求」与 requires 同性质: 不满足即拒之门外
             constraints = getattr(func_def, 'type_param_constraints', {})

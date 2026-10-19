@@ -78,6 +78,13 @@ CASES = [
      'class Blob {\n def paint() -> String { return "b"; }\n}\n'
      'def render(d: Drawable) -> String { return d.draw(); }\n'
      'def main() { let r = render(Blob()); return 0; }', 1),
+    # ---- L4 递归类型别名 ----
+    ("递归别名: 成员类型通过",
+     'type JSON = Int | String | List<JSON>;\n'
+     'def main() { let a: JSON = 1; let b: JSON = "s"; let c: JSON = [1, 2]; return 0; }', 0),
+    ("递归别名: 成员外报错",
+     'type JSON = Int | String | List<JSON>;\n'
+     'def main() { let d: JSON = true; return 0; }', 1),
 ]
 
 
